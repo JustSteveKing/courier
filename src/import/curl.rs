@@ -198,6 +198,8 @@ impl Parsed {
             headers: self.headers,
             body,
             order: None,
+            messages: Vec::new(),
+            graphql: None,
         })
     }
 }

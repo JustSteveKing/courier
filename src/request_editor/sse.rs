@@ -93,7 +93,7 @@ impl RequestEditor {
             log.record(seq).map(|r| http::pretty_body(&r.event.data))
         });
         if let Some(data) = data {
-            self.sse_detail.update(cx, |s, cx| s.set_value(data, window, cx));
+            self.stream_detail.update(cx, |s, cx| s.set_value(data, window, cx));
         }
         cx.notify();
     }
@@ -125,7 +125,7 @@ impl RequestEditor {
                 theme.danger,
             ),
         };
-        let filter = self.sse_filter.read(cx).value().to_string();
+        let filter = self.stream_filter.read(cx).value().to_string();
 
         let mut rows = v_flex()
             .id("sse-events")
@@ -216,10 +216,10 @@ impl RequestEditor {
                         )
                     }),
             )
-            .child(text_input(&self.sse_filter).small())
+            .child(text_input(&self.stream_filter).small())
             .child(rows)
             .child(if log.selected.is_some() {
-                readonly_editor(&self.sse_detail).h(px(180.)).into_any_element()
+                readonly_editor(&self.stream_detail).h(px(180.)).into_any_element()
             } else {
                 div()
                     .h(px(40.))

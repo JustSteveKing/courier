@@ -1133,8 +1133,8 @@ impl Workspace {
                                     .flex_none()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(method_color(&request.method, &theme))
-                                    .child(short_method(&request.method)),
+                                    .text_color(method_color(&request_label(request), &theme))
+                                    .child(short_method(&request_label(request))),
                             )
                             .child(div().min_w_0().truncate().child(request.name.clone()))
                             .on_click(
@@ -1279,6 +1279,17 @@ fn chevron(collapsed: bool) -> Icon {
     .xsmall()
 }
 
+/// The sidebar label: the HTTP method, or WS / GQL for WebSocket and GraphQL requests.
+fn request_label(request: &RequestFile) -> String {
+    if request.graphql.is_some() {
+        "GQL".into()
+    } else if crate::model::is_websocket_url(&request.url) {
+        "WS".into()
+    } else {
+        request.method.clone()
+    }
+}
+
 fn short_method(method: &str) -> String {
     match method.to_ascii_uppercase().as_str() {
         "DELETE" => "DEL".into(),
@@ -1289,6 +1300,7 @@ fn short_method(method: &str) -> String {
 
 fn method_color(method: &str, theme: &gpui_kit::component::theme::Theme) -> Hsla {
     match method.to_ascii_uppercase().as_str() {
+        "WS" | "GQL" => theme.magenta,
         "GET" => theme.success,
         "POST" => theme.warning,
         "PUT" | "PATCH" => theme.info,
@@ -1964,7 +1976,7 @@ mod tests {
         .unwrap();
         cx.update(|cx| {
             assert!(
-                editor.read(cx).sse_detail_text(cx).contains("\"usd\": 10"),
+                editor.read(cx).stream_detail_text(cx).contains("\"usd\": 10"),
                 "detail shows the data"
             )
         });
@@ -1988,6 +2000,117 @@ mod tests {
                 "streams aren't stored as responses"
             )
         });
+    }
+
+    #[gpui_kit::test]
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback signature
+    async fn websockets_connect_send_receive_and_disconnect(cx: &mut TestAppContext) {
+        use tokio_tungstenite::tungstenite::{Message, accept_hdr};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // An echo server that also reports the handshake's Authorization header.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (auth_tx, auth_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = accept_hdr(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    let auth = request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    auth_tx.send(auth.to_string()).unwrap();
+                    Ok(response)
+                },
+            )
+            .unwrap();
+            loop {
+                match socket.read() {
+                    Ok(Message::Text(text)) => socket
+                        .send(Message::Text(format!("echo: {}", text.as_str()).into()))
+                        .unwrap(),
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("ws://127.0.0.1:{port}/live");
+        request.headers = crate::model::headers_from_text("Authorization: Bearer abc");
+        request.body = Some(crate::model::Body {
+            kind: crate::model::BodyKind::Json,
+            content: "{\"hello\": \"{{base_url}}\"}".into(),
+        });
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let wait_until = |cx: &mut TestAppContext, done: &dyn Fn(&RequestEditor) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if cx.update(|cx| done(editor.read(cx))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("timed out waiting");
+        };
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx); // Connect
+        })
+        .unwrap();
+        wait_until(cx, &|e| e.ws_summary().is_some_and(|(_, connected, _)| connected));
+        assert_eq!(auth_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "Bearer abc");
+
+        // Send the composer's message; variables resolve before it goes out.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("ws-send-message", cx);
+        })
+        .unwrap();
+        wait_until(cx, &|e| e.ws_summary().is_some_and(|(count, _, _)| count == 2));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("ws-message", 1usize), cx); // the echo, newest first
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let detail = editor.read(cx).stream_detail_text(cx);
+            assert!(
+                detail.contains("echo: {\"hello\": \"https://httpbin.org\"}"),
+                "{detail}"
+            );
+        });
+
+        // Save the message as a template; it lands in the request file.
+        cx.update(|cx| editor.update(cx, |editor, cx| editor.add_template_for_test("Hello", cx)));
+        cx.run_until_parked();
+        let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
+        assert_eq!(saved.messages.len(), 1);
+        assert_eq!(saved.messages[0].name, "Hello");
+
+        // Disconnect closes gracefully and records the close.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("send", cx); // Disconnect
+        })
+        .unwrap();
+        wait_until(cx, &|e| {
+            e.ws_summary().is_some_and(|(_, connected, ended)| !connected && ended)
+        });
+        cx.update(|cx| assert!(!editor.read(cx).is_sending()));
     }
 
     #[gpui_kit::test]

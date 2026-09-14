@@ -1,6 +1,7 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
 mod sse;
+mod ws;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -72,6 +73,8 @@ struct ResponseState {
     live: Option<Live>,
     /// The Server-Sent Events log, when the last response was an event stream.
     sse: Option<sse::SseLog>,
+    /// The message timeline of a WebSocket request.
+    ws: Option<ws::WsLog>,
 }
 
 /// Status code, reason phrase and headers of a response.
@@ -90,6 +93,10 @@ struct Live {
     last_repaint: Instant,
     /// Reconnecting to an event stream: keep the existing log and send `Last-Event-ID`.
     resume: bool,
+    websocket: bool,
+    /// Resolved variables (including secret values), for messages sent on a WebSocket. Kept
+    /// in memory only while the connection is open.
+    variables: Variables,
 }
 
 impl Live {
@@ -105,6 +112,8 @@ impl Live {
             truncated: false,
             last_repaint: now,
             resume,
+            websocket: false,
+            variables: Variables::new(),
         }
     }
 
@@ -180,8 +189,8 @@ pub struct RequestEditor {
     response_tab: usize,
     response_body: Entity<EditorState>,
     response_headers: Entity<EditorState>,
-    sse_filter: Entity<InputState>,
-    sse_detail: Entity<EditorState>,
+    stream_filter: Entity<InputState>,
+    stream_detail: Entity<EditorState>,
     responses: HashMap<PathBuf, ResponseState>,
     response_cache: ResponseCache,
     next_send_id: u64,
@@ -203,15 +212,15 @@ impl RequestEditor {
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let response_body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
-        let sse_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.sse_filter_placeholder").to_string()));
-        cx.subscribe(&sse_filter, |_, _, event: &InputEvent, cx| {
+        let stream_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.stream_filter_placeholder").to_string()));
+        cx.subscribe(&stream_filter, |_, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 cx.notify();
             }
         })
         .detach();
-        let sse_detail = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let stream_detail = cx.new(|cx| EditorState::new(window, cx).language("json"));
 
         cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
@@ -254,8 +263,8 @@ impl RequestEditor {
             response_tab: 0,
             response_body,
             response_headers,
-            sse_filter,
-            sse_detail,
+            stream_filter,
+            stream_detail,
             responses: HashMap::new(),
             response_cache,
             next_send_id: 0,
@@ -282,8 +291,8 @@ impl RequestEditor {
         self.name.update(cx, |s, cx| {
             s.set_placeholder(t!("request.name_placeholder").to_string(), window, cx)
         });
-        self.sse_filter.update(cx, |s, cx| {
-            s.set_placeholder(t!("request.sse_filter_placeholder").to_string(), window, cx)
+        self.stream_filter.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.stream_filter_placeholder").to_string(), window, cx)
         });
         cx.notify();
     }
@@ -306,9 +315,22 @@ impl RequestEditor {
             .map(|log| (log.total, log.ended.is_some()))
     }
 
+    /// Messages, whether connected, and whether the connection has ended.
     #[cfg(test)]
-    pub fn sse_detail_text(&self, cx: &App) -> String {
-        self.sse_detail.read(cx).value().to_string()
+    pub fn ws_summary(&self) -> Option<(usize, bool, bool)> {
+        self.state()
+            .and_then(|s| s.ws.as_ref())
+            .map(|log| (log.total, log.connected, log.ended.is_some()))
+    }
+
+    #[cfg(test)]
+    pub fn add_template_for_test(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.add_template(name.to_string(), cx);
+    }
+
+    #[cfg(test)]
+    pub fn stream_detail_text(&self, cx: &App) -> String {
+        self.stream_detail.read(cx).value().to_string()
     }
 
     #[cfg(test)]
@@ -456,6 +478,8 @@ impl RequestEditor {
             headers,
             body,
             order: saved.order,
+            messages: saved.messages,
+            graphql: saved.graphql,
         }
     }
 
@@ -505,6 +529,7 @@ impl RequestEditor {
             return;
         };
         let id = self.next_send_id;
+        let websocket = self.is_websocket(cx);
         let state = self.responses.entry(path.clone()).or_default();
         if state.live.is_some() {
             return;
@@ -515,9 +540,19 @@ impl RequestEditor {
             .as_ref()
             .filter(|_| resume)
             .and_then(|log| log.last_event_id.clone());
-        state.live = Some(Live::new(id, resume));
+        let mut live = Live::new(id, resume);
+        live.websocket = websocket;
+        state.live = Some(live);
+        if websocket {
+            state.ws = Some(ws::WsLog::new());
+            state.sse = None;
+        }
         state.missing_variables.clear();
-        let file = self.current(cx);
+        let mut file = self.current(cx);
+        if websocket {
+            // The composer's text is sent as messages, not with the handshake.
+            file.body = None;
+        }
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
         let store = self.secret_store.clone();
@@ -536,12 +571,12 @@ impl RequestEditor {
                             })?;
                             variables.extend(found);
                         }
-                        Ok::<_, String>(Request::resolve(&file, &variables))
+                        Ok::<_, String>((Request::resolve(&file, &variables), variables))
                     })
                     .await;
             let events = this.update(cx, |this, cx| {
                 let state = this.responses.entry(path.clone()).or_default();
-                let (request, missing) = match resolved {
+                let ((request, missing), variables) = match resolved {
                     Ok(resolved) => resolved,
                     Err(message) => {
                         if state.live(id).is_some() {
@@ -553,7 +588,12 @@ impl RequestEditor {
                 };
                 state.missing_variables = missing;
                 let live = state.live(id)?; // cancelled while resolving
-                let (handle, events) = transport::start_http(request, timeout, last_event_id);
+                let (handle, events) = if live.websocket {
+                    live.variables = variables;
+                    transport::start_websocket(request, timeout)
+                } else {
+                    transport::start_http(request, timeout, last_event_id)
+                };
                 live.handle = Some(handle);
                 Some(events)
             });
@@ -610,7 +650,12 @@ impl RequestEditor {
                     .map(|(n, v)| format!("{n}: {v}"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if event_stream {
+                if live.websocket {
+                    if let Some(log) = &mut state.ws {
+                        log.status = status_line;
+                        log.connected = true;
+                    }
+                } else if event_stream {
                     match &mut state.sse {
                         Some(log) if live.resume => log.ended = None,
                         _ => state.sse = Some(sse::SseLog::new(status_line)),
@@ -642,8 +687,22 @@ impl RequestEditor {
                 }
                 None
             }
-            transport::Event::Ws(_) => None,
+            transport::Event::Ws(message) => {
+                if let Some(log) = &mut state.ws {
+                    log.push(message);
+                }
+                None
+            }
             transport::Event::Done { elapsed, bytes } => {
+                if live.websocket
+                    && let Some(log) = &mut state.ws
+                {
+                    log.connected = false;
+                    log.ended = Some(sse::Ending::Closed);
+                    state.live = None;
+                    cx.notify();
+                    return false;
+                }
                 if let Some(log) = &mut state.sse {
                     log.ended = Some(sse::Ending::Closed);
                     state.live = None;
@@ -665,6 +724,15 @@ impl RequestEditor {
                 })
             }
             transport::Event::Failed(message) => {
+                if live.websocket
+                    && let Some(log) = &mut state.ws
+                {
+                    log.connected = false;
+                    log.ended = Some(sse::Ending::Failed(message));
+                    state.live = None;
+                    cx.notify();
+                    return false;
+                }
                 if live.head.is_some()
                     && let Some(log) = &mut state.sse
                 {
@@ -701,6 +769,21 @@ impl RequestEditor {
     /// event stream keeps its log so it can be reconnected.
     fn cancel(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.state_mut() {
+            // An open WebSocket closes gracefully; the timeline records the close.
+            if let Some(live) = &state.live
+                && live.websocket
+                && state.ws.as_ref().is_some_and(|log| log.connected)
+                && live
+                    .handle
+                    .as_ref()
+                    .is_some_and(|h| h.send(transport::WsPayload::Close(String::new())))
+            {
+                return;
+            }
+            if let Some(log) = state.ws.as_mut().filter(|log| log.ended.is_none()) {
+                log.connected = false;
+                log.ended = Some(sse::Ending::Stopped);
+            }
             if state.live.take().is_some()
                 && let Some(log) = &mut state.sse
                 && log.ended.is_none()
@@ -862,13 +945,17 @@ impl Render for RequestEditor {
             _ => t!("request.headers_tab").to_string(),
         };
         let sending = self.state().is_some_and(|s| s.live.is_some());
+        let websocket = self.is_websocket(cx);
         let sse_log = self.state().and_then(|s| s.sse.as_ref());
-        let body_tab_label = match sse_log {
-            Some(log) => t!("request.sse_events_tab", count = log.total).to_string(),
-            None => t!("request.body").to_string(),
+        let ws_log = self.state().and_then(|s| s.ws.as_ref()).filter(|_| websocket);
+        let body_tab_label = match (ws_log, sse_log) {
+            (Some(log), _) => t!("request.ws_messages_tab", count = log.total).to_string(),
+            (None, Some(log)) => t!("request.sse_events_tab", count = log.total).to_string(),
+            (None, None) => t!("request.body").to_string(),
         };
-        let response_view = match sse_log {
-            Some(log) if response_tab == 0 => self.render_sse(log, sending, cx),
+        let response_view = match (ws_log, sse_log) {
+            (Some(log), _) if response_tab == 0 => self.render_ws(log, cx),
+            (None, Some(log)) if response_tab == 0 => self.render_sse(log, sending, cx),
             _ => readonly_editor(if response_tab == 0 {
                 &self.response_body
             } else {
@@ -883,7 +970,13 @@ impl Render for RequestEditor {
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &SaveRequest, _, cx| this.save(cx)))
-            .on_action(cx.listener(|this, _: &SendRequest, window, cx| this.send(window, cx)))
+            .on_action(cx.listener(|this, _: &SendRequest, window, cx| {
+                if this.ws_connected() {
+                    this.send_ws_message(cx)
+                } else {
+                    this.send(window, cx)
+                }
+            }))
             .size_full()
             .p_3()
             .gap_3()
@@ -905,18 +998,34 @@ impl Render for RequestEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w_32().child(Select::new(&self.method)))
+                    .when(!websocket, |row| {
+                        row.child(div().w_32().child(Select::new(&self.method)))
+                    })
                     .child(div().flex_1().child(text_input(&self.url)))
                     .child(
                         Button::new("send")
                             .when(!sending, |button| {
                                 button
                                     .primary()
-                                    .label(t!("request.send").to_string())
+                                    .label(
+                                        if websocket {
+                                            t!("request.ws_connect")
+                                        } else {
+                                            t!("request.send")
+                                        }
+                                        .to_string(),
+                                    )
                                     .tooltip(t!("request.send_shortcut").to_string())
                             })
                             .when(sending, |button| {
-                                button.danger().label(t!("request.cancel").to_string())
+                                button.danger().label(
+                                    if websocket {
+                                        t!("request.ws_disconnect")
+                                    } else {
+                                        t!("request.cancel")
+                                    }
+                                    .to_string(),
+                                )
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if sending {
@@ -941,8 +1050,16 @@ impl Render for RequestEditor {
                             .child(label(t!("request.headers_label").to_string()))
                             .child(code_editor(&self.headers).h_32())
                             .children(self.render_credential_warning(cx))
-                            .child(label(t!("request.body").to_string()))
-                            .child(code_editor(&self.body).flex_1().min_h_0()),
+                            .child(label(
+                                if websocket {
+                                    t!("request.ws_message")
+                                } else {
+                                    t!("request.body")
+                                }
+                                .to_string(),
+                            ))
+                            .child(code_editor(&self.body).flex_1().min_h_0())
+                            .when(websocket, |column| column.child(self.render_composer_actions(cx))),
                     )
                     .child(
                         v_flex()
@@ -950,20 +1067,23 @@ impl Render for RequestEditor {
                             .min_w_0()
                             .gap_1()
                             .child(
-                                h_flex().gap_2().child(self.render_status(sse_log.is_some(), cx)).child(
-                                    div().flex_none().child(
-                                        TabBar::new("response-tabs")
-                                            .segmented()
-                                            .small()
-                                            .selected_index(response_tab)
-                                            .child(Tab::new().label(body_tab_label))
-                                            .child(Tab::new().label(header_count))
-                                            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                                this.response_tab = *index;
-                                                cx.notify();
-                                            })),
+                                h_flex()
+                                    .gap_2()
+                                    .child(self.render_status(sse_log.is_some() || ws_log.is_some(), cx))
+                                    .child(
+                                        div().flex_none().child(
+                                            TabBar::new("response-tabs")
+                                                .segmented()
+                                                .small()
+                                                .selected_index(response_tab)
+                                                .child(Tab::new().label(body_tab_label))
+                                                .child(Tab::new().label(header_count))
+                                                .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                                    this.response_tab = *index;
+                                                    cx.notify();
+                                                })),
+                                        ),
                                     ),
-                                ),
                             )
                             .child(response_view),
                     ),

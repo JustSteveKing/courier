@@ -446,13 +446,98 @@ request.sse_resume_tooltip:
   es: "Reanudar con Last-Event-ID %{id}"
   de: "Mit Last-Event-ID %{id} fortsetzen"
   fr: "Reprendre avec Last-Event-ID %{id}"
-request.sse_filter_placeholder:
-  en: Filter by event type or data
-  es: Filtrar por tipo de evento o datos
-  de: Nach Event-Typ oder Daten filtern
-  fr: Filtrer par type d'événement ou données
+request.stream_filter_placeholder:
+  en: Filter by type or content
+  es: Filtrar por tipo o contenido
+  de: Nach Typ oder Inhalt filtern
+  fr: Filtrer par type ou contenu
 request.sse_select_hint:
   en: Select an event to see its data
   es: Selecciona un evento para ver sus datos
   de: Wähle ein Event aus, um seine Daten zu sehen
   fr: Sélectionnez un événement pour voir ses données
+request.ws_connect:
+  en: Connect
+  es: Conectar
+  de: Verbinden
+  fr: Connecter
+request.ws_disconnect:
+  en: Disconnect
+  es: Desconectar
+  de: Trennen
+  fr: Déconnecter
+request.ws_message:
+  en: Message
+  es: Mensaje
+  de: Nachricht
+  fr: Message
+request.ws_messages_tab:
+  en: "Messages (%{count})"
+  es: "Mensajes (%{count})"
+  de: "Nachrichten (%{count})"
+  fr: "Messages (%{count})"
+request.ws_send_message:
+  en: Send message
+  es: Enviar mensaje
+  de: Nachricht senden
+  fr: Envoyer le message
+request.ws_templates:
+  en: "Templates (%{count})"
+  es: "Plantillas (%{count})"
+  de: "Vorlagen (%{count})"
+  fr: "Modèles (%{count})"
+request.ws_save_template:
+  en: Save as template
+  es: Guardar como plantilla
+  de: Als Vorlage speichern
+  fr: Enregistrer comme modèle
+request.ws_template_name:
+  en: Template name
+  es: Nombre de la plantilla
+  de: Name der Vorlage
+  fr: Nom du modèle
+request.ws_save:
+  en: Save
+  es: Guardar
+  de: Speichern
+  fr: Enregistrer
+request.ws_connecting:
+  en: Connecting…
+  es: Conectando…
+  de: Verbinde…
+  fr: Connexion…
+request.ws_connected:
+  en: "%{status}  ·  connected  ·  %{count} messages  ·  %{elapsed}"
+  es: "%{status}  ·  conectado  ·  %{count} mensajes  ·  %{elapsed}"
+  de: "%{status}  ·  verbunden  ·  %{count} Nachrichten  ·  %{elapsed}"
+  fr: "%{status}  ·  connecté  ·  %{count} messages  ·  %{elapsed}"
+request.ws_disconnected:
+  en: "Disconnected  ·  %{count} messages"
+  es: "Desconectado  ·  %{count} mensajes"
+  de: "Getrennt  ·  %{count} Nachrichten"
+  fr: "Déconnecté  ·  %{count} messages"
+request.ws_failed:
+  en: "Connection failed: %{error}  ·  %{count} messages"
+  es: "Error de conexión: %{error}  ·  %{count} mensajes"
+  de: "Verbindung fehlgeschlagen: %{error}  ·  %{count} Nachrichten"
+  fr: "Échec de la connexion : %{error}  ·  %{count} messages"
+request.ws_select_hint:
+  en: Select a message to see it in full
+  es: Selecciona un mensaje para verlo completo
+  de: Wähle eine Nachricht aus, um sie vollständig zu sehen
+  fr: Sélectionnez un message pour le voir en entier
+request.ws_binary:
+  en: "Binary message, %{size}"
+  es: "Mensaje binario, %{size}"
+  de: "Binärnachricht, %{size}"
+  fr: "Message binaire, %{size}"
+request.ws_close:
+  en: Connection closed
+  es: Conexión cerrada
+  de: Verbindung geschlossen
+  fr: Connexion fermée
+request.ws_close_reason:
+  en: "Connection closed: %{reason}"
+  es: "Conexión cerrada: %{reason}"
+  de: "Verbindung geschlossen: %{reason}"
+  fr: "Connexion fermée : %{reason}"

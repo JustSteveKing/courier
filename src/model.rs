@@ -103,6 +103,12 @@ pub struct RequestFile {
     /// Sort position within its folder; requests without one sort after, by file name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
+    /// Saved messages for a WebSocket request (`ws://` or `wss://` URL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<MessageTemplate>,
+    /// Present for a GraphQL request; the body is built from it when sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphql: Option<Graphql>,
 }
 
 impl RequestFile {
@@ -114,8 +120,32 @@ impl RequestFile {
             headers: Vec::new(),
             body: None,
             order: None,
+            messages: Vec::new(),
+            graphql: None,
         }
     }
+}
+
+/// Whether a (resolved) URL opens a WebSocket rather than an HTTP request.
+pub fn is_websocket_url(url: &str) -> bool {
+    let url = url.trim_start().to_ascii_lowercase();
+    url.starts_with("ws://") || url.starts_with("wss://")
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MessageTemplate {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Graphql {
+    pub query: String,
+    /// JSON object text; may contain `{{variables}}`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variables: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -330,6 +360,11 @@ mod tests {
                 content: "{\n  \"name\": \"Ada\"\n}".into(),
             }),
             order: Some(2),
+            messages: vec![MessageTemplate {
+                name: "Subscribe".into(),
+                content: "{\"op\": \"sub\"}".into(),
+            }],
+            graphql: None,
         };
         let yaml = serde_norway::to_string(&request).unwrap();
         assert!(!yaml.contains("enabled: true"), "enabled headers stay terse:\n{yaml}");
