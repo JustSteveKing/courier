@@ -411,3 +411,48 @@ request.connection_closed:
   es: La conexión se cerró antes de terminar la respuesta
   de: Die Verbindung wurde geschlossen, bevor die Antwort vollständig war
   fr: La connexion s'est fermée avant la fin de la réponse
+request.sse_events_tab:
+  en: "Events (%{count})"
+  es: "Eventos (%{count})"
+  de: "Events (%{count})"
+  fr: "Événements (%{count})"
+request.sse_streaming:
+  en: "%{status}  ·  streaming  ·  %{count} events  ·  %{elapsed}"
+  es: "%{status}  ·  transmitiendo  ·  %{count} eventos  ·  %{elapsed}"
+  de: "%{status}  ·  Stream läuft  ·  %{count} Events  ·  %{elapsed}"
+  fr: "%{status}  ·  en cours  ·  %{count} événements  ·  %{elapsed}"
+request.sse_closed:
+  en: "Stream closed by the server  ·  %{count} events"
+  es: "El servidor cerró la transmisión  ·  %{count} eventos"
+  de: "Stream vom Server beendet  ·  %{count} Events"
+  fr: "Flux fermé par le serveur  ·  %{count} événements"
+request.sse_stopped:
+  en: "Stopped  ·  %{count} events"
+  es: "Detenido  ·  %{count} eventos"
+  de: "Gestoppt  ·  %{count} Events"
+  fr: "Arrêté  ·  %{count} événements"
+request.sse_failed:
+  en: "Stream failed: %{error}  ·  %{count} events"
+  es: "Error en la transmisión: %{error}  ·  %{count} eventos"
+  de: "Stream fehlgeschlagen: %{error}  ·  %{count} Events"
+  fr: "Échec du flux : %{error}  ·  %{count} événements"
+request.sse_reconnect:
+  en: Reconnect
+  es: Reconectar
+  de: Neu verbinden
+  fr: Reconnecter
+request.sse_resume_tooltip:
+  en: "Resume with Last-Event-ID %{id}"
+  es: "Reanudar con Last-Event-ID %{id}"
+  de: "Mit Last-Event-ID %{id} fortsetzen"
+  fr: "Reprendre avec Last-Event-ID %{id}"
+request.sse_filter_placeholder:
+  en: Filter by event type or data
+  es: Filtrar por tipo de evento o datos
+  de: Nach Event-Typ oder Daten filtern
+  fr: Filtrer par type d'événement ou données
+request.sse_select_hint:
+  en: Select an event to see its data
+  es: Selecciona un evento para ver sus datos
+  de: Wähle ein Event aus, um seine Daten zu sehen
+  fr: Sélectionnez un événement pour voir ses données

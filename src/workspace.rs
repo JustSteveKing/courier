@@ -1888,6 +1888,109 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn event_streams_show_live_events_and_reconnect(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // Two connections: the first sends two events and closes; the reconnect must carry
+        // Last-Event-ID and gets one more event.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (resumed_tx, resumed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            for connection in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap();
+                    head.extend_from_slice(&buf[..n]);
+                }
+                let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+                if connection == 0 {
+                    stream
+                        .write_all(
+                            b"id: 1\nevent: price\ndata: {\"usd\": 10}\n\nid: 2\nevent: price\ndata: {\"usd\": 11}\n\n",
+                        )
+                        .unwrap();
+                } else {
+                    resumed_tx.send(head.contains("last-event-id: 2")).unwrap();
+                    stream
+                        .write_all(b"id: 3\nevent: price\ndata: {\"usd\": 12}\n\n")
+                        .unwrap();
+                }
+            }
+        });
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/prices");
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        let wait_until = |cx: &mut TestAppContext, done: &dyn Fn(&RequestEditor) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if cx.update(|cx| done(editor.read(cx))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("timed out waiting");
+        };
+        wait_until(cx, &|e| {
+            e.sse_summary().is_some_and(|(count, ended)| count == 2 && ended)
+        });
+
+        // Selecting an event shows its data, pretty-printed.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("sse-event", 0usize), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(
+                editor.read(cx).sse_detail_text(cx).contains("\"usd\": 10"),
+                "detail shows the data"
+            )
+        });
+
+        // Reconnect resumes with Last-Event-ID and keeps earlier events.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("sse-reconnect", cx);
+        })
+        .unwrap();
+        wait_until(cx, &|e| {
+            e.sse_summary().is_some_and(|(count, ended)| count == 3 && ended)
+        });
+        assert!(
+            resumed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "reconnect sent Last-Event-ID: 2"
+        );
+        cx.update(|cx| {
+            assert!(
+                editor.read(cx).shown_response().is_none(),
+                "streams aren't stored as responses"
+            )
+        });
+    }
+
+    #[gpui_kit::test]
     async fn secrets_never_reach_collection_files(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = setup(cx, tmp.path());

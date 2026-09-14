@@ -1,5 +1,7 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
+mod sse;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -68,7 +70,12 @@ struct ResponseState {
     cache_key: Option<CacheKey>,
     /// The exchange in flight, if any. Dropping it cancels the request.
     live: Option<Live>,
+    /// The Server-Sent Events log, when the last response was an event stream.
+    sse: Option<sse::SseLog>,
 }
+
+/// Status code, reason phrase and headers of a response.
+type Head = (u16, String, Vec<(String, String)>);
 
 /// A request that is still being sent or received.
 struct Live {
@@ -76,15 +83,17 @@ struct Live {
     id: u64,
     handle: Option<transport::Handle>,
     started: Instant,
-    head: Option<(u16, String, Vec<(String, String)>)>,
+    head: Option<Head>,
     body: Vec<u8>,
     bytes: usize,
     truncated: bool,
     last_repaint: Instant,
+    /// Reconnecting to an event stream: keep the existing log and send `Last-Event-ID`.
+    resume: bool,
 }
 
 impl Live {
-    fn new(id: u64) -> Self {
+    fn new(id: u64, resume: bool) -> Self {
         let now = Instant::now();
         Self {
             id,
@@ -95,7 +104,17 @@ impl Live {
             bytes: 0,
             truncated: false,
             last_repaint: now,
+            resume,
         }
+    }
+
+    /// Whether enough time has passed to repaint progress; resets the clock if so.
+    fn should_repaint(&mut self) -> bool {
+        if self.last_repaint.elapsed() < PROGRESS_REPAINT {
+            return false;
+        }
+        self.last_repaint = Instant::now();
+        true
     }
 
     fn append(&mut self, chunk: &[u8]) {
@@ -161,6 +180,8 @@ pub struct RequestEditor {
     response_tab: usize,
     response_body: Entity<EditorState>,
     response_headers: Entity<EditorState>,
+    sse_filter: Entity<InputState>,
+    sse_detail: Entity<EditorState>,
     responses: HashMap<PathBuf, ResponseState>,
     response_cache: ResponseCache,
     next_send_id: u64,
@@ -182,6 +203,15 @@ impl RequestEditor {
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let response_body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        let sse_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.sse_filter_placeholder").to_string()));
+        cx.subscribe(&sse_filter, |_, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        })
+        .detach();
+        let sse_detail = cx.new(|cx| EditorState::new(window, cx).language("json"));
 
         cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
@@ -224,6 +254,8 @@ impl RequestEditor {
             response_tab: 0,
             response_body,
             response_headers,
+            sse_filter,
+            sse_detail,
             responses: HashMap::new(),
             response_cache,
             next_send_id: 0,
@@ -250,6 +282,9 @@ impl RequestEditor {
         self.name.update(cx, |s, cx| {
             s.set_placeholder(t!("request.name_placeholder").to_string(), window, cx)
         });
+        self.sse_filter.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.sse_filter_placeholder").to_string(), window, cx)
+        });
         cx.notify();
     }
 
@@ -261,6 +296,19 @@ impl RequestEditor {
     #[cfg(test)]
     pub fn shown_response(&self) -> Option<(&StoredResponse, bool)> {
         self.state().and_then(|s| s.response.as_ref().map(|r| (r, s.restored)))
+    }
+
+    /// Events received and whether the stream has ended, when showing an event stream.
+    #[cfg(test)]
+    pub fn sse_summary(&self) -> Option<(usize, bool)> {
+        self.state()
+            .and_then(|s| s.sse.as_ref())
+            .map(|log| (log.total, log.ended.is_some()))
+    }
+
+    #[cfg(test)]
+    pub fn sse_detail_text(&self, cx: &App) -> String {
+        self.sse_detail.read(cx).value().to_string()
     }
 
     #[cfg(test)]
@@ -288,6 +336,10 @@ impl RequestEditor {
 
     fn state(&self) -> Option<&ResponseState> {
         self.path.as_ref().and_then(|p| self.responses.get(p))
+    }
+
+    fn state_mut(&mut self) -> Option<&mut ResponseState> {
+        self.path.as_ref().and_then(|p| self.responses.get_mut(p))
     }
 
     /// Puts the current request's response (if any) into the response panes.
@@ -443,6 +495,12 @@ impl RequestEditor {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_with(false, window, cx);
+    }
+
+    /// Sends the request. `resume` reconnects an ended event stream, keeping its log and
+    /// sending the last event id.
+    fn send_with(&mut self, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else {
             return;
         };
@@ -452,7 +510,12 @@ impl RequestEditor {
             return;
         }
         self.next_send_id += 1;
-        state.live = Some(Live::new(id));
+        let last_event_id = state
+            .sse
+            .as_ref()
+            .filter(|_| resume)
+            .and_then(|log| log.last_event_id.clone());
+        state.live = Some(Live::new(id, resume));
         state.missing_variables.clear();
         let file = self.current(cx);
         let mut variables = self.variables.clone();
@@ -490,7 +553,7 @@ impl RequestEditor {
                 };
                 state.missing_variables = missing;
                 let live = state.live(id)?; // cancelled while resolving
-                let (handle, events) = transport::start_http(request, timeout, None);
+                let (handle, events) = transport::start_http(request, timeout, last_event_id);
                 live.handle = Some(handle);
                 Some(events)
             });
@@ -528,8 +591,9 @@ impl RequestEditor {
         cx: &mut Context<Self>,
     ) -> bool {
         let cache = self.cache(cx).cloned();
+        let current = self.path.as_ref() == Some(path);
         let state = self.responses.entry(path.clone()).or_default();
-        let Some(live) = state.live(id) else {
+        let Some(live) = state.live.as_mut().filter(|live| live.id == id) else {
             return false;
         };
         let finished = match event {
@@ -537,26 +601,55 @@ impl RequestEditor {
                 status,
                 reason,
                 headers,
+                event_stream,
                 ..
             } => {
+                let status_line = format!("{status} {reason}");
+                let headers_text = headers
+                    .iter()
+                    .map(|(n, v)| format!("{n}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if event_stream {
+                    match &mut state.sse {
+                        Some(log) if live.resume => log.ended = None,
+                        _ => state.sse = Some(sse::SseLog::new(status_line)),
+                    }
+                } else {
+                    state.sse = None;
+                }
                 live.head = Some((status, reason, headers));
+                if current {
+                    self.response_headers
+                        .update(cx, |s, cx| s.set_value(headers_text, window, cx));
+                }
                 None
             }
             transport::Event::Chunk(chunk) => {
                 live.append(&chunk);
-                if live.last_repaint.elapsed() < PROGRESS_REPAINT {
+                if !live.should_repaint() {
                     return true;
                 }
-                live.last_repaint = Instant::now();
                 None
             }
             transport::Event::Sse(event) => {
-                // Shown as text until the event stream view lands.
-                live.append(format!("{}\n", event.data).as_bytes());
+                live.bytes += event.data.len();
+                if let Some(log) = &mut state.sse {
+                    log.push(event);
+                }
+                if !live.should_repaint() {
+                    return true;
+                }
                 None
             }
             transport::Event::Ws(_) => None,
             transport::Event::Done { elapsed, bytes } => {
+                if let Some(log) = &mut state.sse {
+                    log.ended = Some(sse::Ending::Closed);
+                    state.live = None;
+                    cx.notify();
+                    return false;
+                }
                 let (status, reason, headers) = live.head.take().unwrap_or_default();
                 Some(StoredResponse {
                     received_at: response_cache::now(),
@@ -571,7 +664,17 @@ impl RequestEditor {
                     },
                 })
             }
-            transport::Event::Failed(message) => Some(StoredResponse::failed(response_cache::now(), message)),
+            transport::Event::Failed(message) => {
+                if live.head.is_some()
+                    && let Some(log) = &mut state.sse
+                {
+                    log.ended = Some(sse::Ending::Failed(message));
+                    state.live = None;
+                    cx.notify();
+                    return false;
+                }
+                Some(StoredResponse::failed(response_cache::now(), message))
+            }
         };
         let Some(stored) = finished else {
             cx.notify();
@@ -587,19 +690,23 @@ impl RequestEditor {
                 })
                 .detach();
         }
-        if self.path.as_ref() == Some(path) {
+        if current {
             self.show_response(window, cx);
         }
         cx.notify();
         false
     }
 
-    /// Stops the current request's send, keeping whatever response it had before.
+    /// Stops the current request's send, keeping whatever response it had before. A stopped
+    /// event stream keeps its log so it can be reconnected.
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = &self.path
-            && let Some(state) = self.responses.get_mut(path)
-        {
-            state.live = None;
+        if let Some(state) = self.state_mut() {
+            if state.live.take().is_some()
+                && let Some(log) = &mut state.sse
+                && log.ended.is_none()
+            {
+                log.ended = Some(sse::Ending::Stopped);
+            }
             cx.notify();
         }
     }
@@ -653,7 +760,9 @@ impl RequestEditor {
         })
     }
 
-    fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// The status line above the response. Event streams show their own status in their view,
+    /// so this shows only warnings for them.
+    fn render_status(&self, event_stream: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let state = self.state();
         let live = state.and_then(|s| s.live.as_ref());
@@ -704,7 +813,7 @@ impl RequestEditor {
             .flex_wrap()
             .gap_x_3()
             .text_sm()
-            .child(div().text_color(color).child(line))
+            .when(!event_stream, |this| this.child(div().text_color(color).child(line)))
             .when_some(restored, |this, response| {
                 this.child(
                     div()
@@ -753,6 +862,22 @@ impl Render for RequestEditor {
             _ => t!("request.headers_tab").to_string(),
         };
         let sending = self.state().is_some_and(|s| s.live.is_some());
+        let sse_log = self.state().and_then(|s| s.sse.as_ref());
+        let body_tab_label = match sse_log {
+            Some(log) => t!("request.sse_events_tab", count = log.total).to_string(),
+            None => t!("request.body").to_string(),
+        };
+        let response_view = match sse_log {
+            Some(log) if response_tab == 0 => self.render_sse(log, sending, cx),
+            _ => readonly_editor(if response_tab == 0 {
+                &self.response_body
+            } else {
+                &self.response_headers
+            })
+            .flex_1()
+            .min_h_0()
+            .into_any_element(),
+        };
 
         v_flex()
             .key_context(CONTEXT)
@@ -825,13 +950,13 @@ impl Render for RequestEditor {
                             .min_w_0()
                             .gap_1()
                             .child(
-                                h_flex().gap_2().child(self.render_status(cx)).child(
+                                h_flex().gap_2().child(self.render_status(sse_log.is_some(), cx)).child(
                                     div().flex_none().child(
                                         TabBar::new("response-tabs")
                                             .segmented()
                                             .small()
                                             .selected_index(response_tab)
-                                            .child(Tab::new().label(t!("request.body").to_string()))
+                                            .child(Tab::new().label(body_tab_label))
                                             .child(Tab::new().label(header_count))
                                             .on_click(cx.listener(|this, index: &usize, _, cx| {
                                                 this.response_tab = *index;
@@ -840,15 +965,7 @@ impl Render for RequestEditor {
                                     ),
                                 ),
                             )
-                            .child(
-                                readonly_editor(if response_tab == 0 {
-                                    &self.response_body
-                                } else {
-                                    &self.response_headers
-                                })
-                                .flex_1()
-                                .min_h_0(),
-                            ),
+                            .child(response_view),
                     ),
             )
             .into_any_element()
