@@ -1,6 +1,7 @@
 mod credentials;
 mod encoding;
 mod environment_editor;
+mod graphql;
 mod http;
 mod i18n;
 mod import;

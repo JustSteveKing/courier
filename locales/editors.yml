@@ -566,3 +566,98 @@ request.graphql_variables_not_object:
   es: Las variables de GraphQL deben ser un objeto JSON
   de: GraphQL-Variablen müssen ein JSON-Objekt sein
   fr: Les variables GraphQL doivent être un objet JSON
+request.schema_tab:
+  en: Schema
+  es: Esquema
+  de: Schema
+  fr: Schéma
+request.schema_fetch:
+  en: Fetch schema
+  es: Obtener esquema
+  de: Schema abrufen
+  fr: Récupérer le schéma
+request.schema_refresh:
+  en: Refresh
+  es: Actualizar
+  de: Aktualisieren
+  fr: Actualiser
+request.schema_fetching:
+  en: Fetching schema…
+  es: Obteniendo esquema…
+  de: Schema wird abgerufen…
+  fr: Récupération du schéma…
+request.schema_none:
+  en: No schema yet
+  es: Aún no hay esquema
+  de: Noch kein Schema
+  fr: Pas encore de schéma
+request.schema_hint:
+  en: Courier asks the API to describe itself (introspection) using this request's URL, headers and secrets. The schema powers these docs and autocomplete in the query editor.
+  es: Courier pide a la API que se describa (introspección) usando la URL, las cabeceras y los secretos de esta solicitud. El esquema alimenta esta documentación y el autocompletado del editor de consultas.
+  de: Courier lässt die API sich selbst beschreiben (Introspection) – mit URL, Headern und Secrets dieser Anfrage. Das Schema liefert diese Dokumentation und die Autovervollständigung im Abfrage-Editor.
+  fr: Courier demande à l’API de se décrire (introspection) avec l’URL, les en-têtes et les secrets de cette requête. Le schéma alimente cette documentation et l’autocomplétion de l’éditeur de requête.
+request.schema_summary:
+  en: "%{count} types · %{age}"
+  es: "%{count} tipos · %{age}"
+  de: "%{count} Typen · %{age}"
+  fr: "%{count} types · %{age}"
+request.schema_failed:
+  en: "Could not fetch the schema: %{error}"
+  es: "No se pudo obtener el esquema: %{error}"
+  de: "Schema konnte nicht abgerufen werden: %{error}"
+  fr: "Impossible de récupérer le schéma : %{error}"
+request.schema_too_large:
+  en: The schema is too large
+  es: El esquema es demasiado grande
+  de: Das Schema ist zu groß
+  fr: Le schéma est trop volumineux
+request.schema_back:
+  en: Back
+  es: Atrás
+  de: Zurück
+  fr: Retour
+request.schema_filter_placeholder:
+  en: Search types and fields
+  es: Buscar tipos y campos
+  de: Typen und Felder durchsuchen
+  fr: Rechercher des types et des champs
+request.schema_field_count:
+  en: "%{count} fields"
+  es: "%{count} campos"
+  de: "%{count} Felder"
+  fr: "%{count} champs"
+request.schema_all_types:
+  en: All types
+  es: Todos los tipos
+  de: Alle Typen
+  fr: Tous les types
+request.schema_implements:
+  en: "Implements %{names}"
+  es: "Implementa %{names}"
+  de: "Implementiert %{names}"
+  fr: "Implémente %{names}"
+request.fetched_just_now:
+  en: fetched just now
+  es: obtenido hace un momento
+  de: gerade eben abgerufen
+  fr: récupéré à l'instant
+request.fetched_minutes_ago:
+  en: "fetched %{count} min ago"
+  es: "obtenido hace %{count} min"
+  de: "vor %{count} Min. abgerufen"
+  fr: "récupéré il y a %{count} min"
+request.fetched_hours_ago:
+  en: "fetched %{count} h ago"
+  es: "obtenido hace %{count} h"
+  de: "vor %{count} Std. abgerufen"
+  fr: "récupéré il y a %{count} h"
+request.fetched_days_ago:
+  en: "fetched %{count} d ago"
+  es: "obtenido hace %{count} d"
+  de: "vor %{count} Tg. abgerufen"
+  fr: "récupéré il y a %{count} j"
+request.schema_possible_types:
+  en: Possible types
+  es: Tipos posibles
+  de: Mögliche Typen
+  fr: Types possibles

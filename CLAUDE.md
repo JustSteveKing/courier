@@ -22,6 +22,7 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
 - `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL bodies), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
 - `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
+- `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions/hover from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)
 - `import/` (curl, Postman), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`
 
 ## Rules

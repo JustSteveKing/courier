@@ -22,6 +22,7 @@ use rust_i18n::t;
 
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
+use crate::graphql::SchemaCache;
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
 use crate::model::{RequestFile, Variables, placeholder};
@@ -64,7 +65,14 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(paths: AppPaths, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| RequestEditor::new(ResponseCache::new(&paths.cache_dir), window, cx));
+        let editor = cx.new(|cx| {
+            RequestEditor::new(
+                ResponseCache::new(&paths.cache_dir),
+                SchemaCache::new(&paths.cache_dir),
+                window,
+                cx,
+            )
+        });
         let environment = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]),
@@ -416,11 +424,22 @@ impl Workspace {
         const FIRST_RUN: Duration = Duration::from_secs(30);
         const EVERY: Duration = Duration::from_secs(60 * 60);
         let cache = ResponseCache::new(&self.paths.cache_dir);
+        let schemas = SchemaCache::new(&self.paths.cache_dir);
         cx.spawn(async move |this, cx| {
             let mut delay = FIRST_RUN;
             loop {
                 cx.background_executor().timer(delay).await;
                 delay = EVERY;
+                let schemas = schemas.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        match schemas.tidy(std::time::SystemTime::now()) {
+                            Ok(0) => {}
+                            Ok(removed) => eprintln!("tidied schema cache: removed {removed}"),
+                            Err(e) => eprintln!("could not tidy schema cache: {e:#}"),
+                        }
+                    })
+                    .await;
                 let Ok(roots) = this.update(cx, |this, cx| {
                     let roots: Vec<_> = this.collections.iter().map(|c| c.root.clone()).collect();
                     AppSettings::get(cx).remember_responses.then_some(roots)
@@ -1692,6 +1711,42 @@ mod tests {
         .unwrap();
     }
 
+    /// Serves one HTTP exchange with a JSON `reply`, reporting the request head and body.
+    fn http_server(reply: &'static str) -> (u16, std::sync::mpsc::Receiver<(String, String)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Read as _, Write as _};
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let (mut head, mut length) = (String::new(), 0);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+            sent.send((head, String::from_utf8(body).unwrap())).unwrap();
+        });
+        (port, received)
+    }
+
     /// Answers one HTTP request on a local port. Returns the port and a channel that
     /// receives the raw request text.
     fn one_shot_server(response: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
@@ -2120,39 +2175,7 @@ mod tests {
         let root = create_example_project(tmp.path()).unwrap();
         let get_json = root.join("get-json.yaml");
 
-        // Reads the whole request (headers and body) before answering.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (sent, received) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::{BufRead as _, Read as _, Write as _};
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = std::io::BufReader::new(stream);
-            let (mut head, mut length) = (String::new(), 0);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some((name, value)) = line.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
-                }
-                if line == "\r\n" {
-                    break;
-                }
-                head.push_str(&line);
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let reply = "{\"data\":{\"pets\":[]}}";
-            write!(
-                reader.get_mut(),
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            )
-            .unwrap();
-            sent.send((head, String::from_utf8(body).unwrap())).unwrap();
-        });
+        let (port, received) = http_server("{\"data\":{\"pets\":[]}}");
         let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
         request.method = "POST".into();
         request.url = format!("http://127.0.0.1:{port}/graphql");
@@ -2202,6 +2225,99 @@ mod tests {
 
         // The editor reproduces the GraphQL section exactly, so loading it isn't an edit.
         assert!(cx.update(|cx| !editor.read(cx).is_modified_for_test(cx)));
+    }
+
+    #[gpui_kit::test]
+    async fn graphql_schemas_fetch_browse_complete_and_persist(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let (port, received) = http_server(crate::graphql::tests::PETSTORE);
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.method = "POST".into();
+        request.url = format!("http://127.0.0.1:{port}/graphql");
+        request.headers = crate::model::headers_from_text("X-Api: demo");
+        request.body = None;
+        request.graphql = Some(crate::model::Graphql {
+            query: "{ pets { id } }".into(),
+            ..Default::default()
+        });
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let wait_until = |cx: &mut TestAppContext, done: &dyn Fn(&App) -> bool| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if cx.update(|cx| done(cx)) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("timed out waiting");
+        };
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            editor.update(cx, |editor, cx| editor.show_schema_tab_for_test(cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).schema_type_count(cx)),
+            None,
+            "nothing cached yet"
+        );
+        assert!(cx.update(|cx| editor.read(cx).complete_for_test("{ pe", 4)).is_empty());
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("graphql-fetch-schema", cx);
+        })
+        .unwrap();
+        wait_until(cx, &|cx| editor.read(cx).schema_type_count(cx).is_some());
+        let (head, body) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            head.to_ascii_lowercase().contains("x-api: demo"),
+            "sent with the request's headers: {head}"
+        );
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["operationName"], "IntrospectionQuery");
+        assert_eq!(cx.update(|cx| editor.read(cx).schema_type_count(cx)), Some(13));
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).complete_for_test("{ pe", 4)),
+            ["pets", "pet"]
+        );
+
+        // The first row is the query root; opening it lists its fields.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("schema-row", 0usize), cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(editor.read(cx).schema_nav_for_test(), ["Query"]);
+            window.render_frame(cx);
+            window.click(("schema-row", 0usize), cx); // pets: [Pet!]!
+        })
+        .unwrap();
+        cx.update(|cx| assert_eq!(editor.read(cx).schema_nav_for_test(), ["Query", "Pet"]));
+
+        // After a restart the schema comes from the cache without fetching again.
+        let (restarted, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| restarted.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        wait_until(cx, &|cx| editor.read(cx).schema_type_count(cx).is_some());
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).complete_for_test("{ pets(species: ", 16)),
+            ["DOG", "CAT", "FERRET"]
+        );
     }
 
     #[gpui_kit::test]

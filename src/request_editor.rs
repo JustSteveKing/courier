@@ -1,5 +1,6 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
+mod schema;
 mod sse;
 mod ws;
 
@@ -18,6 +19,7 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
+use crate::graphql::SchemaCache;
 use crate::http::{self, Request};
 use crate::model::{Body, BodyKind, Graphql, RequestFile, Variables, headers_from_text, headers_to_text};
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
@@ -78,6 +80,9 @@ struct ResponseState {
     /// The message timeline of a WebSocket request.
     ws: Option<ws::WsLog>,
 }
+
+/// A request ready to send, the variables it lacked, and the variables (with secrets) used.
+type Resolved = (Request, Vec<String>, Variables);
 
 /// Status code, reason phrase and headers of a response.
 type Head = (u16, String, Vec<(String, String)>);
@@ -198,11 +203,23 @@ pub struct RequestEditor {
     stream_detail: Entity<EditorState>,
     responses: HashMap<PathBuf, ResponseState>,
     response_cache: ResponseCache,
+    /// GraphQL schemas by [`SchemaCache::key`], and the one the query editor uses.
+    schemas: HashMap<String, schema::SchemaState>,
+    schema_cache: SchemaCache,
+    schema_slot: schema::SchemaSlot,
+    /// Types opened in the Schema tab, most recent last.
+    schema_nav: Vec<String>,
+    schema_filter: Entity<InputState>,
     next_send_id: u64,
 }
 
 impl RequestEditor {
-    pub fn new(response_cache: ResponseCache, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        response_cache: ResponseCache,
+        schema_cache: SchemaCache,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.name_placeholder").to_string()));
         let method = cx.new(|cx| {
             SelectState::new(
@@ -215,7 +232,18 @@ impl RequestEditor {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("{{base_url}}/path"));
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
-        let graphql_query = cx.new(|cx| EditorState::new(window, cx).language("graphql"));
+        let schema_slot = schema::SchemaSlot::default();
+        let graphql_query = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx).language("graphql");
+            let assist = std::rc::Rc::new(schema::GraphqlAssist {
+                schema: schema_slot.clone(),
+            });
+            state.lsp_mut().completion_provider = Some(assist.clone());
+            state.lsp_mut().hover_provider = Some(assist);
+            state
+        });
+        let schema_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.schema_filter_placeholder").to_string()));
         let graphql_variables = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let operation_name = cx
             .new(|cx| InputState::new(window, cx).placeholder(t!("request.graphql_operation_placeholder").to_string()));
@@ -223,17 +251,22 @@ impl RequestEditor {
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let stream_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.stream_filter_placeholder").to_string()));
-        cx.subscribe(&stream_filter, |_, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                cx.notify();
-            }
-        })
-        .detach();
+        for filter in [&stream_filter, &schema_filter] {
+            cx.subscribe(filter, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         let stream_detail = cx.new(|cx| EditorState::new(window, cx).language("json"));
 
         cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
-            InputEvent::Change => this.update_dirty(cx),
+            InputEvent::Change => {
+                this.update_dirty(cx);
+                this.sync_schema(cx);
+            }
             _ => {}
         })
         .detach();
@@ -255,6 +288,7 @@ impl RequestEditor {
         }
         cx.subscribe(&method, |this, _, _: &SelectEvent<SearchableVec<&'static str>>, cx| {
             this.update_dirty(cx);
+            this.sync_schema(cx);
         })
         .detach();
 
@@ -281,6 +315,11 @@ impl RequestEditor {
             stream_detail,
             responses: HashMap::new(),
             response_cache,
+            schemas: HashMap::new(),
+            schema_cache,
+            schema_slot,
+            schema_nav: Vec::new(),
+            schema_filter,
             next_send_id: 0,
         }
     }
@@ -310,6 +349,9 @@ impl RequestEditor {
         });
         self.operation_name.update(cx, |s, cx| {
             s.set_placeholder(t!("request.graphql_operation_placeholder").to_string(), window, cx)
+        });
+        self.schema_filter.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.schema_filter_placeholder").to_string(), window, cx)
         });
         cx.notify();
     }
@@ -348,6 +390,34 @@ impl RequestEditor {
     #[cfg(test)]
     pub fn stream_detail_text(&self, cx: &App) -> String {
         self.stream_detail.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
+    pub fn show_schema_tab_for_test(&mut self, cx: &mut Context<Self>) {
+        self.response_tab = 2;
+        cx.notify();
+    }
+
+    /// User-defined types in the current request's schema, once there is one.
+    #[cfg(test)]
+    pub fn schema_type_count(&self, cx: &App) -> Option<usize> {
+        let cached = self.schema_state(cx)?.schema.as_ref()?;
+        Some(cached.schema.user_types().count())
+    }
+
+    /// Suggestions the query editor would offer, from the schema it's been given.
+    #[cfg(test)]
+    pub fn complete_for_test(&self, text: &str, offset: usize) -> Vec<String> {
+        let Some(cached) = self.schema_slot.borrow().clone() else {
+            return Vec::new();
+        };
+        let (_, suggestions) = crate::graphql::assist::complete(&cached.schema, text, offset);
+        suggestions.into_iter().map(|s| s.label).collect()
+    }
+
+    #[cfg(test)]
+    pub fn schema_nav_for_test(&self) -> Vec<String> {
+        self.schema_nav.clone()
     }
 
     #[cfg(test)]
@@ -463,6 +533,8 @@ impl RequestEditor {
         self.path = Some(path);
         self.saved = Some(request);
         self.dirty = false;
+        self.schema_nav.clear();
+        self.sync_schema(cx);
         self.show_response(window, cx);
     }
 
@@ -580,6 +652,31 @@ impl RequestEditor {
         cx.notify();
     }
 
+    fn timeout(&self, cx: &App) -> Duration {
+        Duration::from_secs(AppSettings::get(cx).request_timeout_secs.max(1))
+    }
+
+    /// Resolves `file` with the active variables and secrets, off the UI thread. Secret
+    /// values are fetched only now, used for this one request, and dropped. Also returns the
+    /// missing variable names and the variables used.
+    fn resolve_in_background(&self, file: RequestFile, cx: &App) -> Task<Result<Resolved, String>> {
+        let mut variables = self.variables.clone();
+        let secrets = self.secrets.clone();
+        let store = self.secret_store.clone();
+        cx.background_executor().spawn(async move {
+            if !secrets.is_empty() {
+                let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
+                let found = store
+                    .get_all(&secrets)
+                    .await
+                    .map_err(|e| t!("request.could_not_read_secrets", error = format!("{e:#}")).to_string())?;
+                variables.extend(found);
+            }
+            let (request, missing) = Request::resolve(&file, &variables)?;
+            Ok((request, missing, variables))
+        })
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.send_with(false, window, cx);
     }
@@ -616,30 +713,15 @@ impl RequestEditor {
             file.body = None;
             file.graphql = None;
         }
-        let mut variables = self.variables.clone();
-        let secrets = self.secrets.clone();
-        let store = self.secret_store.clone();
-        let timeout = Duration::from_secs(AppSettings::get(cx).request_timeout_secs.max(1));
+        let resolving = self.resolve_in_background(file, cx);
+        let timeout = self.timeout(cx);
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            // Secret values are fetched only now, used for this one request, and dropped.
-            let resolved =
-                cx.background_executor()
-                    .spawn(async move {
-                        if !secrets.is_empty() {
-                            let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
-                            let found = store.get_all(&secrets).await.map_err(|e| {
-                                t!("request.could_not_read_secrets", error = format!("{e:#}")).to_string()
-                            })?;
-                            variables.extend(found);
-                        }
-                        Ok::<_, String>((Request::resolve(&file, &variables)?, variables))
-                    })
-                    .await;
+            let resolved = resolving.await;
             let events = this.update(cx, |this, cx| {
                 let state = this.responses.entry(path.clone()).or_default();
-                let ((request, missing), variables) = match resolved {
+                let (request, missing, variables) = match resolved {
                     Ok(resolved) => resolved,
                     Err(message) => {
                         if state.live(id).is_some() {
@@ -953,9 +1035,10 @@ impl RequestEditor {
             Some(Outcome::Response { truncated: true, .. })
         );
         let missing = state.map(|s| s.missing_variables.clone()).unwrap_or_default();
+        // Wide enough for a status line; when the tabs don't fit beside it, they wrap below.
         h_flex()
             .flex_1()
-            .min_w_0()
+            .min_w(px(240.))
             .flex_wrap()
             .gap_x_3()
             .text_sm()
@@ -1000,7 +1083,12 @@ impl Render for RequestEditor {
         }
 
         let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
-        let response_tab = self.response_tab;
+        let graphql = !self.is_websocket(cx) && self.is_graphql(cx);
+        let response_tab = if !graphql && self.response_tab == 2 {
+            0
+        } else {
+            self.response_tab
+        };
         let header_count = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, .. }) => {
                 t!("request.headers_tab_count", count = headers.len()).to_string()
@@ -1009,7 +1097,6 @@ impl Render for RequestEditor {
         };
         let sending = self.state().is_some_and(|s| s.live.is_some());
         let websocket = self.is_websocket(cx);
-        let graphql = !websocket && self.is_graphql(cx);
         let sse_log = self.state().and_then(|s| s.sse.as_ref());
         let ws_log = self.state().and_then(|s| s.ws.as_ref()).filter(|_| websocket);
         let body_tab_label = match (ws_log, sse_log) {
@@ -1018,6 +1105,7 @@ impl Render for RequestEditor {
             (None, None) => t!("request.body").to_string(),
         };
         let response_view = match (ws_log, sse_log) {
+            _ if response_tab == 2 => self.render_schema(cx),
             (Some(log), _) if response_tab == 0 => self.render_ws(log, cx),
             (None, Some(log)) if response_tab == 0 => self.render_sse(log, sending, cx),
             _ => readonly_editor(if response_tab == 0 {
@@ -1148,6 +1236,7 @@ impl Render for RequestEditor {
                             .gap_1()
                             .child(
                                 h_flex()
+                                    .flex_wrap()
                                     .gap_2()
                                     .child(self.render_status(sse_log.is_some() || ws_log.is_some(), cx))
                                     .child(
@@ -1158,6 +1247,9 @@ impl Render for RequestEditor {
                                                 .selected_index(response_tab)
                                                 .child(Tab::new().label(body_tab_label))
                                                 .child(Tab::new().label(header_count))
+                                                .when(graphql, |bar| {
+                                                    bar.child(Tab::new().label(t!("request.schema_tab").to_string()))
+                                                })
                                                 .on_click(cx.listener(|this, index: &usize, _, cx| {
                                                     this.response_tab = *index;
                                                     cx.notify();

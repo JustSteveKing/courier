@@ -1344,6 +1344,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "indexmap",
+ "lsp-types",
  "notify 8.2.0",
  "oo7",
  "reqwest",

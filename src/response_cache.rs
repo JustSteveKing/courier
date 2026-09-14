@@ -136,6 +136,16 @@ struct CacheFile {
     response: StoredResponse,
 }
 
+/// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
+pub fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// A stable cache key for a request. Keyed by collection id and the path inside the
 /// collection, so moving the collection folder keeps its responses.
 pub fn cache_key(collection_id: Option<&str>, collection_root: &Path, request: &Path) -> CacheKey {
@@ -146,14 +156,8 @@ pub fn cache_key(collection_id: Option<&str>, collection_root: &Path, request: &
         }
         _ => (request.display().to_string(), None, request.display().to_string()),
     };
-    // FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in identity.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
     CacheKey {
-        key: format!("{hash:016x}"),
+        key: format!("{:016x}", fnv1a(&identity)),
         collection_id,
         request,
     }
