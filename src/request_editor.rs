@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{EditorState, InputEvent, InputState};
@@ -20,6 +21,7 @@ use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredRespon
 use crate::secret_store::{SecretRef, SecretStore};
 use crate::settings::AppSettings;
 use crate::storage::write_yaml;
+use crate::transport;
 use crate::ui::{code_editor, readonly_editor, text_input};
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -50,6 +52,11 @@ pub enum RequestEditorEvent {
 
 impl EventEmitter<RequestEditorEvent> for RequestEditor {}
 
+/// Bodies beyond this are not kept in memory (the size is still counted).
+const MAX_BODY_IN_MEMORY: usize = 50 * 1024 * 1024;
+/// While a body streams in, repaint at most this often.
+const PROGRESS_REPAINT: Duration = Duration::from_millis(100);
+
 /// Response and send state for one request, kept while the app runs so switching between
 /// requests never loses (or misplaces) a response.
 #[derive(Default)]
@@ -57,9 +64,48 @@ struct ResponseState {
     response: Option<StoredResponse>,
     /// Loaded from the cache rather than received in this session.
     restored: bool,
-    sending: bool,
     missing_variables: Vec<String>,
     cache_key: Option<CacheKey>,
+    /// The exchange in flight, if any. Dropping it cancels the request.
+    live: Option<Live>,
+}
+
+/// A request that is still being sent or received.
+struct Live {
+    /// Distinguishes this send from a later one, so late events from a cancelled send are ignored.
+    id: u64,
+    handle: Option<transport::Handle>,
+    started: Instant,
+    head: Option<(u16, String, Vec<(String, String)>)>,
+    body: Vec<u8>,
+    bytes: usize,
+    truncated: bool,
+    last_repaint: Instant,
+}
+
+impl Live {
+    fn new(id: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            id,
+            handle: None,
+            started: now,
+            head: None,
+            body: Vec::new(),
+            bytes: 0,
+            truncated: false,
+            last_repaint: now,
+        }
+    }
+
+    fn append(&mut self, chunk: &[u8]) {
+        self.bytes += chunk.len();
+        if self.body.len() + chunk.len() <= MAX_BODY_IN_MEMORY {
+            self.body.extend_from_slice(chunk);
+        } else {
+            self.truncated = true;
+        }
+    }
 }
 
 impl ResponseState {
@@ -76,7 +122,7 @@ impl ResponseState {
     /// Loads the saved response, if this request has none yet and isn't mid-send.
     fn restore_from(&mut self, cache: &ResponseCache) {
         if self.response.is_none()
-            && !self.sending
+            && self.live.is_none()
             && let Some(key) = &self.cache_key
             && let Some(response) = cache.load(key)
         {
@@ -85,11 +131,14 @@ impl ResponseState {
         }
     }
 
-    fn finish(&mut self, response: StoredResponse, missing_variables: Vec<String>) {
+    fn finish(&mut self, response: StoredResponse) {
         self.response = Some(response);
         self.restored = false;
-        self.sending = false;
-        self.missing_variables = missing_variables;
+        self.live = None;
+    }
+
+    fn live(&mut self, id: u64) -> Option<&mut Live> {
+        self.live.as_mut().filter(|live| live.id == id)
     }
 }
 
@@ -114,6 +163,7 @@ pub struct RequestEditor {
     response_headers: Entity<EditorState>,
     responses: HashMap<PathBuf, ResponseState>,
     response_cache: ResponseCache,
+    next_send_id: u64,
 }
 
 impl RequestEditor {
@@ -176,6 +226,7 @@ impl RequestEditor {
             response_headers,
             responses: HashMap::new(),
             response_cache,
+            next_send_id: 0,
         }
     }
 
@@ -213,8 +264,13 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn received_bytes(&self) -> usize {
+        self.state().and_then(|s| s.live.as_ref()).map_or(0, |live| live.bytes)
+    }
+
+    #[cfg(test)]
     pub fn is_sending(&self) -> bool {
-        self.state().is_some_and(|s| s.sending)
+        self.state().is_some_and(|s| s.live.is_some())
     }
 
     #[cfg(test)]
@@ -390,65 +446,162 @@ impl RequestEditor {
         let Some(path) = self.path.clone() else {
             return;
         };
+        let id = self.next_send_id;
         let state = self.responses.entry(path.clone()).or_default();
-        if state.sending {
+        if state.live.is_some() {
             return;
         }
-        state.sending = true;
+        self.next_send_id += 1;
+        state.live = Some(Live::new(id));
         state.missing_variables.clear();
         let file = self.current(cx);
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
         let store = self.secret_store.clone();
+        let timeout = Duration::from_secs(AppSettings::get(cx).request_timeout_secs.max(1));
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (result, missing) = cx
-                .background_executor()
-                .spawn(async move {
-                    // Secret values are fetched only now, used for this one request, and dropped.
-                    if !secrets.is_empty() {
-                        match store {
-                            Some(store) => match store.get_all(&secrets).await {
-                                Ok(found) => variables.extend(found),
-                                Err(e) => {
-                                    let error = format!("{e:#}");
-                                    return (
-                                        Err(t!("request.could_not_read_secrets", error = error).to_string()),
-                                        Vec::new(),
-                                    );
-                                }
-                            },
-                            None => return (Err(t!("secrets.store_unavailable").to_string()), Vec::new()),
+            // Secret values are fetched only now, used for this one request, and dropped.
+            let resolved =
+                cx.background_executor()
+                    .spawn(async move {
+                        if !secrets.is_empty() {
+                            let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
+                            let found = store.get_all(&secrets).await.map_err(|e| {
+                                t!("request.could_not_read_secrets", error = format!("{e:#}")).to_string()
+                            })?;
+                            variables.extend(found);
                         }
-                    }
-                    let (request, missing) = Request::resolve(&file, &variables);
-                    (http::send(&request), missing)
-                })
-                .await;
-            let stored = StoredResponse::from_result(&result, response_cache::now());
-            this.update_in(cx, |this, window, cx| {
-                // The response belongs to the request that sent it, whichever one is open now.
-                let cache = this.cache(cx).cloned();
+                        Ok::<_, String>(Request::resolve(&file, &variables))
+                    })
+                    .await;
+            let events = this.update(cx, |this, cx| {
                 let state = this.responses.entry(path.clone()).or_default();
-                state.finish(stored.clone(), missing);
-                if let (Some(cache), Some(key)) = (cache, state.cache_key.clone()) {
-                    cx.background_executor()
-                        .spawn(async move {
-                            if let Err(e) = cache.save(&key, &stored) {
-                                eprintln!("could not cache response: {e:#}");
-                            }
-                        })
-                        .detach();
+                let (request, missing) = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(message) => {
+                        if state.live(id).is_some() {
+                            state.finish(StoredResponse::failed(response_cache::now(), message));
+                            cx.notify();
+                        }
+                        return None;
+                    }
+                };
+                state.missing_variables = missing;
+                let live = state.live(id)?; // cancelled while resolving
+                let (handle, events) = transport::start_http(request, timeout, None);
+                live.handle = Some(handle);
+                Some(events)
+            });
+            let Ok(Some(events)) = events else {
+                return;
+            };
+            while let Ok(event) = events.recv().await {
+                let keep_going = this
+                    .update_in(cx, |this, window, cx| {
+                        this.on_transport_event(&path, id, event, window, cx)
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    return;
                 }
-                if this.path.as_ref() == Some(&path) {
-                    this.show_response(window, cx);
-                }
-                cx.notify();
+            }
+            // The channel closed without a result: the connection went away.
+            this.update_in(cx, |this, window, cx| {
+                let message = t!("request.connection_closed").to_string();
+                this.on_transport_event(&path, id, transport::Event::Failed(message), window, cx)
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Applies one event from the send `id` of `path`. Returns false once the send is over or
+    /// was cancelled.
+    fn on_transport_event(
+        &mut self,
+        path: &PathBuf,
+        id: u64,
+        event: transport::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let cache = self.cache(cx).cloned();
+        let state = self.responses.entry(path.clone()).or_default();
+        let Some(live) = state.live(id) else {
+            return false;
+        };
+        let finished = match event {
+            transport::Event::Head {
+                status,
+                reason,
+                headers,
+                ..
+            } => {
+                live.head = Some((status, reason, headers));
+                None
+            }
+            transport::Event::Chunk(chunk) => {
+                live.append(&chunk);
+                if live.last_repaint.elapsed() < PROGRESS_REPAINT {
+                    return true;
+                }
+                live.last_repaint = Instant::now();
+                None
+            }
+            transport::Event::Sse(event) => {
+                // Shown as text until the event stream view lands.
+                live.append(format!("{}\n", event.data).as_bytes());
+                None
+            }
+            transport::Event::Ws(_) => None,
+            transport::Event::Done { elapsed, bytes } => {
+                let (status, reason, headers) = live.head.take().unwrap_or_default();
+                Some(StoredResponse {
+                    received_at: response_cache::now(),
+                    elapsed_ms: elapsed.as_millis() as u64,
+                    outcome: Outcome::Response {
+                        status,
+                        reason,
+                        headers,
+                        body: String::from_utf8_lossy(&live.body).into_owned(),
+                        body_size: bytes,
+                        truncated: live.truncated,
+                    },
+                })
+            }
+            transport::Event::Failed(message) => Some(StoredResponse::failed(response_cache::now(), message)),
+        };
+        let Some(stored) = finished else {
+            cx.notify();
+            return true;
+        };
+        state.finish(stored.clone());
+        if let (Some(cache), Some(key)) = (cache, state.cache_key.clone()) {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = cache.save(&key, &stored) {
+                        eprintln!("could not cache response: {e:#}");
+                    }
+                })
+                .detach();
+        }
+        if self.path.as_ref() == Some(path) {
+            self.show_response(window, cx);
+        }
+        cx.notify();
+        false
+    }
+
+    /// Stops the current request's send, keeping whatever response it had before.
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = &self.path
+            && let Some(state) = self.responses.get_mut(path)
+        {
+            state.live = None;
+            cx.notify();
+        }
     }
 
     fn describe_missing(&self, missing: &[String]) -> String {
@@ -503,10 +656,23 @@ impl RequestEditor {
     fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let state = self.state();
-        let sending = state.is_some_and(|s| s.sending);
+        let live = state.and_then(|s| s.live.as_ref());
+        let sending = live.is_some();
         let response = state.and_then(|s| s.response.as_ref());
         let (line, color) = match response.map(|r| (r, &r.outcome)) {
-            _ if sending => (t!("request.status_sending").to_string(), theme.muted_foreground),
+            _ if let Some(live) = live => match &live.head {
+                Some((status, reason, _)) => (
+                    t!(
+                        "request.status_receiving",
+                        status = format!("{status} {reason}"),
+                        size = format_size(live.bytes),
+                        elapsed = format_duration(live.started.elapsed().as_millis() as u64)
+                    )
+                    .to_string(),
+                    theme.muted_foreground,
+                ),
+                None => (t!("request.status_sending").to_string(), theme.muted_foreground),
+            },
             None => (t!("request.status_none").to_string(), theme.muted_foreground),
             Some((_, Outcome::Error { .. })) => (t!("request.status_failed").to_string(), theme.danger),
             Some((
@@ -586,7 +752,7 @@ impl Render for RequestEditor {
             }
             _ => t!("request.headers_tab").to_string(),
         };
-        let sending = self.state().is_some_and(|s| s.sending);
+        let sending = self.state().is_some_and(|s| s.live.is_some());
 
         v_flex()
             .key_context(CONTEXT)
@@ -618,11 +784,22 @@ impl Render for RequestEditor {
                     .child(div().flex_1().child(text_input(&self.url)))
                     .child(
                         Button::new("send")
-                            .primary()
-                            .label(t!("request.send").to_string())
-                            .tooltip(t!("request.send_shortcut").to_string())
-                            .loading(sending)
-                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                            .when(!sending, |button| {
+                                button
+                                    .primary()
+                                    .label(t!("request.send").to_string())
+                                    .tooltip(t!("request.send_shortcut").to_string())
+                            })
+                            .when(sending, |button| {
+                                button.danger().label(t!("request.cancel").to_string())
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if sending {
+                                    this.cancel(cx)
+                                } else {
+                                    this.send(window, cx)
+                                }
+                            })),
                     ),
             )
             .child(

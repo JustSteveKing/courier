@@ -10,16 +10,20 @@ readme = "README.md"
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 etcetera = "0.11.0"
+eventsource-stream = "0.2.3"
+futures-util = "0.3.34"
 gpui-kit = { version = "0.6.1", features = ["tree-sitter"] }
 indexmap = { version = "2.14.2", features = ["serde"] }
 notify = "8.2.0"
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
+reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate"] }
 rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_norway = "0.9.42"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 toml = "1.1.6"
-ureq = "3"
 uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]

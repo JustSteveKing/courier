@@ -21,7 +21,6 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::looks_sensitive_name;
-use crate::http::Response;
 
 /// Bodies beyond this are cut before saving to disk (the in-memory copy stays whole).
 pub const MAX_SAVED_BODY: usize = 2 * 1024 * 1024;
@@ -69,26 +68,12 @@ pub fn now() -> u64 {
 }
 
 impl StoredResponse {
-    pub fn from_result(result: &Result<Response, String>, received_at: u64) -> Self {
-        match result {
-            Ok(response) => Self {
-                received_at,
-                elapsed_ms: response.elapsed.as_millis() as u64,
-                outcome: Outcome::Response {
-                    status: response.status,
-                    reason: response.reason.clone(),
-                    headers: response.headers.clone(),
-                    body: response.body.clone(),
-                    body_size: response.body.len(),
-                    truncated: false,
-                },
-            },
-            Err(message) => Self {
-                received_at,
-                elapsed_ms: 0,
-                outcome: Outcome::Error {
-                    message: message.clone(),
-                },
+    pub fn failed(received_at: u64, message: impl Into<String>) -> Self {
+        Self {
+            received_at,
+            elapsed_ms: 0,
+            outcome: Outcome::Error {
+                message: message.into(),
             },
         }
     }
@@ -314,30 +299,34 @@ impl ResponseCache {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
-    use std::time::Duration;
 
     use super::*;
 
-    fn response(body: &str) -> Result<Response, String> {
-        Ok(Response {
-            status: 200,
-            reason: "OK".into(),
-            headers: vec![
-                ("content-type".into(), "application/json".into()),
-                ("set-cookie".into(), "session=SECRET_SESSION".into()),
-                ("x-auth-token".into(), "SECRET_TOKEN".into()),
-                ("x-request-id".into(), "abc123".into()),
-            ],
-            body: body.into(),
-            elapsed: Duration::from_millis(42),
-        })
+    fn response(body: &str, received_at: u64) -> StoredResponse {
+        StoredResponse {
+            received_at,
+            elapsed_ms: 42,
+            outcome: Outcome::Response {
+                status: 200,
+                reason: "OK".into(),
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("set-cookie".into(), "session=SECRET_SESSION".into()),
+                    ("x-auth-token".into(), "SECRET_TOKEN".into()),
+                    ("x-request-id".into(), "abc123".into()),
+                ],
+                body: body.into(),
+                body_size: body.len(),
+                truncated: false,
+            },
+        }
     }
 
     #[test]
     fn saves_masked_and_restores() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = ResponseCache::new(tmp.path());
-        let stored = StoredResponse::from_result(&response("{\"ok\":true}"), 1_700_000_000);
+        let stored = response("{\"ok\":true}", 1_700_000_000);
         let key = cache_key(Some("c1"), Path::new("/api"), Path::new("/api/users.yaml"));
         cache.save(&key, &stored).unwrap();
 
@@ -373,7 +362,7 @@ mod tests {
     #[test]
     fn truncates_huge_bodies_on_a_char_boundary() {
         let body = "é".repeat(MAX_SAVED_BODY); // 2 bytes each
-        let stored = StoredResponse::from_result(&response(&body), 0).for_disk();
+        let stored = response(&body, 0).for_disk();
         let Outcome::Response {
             body,
             body_size,
@@ -392,7 +381,7 @@ mod tests {
     fn errors_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = ResponseCache::new(tmp.path());
-        let stored = StoredResponse::from_result(&Err("connection refused".into()), 5);
+        let stored = StoredResponse::failed(5, "connection refused");
         let key = cache_key(None, Path::new("/x"), Path::new("/y/e.yaml"));
         cache.save(&key, &stored).unwrap();
         assert_eq!(cache.load(&key), Some(stored));
@@ -419,7 +408,7 @@ mod tests {
     fn tidy_removes_only_orphans_and_stale_files() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = ResponseCache::new(tmp.path());
-        let stored = StoredResponse::from_result(&response("{}"), 0);
+        let stored = response("{}", 0);
         let root = Path::new("/api");
         let key = |collection: &str, request: &str| cache_key(Some(collection), root, &root.join(request));
         let now = SystemTime::now();

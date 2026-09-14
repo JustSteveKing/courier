@@ -21,6 +21,8 @@ pub struct Settings {
     pub follow_omarchy_theme: bool,
     /// Save each request's last response to the cache directory so it survives restarts.
     pub remember_responses: bool,
+    /// Seconds to wait for a server to start responding (streams may then run indefinitely).
+    pub request_timeout_secs: u64,
 }
 
 impl Default for Settings {
@@ -29,6 +31,7 @@ impl Default for Settings {
             language: None,
             follow_omarchy_theme: true,
             remember_responses: true,
+            request_timeout_secs: 30,
         }
     }
 }

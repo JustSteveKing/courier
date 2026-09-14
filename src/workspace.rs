@@ -1399,6 +1399,8 @@ mod tests {
     /// Globals and key bindings for a UI test, with every app directory under `tmp`.
     fn setup(cx: &mut TestAppContext, tmp: &Path) -> AppPaths {
         let paths = AppPaths::under(tmp);
+        // Requests run on the network runtime's threads, which wake the test's tasks.
+        cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
@@ -1796,10 +1798,7 @@ mod tests {
         let cache = ResponseCache::new(&paths.cache_dir);
         let echo_key = cx.update(|cx| restarted.read(cx).response_key(&echo).unwrap());
         cache
-            .save(
-                &echo_key,
-                &crate::response_cache::StoredResponse::from_result(&Err("x".into()), 0),
-            )
+            .save(&echo_key, &crate::response_cache::StoredResponse::failed(0, "x"))
             .unwrap();
         fs::remove_file(&get_json).unwrap();
         let roots: Vec<_> = cx.update(|cx| restarted.read(cx).collections.iter().map(|c| c.root.clone()).collect());
@@ -1815,6 +1814,77 @@ mod tests {
         })
         .unwrap();
         assert!(all_files(&paths.cache_dir).is_empty());
+    }
+
+    #[gpui_kit::test]
+    async fn cancel_stops_a_slow_response(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // A server that sends headers, then trickles the body until the client goes away.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
+            loop {
+                if stream.write_all(b"1\r\nx\r\n").and_then(|_| stream.flush()).is_err() {
+                    closed_tx.send(()).unwrap();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/slow");
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        // Wait until bytes are arriving.
+        for _ in 0..200 {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+            if cx.update(|cx| workspace.read(cx).editor.read(cx).received_bytes() > 3) {
+                break;
+            }
+        }
+        cx.update_window(window, |_, window, cx| {
+            assert!(workspace.read(cx).editor.read(cx).is_sending());
+            assert!(
+                workspace.read(cx).editor.read(cx).received_bytes() > 3,
+                "body is streaming in"
+            );
+            window.render_frame(cx);
+            window.click("send", cx); // now labelled Cancel
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let editor = workspace.read(cx).editor.read(cx);
+            assert!(!editor.is_sending(), "cancelled");
+            assert!(editor.shown_response().is_none(), "a cancelled send leaves no response");
+        });
+        assert!(
+            closed_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the connection was closed"
+        );
     }
 
     #[gpui_kit::test]

@@ -396,3 +396,18 @@ request.saved_days_ago:
   es: "guardada hace %{count} d"
   de: "vor %{count} Tg. gespeichert"
   fr: "enregistrée il y a %{count} j"
+request.cancel:
+  en: Cancel
+  es: Cancelar
+  de: Abbrechen
+  fr: Annuler
+request.status_receiving:
+  en: "%{status}  ·  receiving %{size}  ·  %{elapsed}"
+  es: "%{status}  ·  recibiendo %{size}  ·  %{elapsed}"
+  de: "%{status}  ·  empfange %{size}  ·  %{elapsed}"
+  fr: "%{status}  ·  réception de %{size}  ·  %{elapsed}"
+request.connection_closed:
+  en: The connection closed before the response finished
+  es: La conexión se cerró antes de terminar la respuesta
+  de: Die Verbindung wurde geschlossen, bevor die Antwort vollständig war
+  fr: La connexion s'est fermée avant la fin de la réponse

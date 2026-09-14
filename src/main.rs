@@ -13,6 +13,7 @@ mod response_cache;
 mod secret_store;
 mod settings;
 mod storage;
+mod transport;
 mod ui;
 mod workspace;
 

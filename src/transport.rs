@@ -1,0 +1,569 @@
+//! Network I/O on a background tokio runtime, streamed to the UI as [`Event`]s.
+//!
+//! [`start_http`] and [`start_websocket`] return a [`Handle`] and a channel of events. Dropping
+//! the handle cancels the exchange, so a view that forgets a request never leaks a
+//! connection. HTTP responses with `Content-Type: text/event-stream` are parsed into
+//! Server-Sent Events instead of body chunks.
+//!
+//! Timeouts cover connecting and waiting for the response head; once a response starts it
+//! may stream for as long as the server keeps it open.
+
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+use eventsource_stream::Eventsource as _;
+use futures_util::{SinkExt as _, StreamExt as _};
+use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::Message;
+
+use crate::http::Request;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// The status line and headers arrived.
+    Head {
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+        elapsed: Duration,
+        /// The body is a Server-Sent Events stream; expect [`Event::Sse`] rather than chunks.
+        event_stream: bool,
+    },
+    /// Part of a plain response body.
+    Chunk(Vec<u8>),
+    /// One Server-Sent Event.
+    Sse(SseEvent),
+    /// A WebSocket message, received or sent.
+    Ws(WsMessage),
+    /// The exchange ended normally.
+    Done {
+        elapsed: Duration,
+        bytes: usize,
+    },
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SseEvent {
+    pub event: String,
+    pub id: String,
+    pub data: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WsMessage {
+    pub outgoing: bool,
+    pub payload: WsPayload,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WsPayload {
+    Text(String),
+    Binary(Vec<u8>),
+    /// The connection was closed, with the close reason if one was given.
+    Close(String),
+}
+
+/// Keeps an exchange alive. Drop it to cancel.
+pub struct Handle {
+    _cancel: oneshot::Sender<()>,
+    outgoing: Option<mpsc::UnboundedSender<WsPayload>>,
+}
+
+impl Handle {
+    /// Queues a WebSocket message (or `Close`). Returns false if this isn't a WebSocket or it
+    /// has already closed.
+    pub fn send(&self, payload: WsPayload) -> bool {
+        self.outgoing.as_ref().is_some_and(|tx| tx.send(payload).is_ok())
+    }
+}
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("courier-net")
+            .enable_all()
+            .build()
+            .expect("could not start the network runtime")
+    })
+}
+
+/// One client for the whole app, so repeated requests to a host reuse its connections.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let _runtime = runtime().enter();
+        reqwest::Client::builder()
+            .build()
+            .expect("could not create the HTTP client")
+    })
+}
+
+/// Runs `work` on the runtime until it finishes or the handle is dropped.
+fn spawn<F>(
+    outgoing: Option<mpsc::UnboundedSender<WsPayload>>,
+    work: impl FnOnce(async_channel::Sender<Event>) -> F,
+) -> (Handle, async_channel::Receiver<Event>)
+where
+    F: Future<Output = Result<(), String>> + Send + 'static,
+{
+    let (events_tx, events_rx) = async_channel::unbounded();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let work = work(events_tx.clone());
+    runtime().spawn(async move {
+        tokio::select! {
+            // Resolves when the handle is dropped.
+            _ = cancel_rx => {}
+            result = work => {
+                if let Err(message) = result {
+                    let _ = events_tx.send(Event::Failed(message)).await;
+                }
+            }
+        }
+    });
+    (
+        Handle {
+            _cancel: cancel_tx,
+            outgoing,
+        },
+        events_rx,
+    )
+}
+
+/// "error: cause: cause" for errors whose `Display` hides the useful part.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !message.contains(&cause_text) {
+            message.push_str(": ");
+            message.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
+fn headers_of(map: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    map.iter()
+        .map(|(name, value)| (name.to_string(), String::from_utf8_lossy(value.as_bytes()).into_owned()))
+        .collect()
+}
+
+/// Sends an HTTP request. `last_event_id` resumes a Server-Sent Events stream.
+pub fn start_http(
+    request: Request,
+    head_timeout: Duration,
+    last_event_id: Option<String>,
+) -> (Handle, async_channel::Receiver<Event>) {
+    spawn(None, move |events| async move {
+        let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|e| e.to_string())?;
+        let mut builder = client().request(method, &request.url);
+        for (name, value) in &request.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(id) = last_event_id {
+            builder = builder.header("Last-Event-ID", id);
+        }
+        if !request.body.is_empty() {
+            builder = builder.body(request.body.clone());
+        }
+
+        let started = Instant::now();
+        let response = tokio::time::timeout(head_timeout, builder.send())
+            .await
+            .map_err(|_| format!("timed out after {}s waiting for a response", head_timeout.as_secs()))?
+            .map_err(|e| describe(&e))?;
+
+        let status = response.status();
+        let event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("text/event-stream"));
+        let head = Event::Head {
+            status: status.as_u16(),
+            reason: status.canonical_reason().unwrap_or_default().to_string(),
+            headers: headers_of(response.headers()),
+            elapsed: started.elapsed(),
+            event_stream,
+        };
+        if events.send(head).await.is_err() {
+            return Ok(());
+        }
+
+        let mut bytes = 0;
+        if event_stream {
+            let mut stream = response.bytes_stream().inspect(|chunk| {
+                if let Ok(chunk) = chunk {
+                    bytes += chunk.len();
+                }
+            });
+            let mut stream = (&mut stream).eventsource();
+            while let Some(event) = stream.next().await {
+                let event = event.map_err(|e| describe(&e))?;
+                let event = SseEvent {
+                    event: event.event,
+                    id: event.id,
+                    data: event.data,
+                };
+                if events.send(Event::Sse(event)).await.is_err() {
+                    return Ok(());
+                }
+            }
+        } else {
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| describe(&e))?;
+                bytes += chunk.len();
+                if events.send(Event::Chunk(chunk.to_vec())).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        let _ = events
+            .send(Event::Done {
+                elapsed: started.elapsed(),
+                bytes,
+            })
+            .await;
+        Ok(())
+    })
+}
+
+/// Opens a WebSocket (`ws://` or `wss://`). Send messages with [`Handle::send`].
+pub fn start_websocket(request: Request, connect_timeout: Duration) -> (Handle, async_channel::Receiver<Event>) {
+    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<WsPayload>();
+    spawn(Some(outgoing_tx), move |events| async move {
+        let mut http_request = request.url.as_str().into_client_request().map_err(|e| describe(&e))?;
+        for (name, value) in &request.headers {
+            let name: tokio_tungstenite::tungstenite::http::HeaderName =
+                name.parse().map_err(|_| format!("invalid header name: {name}"))?;
+            let value = HeaderValue::from_str(value).map_err(|_| format!("invalid value for header {name}"))?;
+            http_request.headers_mut().insert(name, value);
+        }
+
+        let started = Instant::now();
+        let (socket, response) = tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(http_request))
+            .await
+            .map_err(|_| format!("timed out after {}s connecting", connect_timeout.as_secs()))?
+            .map_err(|e| describe(&e))?;
+        let head = Event::Head {
+            status: response.status().as_u16(),
+            reason: response.status().canonical_reason().unwrap_or_default().to_string(),
+            headers: response
+                .headers()
+                .iter()
+                .map(|(n, v)| (n.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+                .collect(),
+            elapsed: started.elapsed(),
+            event_stream: false,
+        };
+        if events.send(head).await.is_err() {
+            return Ok(());
+        }
+
+        let (mut write, mut read) = socket.split();
+        let mut bytes = 0;
+        loop {
+            tokio::select! {
+                incoming = read.next() => {
+                    let payload = match incoming {
+                        Some(Ok(Message::Text(text))) => WsPayload::Text(text.as_str().to_string()),
+                        Some(Ok(Message::Binary(data))) => WsPayload::Binary(data.to_vec()),
+                        Some(Ok(Message::Close(frame))) => {
+                            let reason = frame.map(|f| f.reason.as_str().to_string()).unwrap_or_default();
+                            let _ = events.send(Event::Ws(WsMessage { outgoing: false, payload: WsPayload::Close(reason) })).await;
+                            break;
+                        }
+                        Some(Ok(_)) => continue, // pings and pongs are answered by tungstenite
+                        Some(Err(e)) => return Err(describe(&e)),
+                        None => break,
+                    };
+                    bytes += payload_len(&payload);
+                    if events.send(Event::Ws(WsMessage { outgoing: false, payload })).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                outgoing = outgoing_rx.recv() => {
+                    let Some(payload) = outgoing else { break };
+                    let message = match &payload {
+                        WsPayload::Text(text) => Message::Text(text.clone().into()),
+                        WsPayload::Binary(data) => Message::Binary(data.clone().into()),
+                        WsPayload::Close(_) => Message::Close(None),
+                    };
+                    let closing = matches!(payload, WsPayload::Close(_));
+                    write.send(message).await.map_err(|e| describe(&e))?;
+                    bytes += payload_len(&payload);
+                    let _ = events.send(Event::Ws(WsMessage { outgoing: true, payload })).await;
+                    if closing {
+                        // Wait for the server's close reply, then finish.
+                        while let Some(Ok(message)) = read.next().await {
+                            if matches!(message, Message::Close(_)) {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = events
+            .send(Event::Done {
+                elapsed: started.elapsed(),
+                bytes,
+            })
+            .await;
+        Ok(())
+    })
+}
+
+fn payload_len(payload: &WsPayload) -> usize {
+    match payload {
+        WsPayload::Text(text) => text.len(),
+        WsPayload::Binary(data) => data.len(),
+        WsPayload::Close(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    use super::*;
+
+    fn get(url: &str) -> Request {
+        Request {
+            method: "GET".into(),
+            url: url.into(),
+            headers: vec![],
+            body: String::new(),
+        }
+    }
+
+    /// Collects events until the channel closes or `timeout` passes.
+    fn collect(events: &async_channel::Receiver<Event>, timeout: Duration) -> Vec<Event> {
+        let deadline = Instant::now() + timeout;
+        let mut out = Vec::new();
+        while Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(event) => {
+                    let end = matches!(event, Event::Done { .. } | Event::Failed(_));
+                    out.push(event);
+                    if end {
+                        break;
+                    }
+                }
+                Err(async_channel::TryRecvError::Closed) => break,
+                Err(async_channel::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        out
+    }
+
+    /// Serves one connection: reads the request head, then runs `respond` on the stream.
+    fn serve_once(respond: impl FnOnce(std::net::TcpStream, String) + Send + 'static) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            respond(stream, String::from_utf8_lossy(&head).into_owned());
+        });
+        port
+    }
+
+    #[test]
+    fn streams_a_chunked_body() {
+        let port = serve_once(|mut stream, _| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n")
+                .unwrap();
+            for part in ["{\"a\":", "1}"] {
+                write!(stream, "{:x}\r\n{part}\r\n", part.len()).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            stream.write_all(b"0\r\n\r\n").unwrap();
+        });
+        let (_handle, events) = start_http(get(&format!("http://127.0.0.1:{port}/")), Duration::from_secs(5), None);
+        let events = collect(&events, Duration::from_secs(5));
+
+        assert!(
+            matches!(
+                &events[0],
+                Event::Head {
+                    status: 200,
+                    event_stream: false,
+                    ..
+                }
+            ),
+            "{events:?}"
+        );
+        let body: Vec<u8> = events
+            .iter()
+            .filter_map(|e| if let Event::Chunk(c) = e { Some(c.clone()) } else { None })
+            .flatten()
+            .collect();
+        assert_eq!(body, b"{\"a\":1}");
+        assert!(
+            matches!(events.last(), Some(Event::Done { bytes: 7, .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn parses_server_sent_events_and_resumes_with_last_event_id() {
+        let port = serve_once(|mut stream, head| {
+            assert!(head.to_ascii_lowercase().contains("last-event-id: 41"), "{head}");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream
+                .write_all(b": comment\n\nid: 42\nevent: price\ndata: {\"usd\": 1}\n\n")
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            stream.write_all(b"data: line one\ndata: line two\n\n").unwrap();
+        });
+        let (_handle, events) = start_http(
+            get(&format!("http://127.0.0.1:{port}/stream")),
+            Duration::from_secs(5),
+            Some("41".into()),
+        );
+        let events = collect(&events, Duration::from_secs(5));
+
+        assert!(
+            matches!(&events[0], Event::Head { event_stream: true, .. }),
+            "{events:?}"
+        );
+        let sse: Vec<_> = events
+            .iter()
+            .filter_map(|e| if let Event::Sse(s) = e { Some(s.clone()) } else { None })
+            .collect();
+        assert_eq!(
+            sse,
+            vec![
+                SseEvent {
+                    event: "price".into(),
+                    id: "42".into(),
+                    data: "{\"usd\": 1}".into()
+                },
+                SseEvent {
+                    event: "message".into(),
+                    id: "42".into(),
+                    data: "line one\nline two".into()
+                },
+            ]
+        );
+        assert!(matches!(events.last(), Some(Event::Done { .. })), "{events:?}");
+    }
+
+    #[test]
+    fn times_out_waiting_for_the_head() {
+        let port = serve_once(|stream, _| {
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let (_handle, events) = start_http(
+            get(&format!("http://127.0.0.1:{port}/")),
+            Duration::from_millis(200),
+            None,
+        );
+        let events = collect(&events, Duration::from_secs(5));
+        assert!(
+            matches!(&events[..], [Event::Failed(message)] if message.contains("timed out")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn dropping_the_handle_cancels() {
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let port = serve_once(move |mut stream, _| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                .unwrap();
+            // Keep writing until the client goes away.
+            loop {
+                if stream.write_all(b"data: tick\n\n").is_err() || stream.flush().is_err() {
+                    closed_tx.send(()).unwrap();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (handle, events) = start_http(get(&format!("http://127.0.0.1:{port}/")), Duration::from_secs(5), None);
+        let first = collect(&events, Duration::from_millis(300));
+        assert!(first.iter().any(|e| matches!(e, Event::Sse(_))), "{first:?}");
+
+        drop(handle);
+        assert!(
+            closed_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "server saw the connection close"
+        );
+    }
+
+    #[test]
+    fn websocket_round_trip() {
+        let listener = runtime()
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        runtime().spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                match message {
+                    Message::Text(text) => socket
+                        .send(Message::Text(format!("echo: {}", text.as_str()).into()))
+                        .await
+                        .unwrap(),
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let (handle, events) = start_websocket(get(&format!("ws://127.0.0.1:{port}/")), Duration::from_secs(5));
+        let head = collect(&events, Duration::from_millis(500));
+        assert!(matches!(&head[0], Event::Head { status: 101, .. }), "{head:?}");
+
+        assert!(handle.send(WsPayload::Text("hello".into())));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(handle.send(WsPayload::Close(String::new())));
+        let events = collect(&events, Duration::from_secs(5));
+        let messages: Vec<_> = events
+            .iter()
+            .filter_map(|e| if let Event::Ws(m) = e { Some(m.clone()) } else { None })
+            .collect();
+        assert_eq!(
+            messages[..2],
+            [
+                WsMessage {
+                    outgoing: true,
+                    payload: WsPayload::Text("hello".into())
+                },
+                WsMessage {
+                    outgoing: false,
+                    payload: WsPayload::Text("echo: hello".into())
+                },
+            ]
+        );
+        assert!(matches!(events.last(), Some(Event::Done { .. })), "{events:?}");
+    }
+}

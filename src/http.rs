@@ -1,8 +1,4 @@
-//! Blocking HTTP execution. Call from a background executor, never the UI thread.
-
-use std::time::{Duration, Instant};
-
-use rust_i18n::t;
+//! Resolving a saved request into what goes on the wire. Sending lives in `crate::transport`.
 
 use crate::model::{BodyKind, RequestFile, Variables, interpolate};
 
@@ -63,59 +59,12 @@ impl Request {
     }
 }
 
-pub struct Response {
-    pub status: u16,
-    pub reason: String,
-    pub headers: Vec<(String, String)>,
-    pub body: String,
-    pub elapsed: Duration,
-}
-
 /// A response body, re-indented when it is JSON.
 pub fn pretty_body(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|json| serde_json::to_string_pretty(&json).ok())
         .unwrap_or_else(|| body.to_string())
-}
-
-/// One agent for the whole app, so repeated requests to a host reuse its connections.
-fn agent() -> &'static ureq::Agent {
-    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    AGENT.get_or_init(|| ureq::Agent::config_builder().http_status_as_error(false).build().into())
-}
-
-pub fn send(request: &Request) -> Result<Response, String> {
-    let agent = agent();
-
-    let mut builder = ureq::http::Request::builder()
-        .method(request.method.as_str())
-        .uri(request.url.as_str());
-    for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    let http_request = builder
-        .body(request.body.clone())
-        .map_err(|e| t!("http.invalid_request", error = e).to_string())?;
-
-    let started = Instant::now();
-    let mut response = agent.run(http_request).map_err(|e| e.to_string())?;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| t!("http.failed_to_read_body", error = e).to_string())?;
-
-    Ok(Response {
-        status: response.status().as_u16(),
-        reason: response.status().canonical_reason().unwrap_or_default().to_string(),
-        headers: response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
-            .collect(),
-        body,
-        elapsed: started.elapsed(),
-    })
 }
 
 #[cfg(test)]
