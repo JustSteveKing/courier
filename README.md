@@ -1,0 +1,86 @@
+# Courier
+
+A fast, native API client for Linux, in the spirit of Postman and Yaak, without Electron or Tauri. Built with Rust and [GPUI](https://www.gpui.rs/) via [gpui-kit](https://github.com/longbridge/gpui-kit).
+
+- **Requests live with your code.** A project's requests and environments are plain YAML in a `.courier/` folder inside the project, so they're reviewed and versioned in git like everything else.
+- **Secrets stay out of git.** Collections store secret *names*; values go in your desktop keyring (GNOME Keyring, KWallet, KeePassXC), or an encrypted file when there isn't one.
+- **Feels at home on Linux.** XDG directories, desktop portals for file pickers, and on [Omarchy](https://omarchy.org) it follows your theme and font live.
+- **Imports:** paste a curl command or bring a Postman collection/environment; literal tokens are moved into secrets automatically.
+- **Command palette** (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) for requests, actions, environments and settings.
+- **Languages:** English, Español, Deutsch, Français.
+
+## Install
+
+Requirements (Arch package names; other distros have equivalents):
+
+- Build: `rustup` (stable Rust 1.88 or newer), `base-devel`
+- Run: `wayland`, `libxkbcommon`, `vulkan-icd-loader` plus a Vulkan driver (`vulkan-radeon`, `vulkan-intel` or `nvidia-utils`), `xdg-desktop-portal` with a backend (e.g. `xdg-desktop-portal-gtk`)
+- Optional: `gnome-keyring` or `kwallet` for secrets, `fontconfig` for the Omarchy font
+
+```sh
+./install.sh            # builds a release binary, installs to ~/.local
+./install.sh --uninstall
+```
+
+This installs `~/.local/bin/courier`, a launcher entry and an icon, so Courier shows up in your app menu. Set `PREFIX` to install elsewhere.
+
+## Usage
+
+```sh
+courier                 # opens the project containing the current directory, if any
+courier ~/Work/my-api   # opens that project (offers to create .courier/ if it has none)
+```
+
+Or use **Open project…** in the app.
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Send the request |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
+
+## What lives where
+
+```text
+my-api/.courier/                 committed with the project
+  collection.yaml                name, id, default variables, secret names
+  environments/local.yaml        environment variables and secret names
+  users/list-users.yaml          one file per request; folders are directories
+
+~/.config/courier/settings.yaml  language, theme, response history (per machine)
+~/.local/state/courier/          open projects, active environments
+~/.cache/courier/responses/      last response per request (sensitive headers masked)
+~/.local/share/courier/          encrypted secrets fallback, only without a keyring
+```
+
+A request file:
+
+```yaml
+name: Create user
+method: POST
+url: '{{base_url}}/users'
+headers:
+- name: Authorization
+  value: Bearer {{api_token}}
+body:
+  type: json
+  content: |-
+    { "name": "Ada" }
+```
+
+Variables use `{{name}}`. An environment overrides the collection defaults by name; secrets are resolved from the keyring only when a request is sent.
+
+## Development
+
+```sh
+cargo run -- ~/Work/my-api
+cargo test
+cargo clippy --all-targets
+cargo fmt
+```
+
+Tests include headless UI tests that drive the real app (clicks, typing, dialogs) without a display. `COURIER_THEME_DIR=/usr/share/omarchy/themes/<name>` previews an Omarchy theme without changing your desktop.
+
+## License
+
+[MIT](LICENSE)

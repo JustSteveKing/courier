@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Courier
+GenericName=API Client
+Comment=Send and organise HTTP API requests
+Exec=courier
+Icon=dev.steve.courier
+Terminal=false
+Categories=Development;
+Keywords=api;http;rest;postman;request;
+StartupWMClass=dev.steve.courier
