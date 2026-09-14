@@ -1,0 +1,507 @@
+//! The request editor on the right: edit, save, send, and show the response.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use crate::credentials::is_literal_credential;
+use crate::http::{self, Request, Response};
+use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
+use crate::secret_store::{SecretRef, SecretStore};
+use crate::storage::write_yaml;
+use indexmap::IndexMap;
+
+pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+const CONTEXT: &str = "RequestEditor";
+
+gpui_kit::actions!(request_editor, [SaveRequest, SendRequest]);
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-s", SaveRequest, Some(CONTEXT)),
+        KeyBinding::new("ctrl-enter", SendRequest, Some(CONTEXT)),
+    ]);
+}
+
+pub enum RequestEditorEvent {
+    Saved(PathBuf),
+    /// The user asked to move the literal credential in header `index` into a secret.
+    /// The request has already been saved.
+    MoveHeaderToSecret { path: PathBuf, index: usize },
+    Error(String),
+}
+
+impl EventEmitter<RequestEditorEvent> for RequestEditor {}
+
+pub struct RequestEditor {
+    focus_handle: FocusHandle,
+    /// The file being edited, and its contents as last loaded or saved.
+    path: Option<PathBuf>,
+    saved: Option<RequestFile>,
+    dirty: bool,
+    variables: Variables,
+    secrets: IndexMap<String, SecretRef>,
+    secret_store: Option<SecretStore>,
+
+    name: Entity<InputState>,
+    method: Entity<SelectState<SearchableVec<&'static str>>>,
+    url: Entity<InputState>,
+    headers: Entity<EditorState>,
+    body: Entity<EditorState>,
+
+    response_tab: usize,
+    response_body: Entity<EditorState>,
+    response_headers: Entity<EditorState>,
+    last: Option<Result<Response, String>>,
+    missing_variables: Vec<String>,
+    sending: bool,
+}
+
+impl RequestEditor {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Request name"));
+        let method = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(METHODS.to_vec()), Some(IndexPath::default()), window, cx)
+        });
+        let url = cx.new(|cx| InputState::new(window, cx).placeholder("{{base_url}}/path"));
+        let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let response_body = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
+
+        cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.send(window, cx),
+            InputEvent::Change => this.update_dirty(cx),
+            _ => {}
+        })
+        .detach();
+        cx.subscribe(&name, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.update_dirty(cx);
+            }
+        })
+        .detach();
+        for editor in [&headers, &body] {
+            cx.subscribe_in(editor, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => this.update_dirty(cx),
+                // Text inputs claim Ctrl+Enter themselves, so the SendRequest binding never
+                // fires while typing in them; treat their "secondary enter" as send.
+                InputEvent::PressEnter { secondary: true, .. } => this.send(window, cx),
+                _ => {}
+            })
+            .detach();
+        }
+        cx.subscribe(&method, |this, _, _: &SelectEvent<SearchableVec<&'static str>>, cx| {
+            this.update_dirty(cx);
+        })
+        .detach();
+
+        Self {
+            focus_handle: cx.focus_handle(),
+            path: None,
+            saved: None,
+            dirty: false,
+            variables: Variables::new(),
+            secrets: IndexMap::new(),
+            secret_store: None,
+            name,
+            method,
+            url,
+            headers,
+            body,
+            response_tab: 0,
+            response_body,
+            response_headers,
+            last: None,
+            missing_variables: Vec::new(),
+            sending: false,
+        }
+    }
+
+    pub fn path(&self) -> Option<&PathBuf> {
+        self.path.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn secret_names(&self) -> Vec<String> {
+        self.secrets.keys().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn headers_entity(&self) -> Entity<EditorState> {
+        self.headers.clone()
+    }
+
+    pub fn set_secret_store(&mut self, store: SecretStore) {
+        self.secret_store = Some(store);
+    }
+
+    /// Variables and secret references in effect for the active environment.
+    pub fn set_variables(&mut self, variables: Variables, secrets: IndexMap<String, SecretRef>) {
+        self.variables = variables;
+        self.secrets = secrets;
+    }
+
+    pub fn load(&mut self, path: PathBuf, request: RequestFile, window: &mut Window, cx: &mut Context<Self>) {
+        let method_index = METHODS
+            .iter()
+            .position(|m| m.eq_ignore_ascii_case(&request.method))
+            .unwrap_or(0);
+        self.name.update(cx, |s, cx| s.set_value(request.name.clone(), window, cx));
+        self.method
+            .update(cx, |s, cx| s.set_selected_index(Some(IndexPath::new(method_index)), window, cx));
+        self.url.update(cx, |s, cx| s.set_value(request.url.clone(), window, cx));
+        self.headers
+            .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
+        let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
+        self.body.update(cx, |s, cx| s.set_value(body, window, cx));
+
+        self.path = Some(path);
+        self.saved = Some(request);
+        self.dirty = false;
+        self.last = None;
+        self.missing_variables.clear();
+        self.response_body.update(cx, |s, cx| s.set_value("", window, cx));
+        self.response_headers.update(cx, |s, cx| s.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// Clears the editor, e.g. after the open request's collection was closed.
+    pub fn unload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.path = None;
+        self.saved = None;
+        self.dirty = false;
+        for input in [&self.name, &self.url] {
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        for editor in [&self.headers, &self.body, &self.response_body, &self.response_headers] {
+            editor.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.last = None;
+        cx.notify();
+    }
+
+    /// The request as currently shown in the editor.
+    fn current(&self, cx: &App) -> RequestFile {
+        let saved = self.saved.clone().unwrap_or_else(|| RequestFile::new(""));
+        let headers = headers_from_text(&self.headers.read(cx).value());
+        let content = self.body.read(cx).value().to_string();
+        let body = if content.trim().is_empty() {
+            None
+        } else {
+            let kind = saved.body.as_ref().map(|b| b.kind).unwrap_or_else(|| {
+                let content_type = headers.iter().find(|h| h.name.eq_ignore_ascii_case("content-type"));
+                match content_type {
+                    Some(h) => BodyKind::from_content_type(&h.value),
+                    None if serde_json::from_str::<serde_json::Value>(&content).is_ok() => BodyKind::Json,
+                    None => BodyKind::Text,
+                }
+            });
+            Some(Body { kind, content })
+        };
+        RequestFile {
+            name: self.name.read(cx).value().trim().to_string(),
+            method: self.method.read(cx).selected_value().copied().unwrap_or("GET").to_string(),
+            url: self.url.read(cx).value().to_string(),
+            headers,
+            body,
+            order: saved.order,
+        }
+    }
+
+    /// Computed from the inputs rather than cached, so a save right after a keystroke
+    /// never misses the edit.
+    fn is_modified(&self, cx: &App) -> bool {
+        self.saved.is_some() && self.saved.as_ref() != Some(&self.current(cx))
+    }
+
+    fn update_dirty(&mut self, cx: &mut Context<Self>) {
+        let dirty = self.is_modified(cx);
+        if dirty != self.dirty {
+            self.dirty = dirty;
+            cx.notify();
+        }
+    }
+
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if !self.is_modified(cx) {
+            return;
+        }
+        let request = self.current(cx);
+        match write_yaml(&path, &request) {
+            Ok(()) => {
+                self.saved = Some(request);
+                self.dirty = false;
+                cx.emit(RequestEditorEvent::Saved(path));
+            }
+            Err(e) => cx.emit(RequestEditorEvent::Error(format!("Could not save: {e:#}"))),
+        }
+        cx.notify();
+    }
+
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending || self.path.is_none() {
+            return;
+        }
+        let file = self.current(cx);
+        let mut variables = self.variables.clone();
+        let secrets = self.secrets.clone();
+        let store = self.secret_store.clone();
+        self.missing_variables.clear();
+        self.sending = true;
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (result, missing) = cx
+                .background_executor()
+                .spawn(async move {
+                    // Secret values are fetched only now, used for this one request, and dropped.
+                    if !secrets.is_empty() {
+                        match store {
+                            Some(store) => match store.get_all(&secrets).await {
+                                Ok((found, _)) => variables.extend(found),
+                                Err(e) => return (Err(format!("Could not read secrets: {e:#}")), Vec::new()),
+                            },
+                            None => return (Err("The secret store isn't available yet".into()), Vec::new()),
+                        }
+                    }
+                    let (request, missing) = Request::resolve(&file, &variables);
+                    (http::send(&request), missing)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.missing_variables = missing;
+                let (body, headers) = match &result {
+                    Ok(response) => (response.pretty_body(), response.headers_text()),
+                    Err(error) => (error.clone(), String::new()),
+                };
+                this.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
+                this.response_headers.update(cx, |s, cx| s.set_value(headers, window, cx));
+                this.last = Some(result);
+                this.sending = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn describe_missing(&self) -> String {
+        let (secrets, plain): (Vec<_>, Vec<_>) =
+            self.missing_variables.iter().cloned().partition(|name| self.secrets.contains_key(name));
+        let mut parts = Vec::new();
+        if !plain.is_empty() {
+            parts.push(format!("Undefined: {}", plain.join(", ")));
+        }
+        if !secrets.is_empty() {
+            parts.push(format!("Secret not set on this machine: {}", secrets.join(", ")));
+        }
+        parts.join("  ·  ")
+    }
+
+    fn move_header_to_secret(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        self.save(cx);
+        cx.emit(RequestEditorEvent::MoveHeaderToSecret { path, index });
+    }
+
+    fn render_credential_warning(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let theme = cx.theme().clone();
+        let headers = headers_from_text(&self.headers.read(cx).value());
+        let buttons: Vec<_> = headers
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| is_literal_credential(header))
+            .map(|(index, header)| {
+                Button::new(("move-header-to-secret", index))
+                    .xsmall()
+                    .warning()
+                    .label(format!("Move {} to a secret", header.name))
+                    .on_click(cx.listener(move |this, _, _, cx| this.move_header_to_secret(index, cx)))
+            })
+            .collect();
+        (!buttons.is_empty()).then(|| {
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .text_xs()
+                .text_color(theme.warning)
+                .child("Literal credential in headers, saved in plain text:")
+                .children(buttons)
+        })
+    }
+
+    fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (line, color) = match &self.last {
+            None if self.sending => ("Sending…".to_string(), theme.muted_foreground),
+            None => ("No response yet".to_string(), theme.muted_foreground),
+            Some(Err(_)) => ("Request failed".to_string(), theme.danger),
+            Some(Ok(r)) => (
+                format!(
+                    "{} {}  ·  {}  ·  {}",
+                    r.status,
+                    r.reason,
+                    format_duration(r.elapsed),
+                    format_size(r.body.len())
+                ),
+                if r.status < 400 { theme.success } else { theme.danger },
+            ),
+        };
+        h_flex()
+            .gap_3()
+            .text_sm()
+            .child(div().text_color(color).child(line))
+            .when(!self.missing_variables.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_color(theme.warning)
+                        .child(self.describe_missing()),
+                )
+            })
+    }
+}
+
+impl Focusable for RequestEditor {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for RequestEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        if self.path.is_none() {
+            return v_flex()
+                .size_full()
+                .justify_center()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("Select a request, or create one from a collection's menu")
+                .into_any_element();
+        }
+
+        let label = |text: &'static str| div().text_xs().text_color(theme.muted_foreground).child(text);
+        let response_tab = self.response_tab;
+        let header_count = match &self.last {
+            Some(Ok(r)) => format!("Headers ({})", r.headers.len()),
+            _ => "Headers".into(),
+        };
+
+        v_flex()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &SaveRequest, _, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &SendRequest, window, cx| this.send(window, cx)))
+            .size_full()
+            .p_3()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.name)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(if self.dirty { "Unsaved · Ctrl+S" } else { "Saved" }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().w_32().child(Select::new(&self.method)))
+                    .child(div().flex_1().child(Input::new(&self.url)))
+                    .child(
+                        Button::new("send")
+                            .primary()
+                            .label("Send")
+                            .tooltip("Ctrl+Enter")
+                            .loading(self.sending)
+                            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(label("Headers (Name: value, # to disable)"))
+                            .child(Editor::new(&self.headers).h_32())
+                            .children(self.render_credential_warning(cx))
+                            .child(label("Body"))
+                            .child(Editor::new(&self.body).flex_1().min_h_0()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .child(self.render_status(cx))
+                                    .child(
+                                        TabBar::new("response-tabs")
+                                            .segmented()
+                                            .small()
+                                            .selected_index(response_tab)
+                                            .child(Tab::new().label("Body"))
+                                            .child(Tab::new().label(header_count))
+                                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                                this.response_tab = *index;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                Editor::new(if response_tab == 0 {
+                                    &self.response_body
+                                } else {
+                                    &self.response_headers
+                                })
+                                .readonly(true)
+                                .flex_1()
+                                .min_h_0(),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    if d.as_secs() >= 1 {
+        format!("{:.2} s", d.as_secs_f64())
+    } else {
+        format!("{} ms", d.as_millis())
+    }
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}

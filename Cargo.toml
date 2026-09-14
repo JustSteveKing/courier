@@ -1,0 +1,24 @@
+[package]
+name = "gpui-playground"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+etcetera = "0.11.0"
+gpui-kit = { version = "0.6.1", features = ["tree-sitter"] }
+indexmap = { version = "2.14.2", features = ["serde"] }
+notify = "8.2.0"
+oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_norway = "0.9.42"
+toml = "1.1.6"
+ureq = "3"
+uuid = { version = "1.26.1", features = ["v4"] }
+
+[dev-dependencies]
+futures-lite = "2.6.1"
+gpui-kit = { version = "0.6.1", features = ["test-support", "tree-sitter"] }
+tempfile = "3.27.0"
