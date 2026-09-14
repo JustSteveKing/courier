@@ -69,22 +69,12 @@ pub struct Response {
     pub elapsed: Duration,
 }
 
-impl Response {
-    /// The body, re-indented when it is JSON.
-    pub fn pretty_body(&self) -> String {
-        serde_json::from_str::<serde_json::Value>(&self.body)
-            .ok()
-            .and_then(|json| serde_json::to_string_pretty(&json).ok())
-            .unwrap_or_else(|| self.body.clone())
-    }
-
-    pub fn headers_text(&self) -> String {
-        self.headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
+/// A response body, re-indented when it is JSON.
+pub fn pretty_body(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| serde_json::to_string_pretty(&json).ok())
+        .unwrap_or_else(|| body.to_string())
 }
 
 pub fn send(request: &Request) -> Result<Response, String> {

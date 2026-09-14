@@ -7,6 +7,7 @@ mod model;
 mod omarchy_theme;
 mod paths;
 mod request_editor;
+mod response_cache;
 mod secret_store;
 mod settings;
 mod storage;

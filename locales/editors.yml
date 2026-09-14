@@ -370,3 +370,29 @@ http.failed_to_read_body:
   es: "No se pudo leer el cuerpo: %{error}"
   de: "Body konnte nicht gelesen werden: %{error}"
   fr: "Impossible de lire le corps : %{error}"
+
+request.truncated:
+  en: Body was cut to 2 MB when saved
+  es: El cuerpo se recortó a 2 MB al guardarse
+  de: Body beim Speichern auf 2 MB gekürzt
+  fr: Corps tronqué à 2 Mo lors de l'enregistrement
+request.saved_just_now:
+  en: saved just now
+  es: guardada hace un momento
+  de: gerade eben gespeichert
+  fr: enregistrée à l'instant
+request.saved_minutes_ago:
+  en: "saved %{count} min ago"
+  es: "guardada hace %{count} min"
+  de: "vor %{count} Min. gespeichert"
+  fr: "enregistrée il y a %{count} min"
+request.saved_hours_ago:
+  en: "saved %{count} h ago"
+  es: "guardada hace %{count} h"
+  de: "vor %{count} Std. gespeichert"
+  fr: "enregistrée il y a %{count} h"
+request.saved_days_ago:
+  en: "saved %{count} d ago"
+  es: "guardada hace %{count} d"
+  de: "vor %{count} Tg. gespeichert"
+  fr: "enregistrée il y a %{count} j"

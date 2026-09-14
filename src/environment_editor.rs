@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -17,6 +16,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::credentials::looks_sensitive_name;
+use crate::i18n::{EditMenu, edit_menu};
 use crate::model::{EnvironmentFile, Variables, variables_from_text, variables_to_text};
 use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
 use crate::storage::{self, Collection};
@@ -616,12 +616,7 @@ impl EnvironmentEditor {
                 .title(t!("env.delete_title", name = name).to_string())
                 .w(px(420.))
                 .content(move |content, _, _| content.child(message.clone()))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(t!("env.delete").to_string())
-                        .ok_variant(ButtonVariant::Danger)
-                        .show_cancel(true),
-                )
+                .footer(crate::i18n::dialog_footer(Some(t!("env.delete").to_string()), ButtonVariant::Danger))
                 .on_ok(move |_, window, cx| {
                     let result = storage::delete_file(&path);
                     let secret_refs = secret_refs.clone();
@@ -843,7 +838,7 @@ impl EnvironmentEditor {
                 h_flex()
                     .gap_2()
                     .child(div().w(px(180.)).flex_none().truncate().text_sm().font_family("monospace").child(row.name.clone()))
-                    .child(div().flex_1().min_w_0().child(Input::new(&row.input).small()))
+                    .child(div().flex_1().min_w_0().child(Input::new(&row.input).small().context_menu(edit_menu(EditMenu::Secret))))
                     .child(div().w(px(150.)).flex_none().text_xs().text_color(color).child(status.to_string()))
                     .child(
                         Button::new(("reveal-secret", ix))
@@ -902,7 +897,7 @@ impl EnvironmentEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(180.)).flex_none().child(Input::new(&self.new_secret).small()))
+                    .child(div().w(px(180.)).flex_none().child(Input::new(&self.new_secret).small().context_menu(edit_menu(EditMenu::Editable))))
                     .child(
                         Button::new("add-secret")
                             .small()
@@ -970,7 +965,7 @@ impl Render for EnvironmentEditor {
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(Input::new(&self.name))
+                                    .child(Input::new(&self.name).context_menu(edit_menu(EditMenu::Editable)))
                                     .when(is_defaults, |s| {
                                         s.child(
                                             div()
@@ -1018,7 +1013,7 @@ impl Render for EnvironmentEditor {
                             .text_color(theme.muted_foreground)
                             .child(t!("env.variables_hint").to_string()),
                     )
-                    .child(Editor::new(&self.variables).flex_1().min_h(px(120.)))
+                    .child(Editor::new(&self.variables).flex_1().min_h(px(120.)).context_menu(edit_menu(EditMenu::Editable)))
                     .child(match &self.error {
                         Some(error) => div().text_sm().text_color(theme.danger).child(error.clone()),
                         None => div().text_xs().text_color(theme.muted_foreground).child(hint),

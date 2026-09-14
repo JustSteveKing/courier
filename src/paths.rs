@@ -3,6 +3,7 @@
 //! - `$XDG_CONFIG_HOME/<app>/` — user settings (reserved; nothing written yet)
 //! - `$XDG_DATA_HOME/<app>/collections/` — default home for new collections
 //! - `$XDG_STATE_HOME/<app>/state.yaml` — open collections, active environments, last request
+//! - `$XDG_CACHE_HOME/<app>/responses/` — last response per request (disposable)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ pub struct AppPaths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,
+    pub cache_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -30,6 +32,7 @@ impl AppPaths {
             config_dir: xdg.config_dir().join(APP_NAME),
             data_dir: xdg.data_dir().join(APP_NAME),
             state_dir: xdg.state_dir().unwrap_or_else(|| xdg.data_dir()).join(APP_NAME),
+            cache_dir: xdg.cache_dir().join(APP_NAME),
         })
     }
 

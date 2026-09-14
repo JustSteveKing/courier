@@ -19,11 +19,13 @@ pub struct Settings {
     pub language: Option<String>,
     /// Use the active Omarchy theme when available; otherwise GPUI Kit's default themes.
     pub follow_omarchy_theme: bool,
+    /// Save each request's last response to the cache directory so it survives restarts.
+    pub remember_responses: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { language: None, follow_omarchy_theme: true }
+        Self { language: None, follow_omarchy_theme: true, remember_responses: true }
     }
 }
 
@@ -88,7 +90,7 @@ mod tests {
     use super::*;
 
     fn paths(root: &std::path::Path) -> AppPaths {
-        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state") }
+        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state"), cache_dir: root.join("cache") }
     }
 
     #[test]

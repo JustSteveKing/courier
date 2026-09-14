@@ -267,7 +267,7 @@ mod tests {
     use super::*;
 
     fn paths(root: &Path) -> AppPaths {
-        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state") }
+        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state"), cache_dir: root.join("cache") }
     }
 
     #[test]

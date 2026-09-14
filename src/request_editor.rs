@@ -1,7 +1,7 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
@@ -14,9 +14,12 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
-use crate::http::{self, Request, Response};
+use crate::i18n::{EditMenu, edit_menu};
+use crate::http::{self, Request};
 use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
+use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
+use crate::settings::AppSettings;
 use crate::storage::write_yaml;
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -41,6 +44,18 @@ pub enum RequestEditorEvent {
 
 impl EventEmitter<RequestEditorEvent> for RequestEditor {}
 
+/// Response and send state for one request, kept while the app runs so switching between
+/// requests never loses (or misplaces) a response.
+#[derive(Default)]
+struct ResponseState {
+    response: Option<StoredResponse>,
+    /// Loaded from the cache rather than received in this session.
+    restored: bool,
+    sending: bool,
+    missing_variables: Vec<String>,
+    cache_key: Option<CacheKey>,
+}
+
 pub struct RequestEditor {
     focus_handle: FocusHandle,
     /// The file being edited, and its contents as last loaded or saved.
@@ -60,9 +75,8 @@ pub struct RequestEditor {
     response_tab: usize,
     response_body: Entity<EditorState>,
     response_headers: Entity<EditorState>,
-    last: Option<Result<Response, String>>,
-    missing_variables: Vec<String>,
-    sending: bool,
+    responses: HashMap<PathBuf, ResponseState>,
+    response_cache: Option<ResponseCache>,
 }
 
 impl RequestEditor {
@@ -120,9 +134,8 @@ impl RequestEditor {
             response_tab: 0,
             response_body,
             response_headers,
-            last: None,
-            missing_variables: Vec::new(),
-            sending: false,
+            responses: HashMap::new(),
+            response_cache: None,
         }
     }
 
@@ -148,6 +161,56 @@ impl RequestEditor {
         cx.notify();
     }
 
+    pub fn set_response_cache(&mut self, cache: ResponseCache) {
+        self.response_cache = Some(cache);
+    }
+
+    #[cfg(test)]
+    pub fn shown_response(&self) -> Option<(&StoredResponse, bool)> {
+        self.state().and_then(|s| s.response.as_ref().map(|r| (r, s.restored)))
+    }
+
+    #[cfg(test)]
+    pub fn is_sending(&self) -> bool {
+        self.state().is_some_and(|s| s.sending)
+    }
+
+    #[cfg(test)]
+    pub fn response_for(&self, path: &std::path::Path) -> Option<&StoredResponse> {
+        self.responses.get(path).and_then(|s| s.response.as_ref())
+    }
+
+    /// Forgets every response (in memory and on disk), except requests still in flight.
+    pub fn clear_responses(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let removed = self.response_cache.as_ref().map(|c| c.clear().unwrap_or(0)).unwrap_or(0);
+        for state in self.responses.values_mut() {
+            state.response = None;
+            state.restored = false;
+            state.missing_variables.clear();
+        }
+        self.show_response(window, cx);
+        removed
+    }
+
+    fn state(&self) -> Option<&ResponseState> {
+        self.path.as_ref().and_then(|p| self.responses.get(p))
+    }
+
+    /// Puts the current request's response (if any) into the response panes.
+    fn show_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (body, headers) = match self.state().and_then(|s| s.response.as_ref()).map(|r| &r.outcome) {
+            Some(Outcome::Response { headers, body, .. }) => (
+                http::pretty_body(body),
+                headers.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n"),
+            ),
+            Some(Outcome::Error { message }) => (message.clone(), String::new()),
+            None => (String::new(), String::new()),
+        };
+        self.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
+        self.response_headers.update(cx, |s, cx| s.set_value(headers, window, cx));
+        cx.notify();
+    }
+
     pub fn set_secret_store(&mut self, store: SecretStore) {
         self.secret_store = Some(store);
     }
@@ -158,7 +221,16 @@ impl RequestEditor {
         self.secrets = secrets;
     }
 
-    pub fn load(&mut self, path: PathBuf, request: RequestFile, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows `request`. `cache_key` identifies it in the response cache (see
+    /// [`response_cache::cache_key`]).
+    pub fn load(
+        &mut self,
+        path: PathBuf,
+        request: RequestFile,
+        cache_key: Option<CacheKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let method_index = METHODS
             .iter()
             .position(|m| m.eq_ignore_ascii_case(&request.method))
@@ -172,14 +244,23 @@ impl RequestEditor {
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
 
+        let remember = AppSettings::get(cx).remember_responses;
+        let state = self.responses.entry(path.clone()).or_default();
+        state.cache_key = cache_key;
+        if state.response.is_none()
+            && !state.sending
+            && remember
+            && let (Some(cache), Some(key)) = (&self.response_cache, &state.cache_key)
+            && let Some(response) = cache.load(key)
+        {
+            state.response = Some(response);
+            state.restored = true;
+        }
+
         self.path = Some(path);
         self.saved = Some(request);
         self.dirty = false;
-        self.last = None;
-        self.missing_variables.clear();
-        self.response_body.update(cx, |s, cx| s.set_value("", window, cx));
-        self.response_headers.update(cx, |s, cx| s.set_value("", window, cx));
-        cx.notify();
+        self.show_response(window, cx);
     }
 
     /// Clears the editor, e.g. after the open request's collection was closed.
@@ -193,7 +274,6 @@ impl RequestEditor {
         for editor in [&self.headers, &self.body, &self.response_body, &self.response_headers] {
             editor.update(cx, |s, cx| s.set_value("", window, cx));
         }
-        self.last = None;
         cx.notify();
     }
 
@@ -259,15 +339,19 @@ impl RequestEditor {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sending || self.path.is_none() {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let state = self.responses.entry(path.clone()).or_default();
+        if state.sending {
             return;
         }
+        state.sending = true;
+        state.missing_variables.clear();
         let file = self.current(cx);
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
         let store = self.secret_store.clone();
-        self.missing_variables.clear();
-        self.sending = true;
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -291,16 +375,28 @@ impl RequestEditor {
                     (http::send(&request), missing)
                 })
                 .await;
+            let stored = StoredResponse::from_result(&result, response_cache::now());
             this.update_in(cx, |this, window, cx| {
-                this.missing_variables = missing;
-                let (body, headers) = match &result {
-                    Ok(response) => (response.pretty_body(), response.headers_text()),
-                    Err(error) => (error.clone(), String::new()),
-                };
-                this.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
-                this.response_headers.update(cx, |s, cx| s.set_value(headers, window, cx));
-                this.last = Some(result);
-                this.sending = false;
+                // The response belongs to the request that sent it, whichever one is open now.
+                let state = this.responses.entry(path.clone()).or_default();
+                state.response = Some(stored.clone());
+                state.restored = false;
+                state.sending = false;
+                state.missing_variables = missing;
+                if AppSettings::get(cx).remember_responses
+                    && let (Some(cache), Some(key)) = (this.response_cache.clone(), state.cache_key.clone())
+                {
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(e) = cache.save(&key, &stored) {
+                                eprintln!("could not cache response: {e:#}");
+                            }
+                        })
+                        .detach();
+                }
+                if this.path.as_ref() == Some(&path) {
+                    this.show_response(window, cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -308,9 +404,9 @@ impl RequestEditor {
         .detach();
     }
 
-    fn describe_missing(&self) -> String {
+    fn describe_missing(&self, missing: &[String]) -> String {
         let (secrets, plain): (Vec<_>, Vec<_>) =
-            self.missing_variables.iter().cloned().partition(|name| self.secrets.contains_key(name));
+            missing.iter().cloned().partition(|name| self.secrets.contains_key(name));
         let mut parts = Vec::new();
         if !plain.is_empty() {
             parts.push(t!("request.undefined", names = plain.join(", ")).to_string());
@@ -357,31 +453,40 @@ impl RequestEditor {
 
     fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (line, color) = match &self.last {
-            None if self.sending => (t!("request.status_sending").to_string(), theme.muted_foreground),
+        let state = self.state();
+        let sending = state.is_some_and(|s| s.sending);
+        let response = state.and_then(|s| s.response.as_ref());
+        let (line, color) = match response.map(|r| (r, &r.outcome)) {
+            _ if sending => (t!("request.status_sending").to_string(), theme.muted_foreground),
             None => (t!("request.status_none").to_string(), theme.muted_foreground),
-            Some(Err(_)) => (t!("request.status_failed").to_string(), theme.danger),
-            Some(Ok(r)) => (
-                format!(
-                    "{} {}  ·  {}  ·  {}",
-                    r.status,
-                    r.reason,
-                    format_duration(r.elapsed),
-                    format_size(r.body.len())
-                ),
-                if r.status < 400 { theme.success } else { theme.danger },
+            Some((_, Outcome::Error { .. })) => (t!("request.status_failed").to_string(), theme.danger),
+            Some((r, Outcome::Response { status, reason, body_size, .. })) => (
+                format!("{status} {reason}  ·  {}  ·  {}", format_duration(r.elapsed_ms), format_size(*body_size)),
+                if *status < 400 { theme.success } else { theme.danger },
             ),
         };
+        let restored = state.filter(|s| s.restored && !sending).and(response);
+        let truncated = matches!(response.map(|r| &r.outcome), Some(Outcome::Response { truncated: true, .. }));
+        let missing = state.map(|s| s.missing_variables.clone()).unwrap_or_default();
         h_flex()
-            .gap_3()
+            .flex_1()
+            .min_w_0()
+            .flex_wrap()
+            .gap_x_3()
             .text_sm()
             .child(div().text_color(color).child(line))
-            .when(!self.missing_variables.is_empty(), |this| {
+            .when_some(restored, |this, response| {
                 this.child(
                     div()
-                        .text_color(theme.warning)
-                        .child(self.describe_missing()),
+                        .text_color(theme.muted_foreground)
+                        .child(saved_age(response_cache::now().saturating_sub(response.received_at))),
                 )
+            })
+            .when(truncated, |this| {
+                this.child(div().text_color(theme.warning).child(t!("request.truncated").to_string()))
+            })
+            .when(!missing.is_empty(), |this| {
+                this.child(div().text_color(theme.warning).child(self.describe_missing(&missing)))
             })
     }
 }
@@ -407,10 +512,11 @@ impl Render for RequestEditor {
 
         let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         let response_tab = self.response_tab;
-        let header_count = match &self.last {
-            Some(Ok(r)) => t!("request.headers_tab_count", count = r.headers.len()).to_string(),
+        let header_count = match self.state().and_then(|s| s.response.as_ref()).map(|r| &r.outcome) {
+            Some(Outcome::Response { headers, .. }) => t!("request.headers_tab_count", count = headers.len()).to_string(),
             _ => t!("request.headers_tab").to_string(),
         };
+        let sending = self.state().is_some_and(|s| s.sending);
 
         v_flex()
             .key_context(CONTEXT)
@@ -423,7 +529,7 @@ impl Render for RequestEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.name)))
+                    .child(div().flex_1().child(Input::new(&self.name).context_menu(edit_menu(EditMenu::Editable))))
                     .child(
                         div()
                             .text_xs()
@@ -435,13 +541,13 @@ impl Render for RequestEditor {
                 h_flex()
                     .gap_2()
                     .child(div().w_32().child(Select::new(&self.method)))
-                    .child(div().flex_1().child(Input::new(&self.url)))
+                    .child(div().flex_1().child(Input::new(&self.url).context_menu(edit_menu(EditMenu::Editable))))
                     .child(
                         Button::new("send")
                             .primary()
                             .label(t!("request.send").to_string())
                             .tooltip(t!("request.send_shortcut").to_string())
-                            .loading(self.sending)
+                            .loading(sending)
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     ),
             )
@@ -457,10 +563,10 @@ impl Render for RequestEditor {
                             .min_w_0()
                             .gap_1()
                             .child(label(t!("request.headers_label").to_string()))
-                            .child(Editor::new(&self.headers).h_32())
+                            .child(Editor::new(&self.headers).h_32().context_menu(edit_menu(EditMenu::Editable)))
                             .children(self.render_credential_warning(cx))
                             .child(label(t!("request.body").to_string()))
-                            .child(Editor::new(&self.body).flex_1().min_h_0()),
+                            .child(Editor::new(&self.body).flex_1().min_h_0().context_menu(edit_menu(EditMenu::Editable))),
                     )
                     .child(
                         v_flex()
@@ -469,10 +575,10 @@ impl Render for RequestEditor {
                             .gap_1()
                             .child(
                                 h_flex()
-                                    .justify_between()
+                                    .gap_2()
                                     .child(self.render_status(cx))
                                     .child(
-                                        TabBar::new("response-tabs")
+                                        div().flex_none().child(TabBar::new("response-tabs")
                                             .segmented()
                                             .small()
                                             .selected_index(response_tab)
@@ -481,7 +587,7 @@ impl Render for RequestEditor {
                                             .on_click(cx.listener(|this, index: &usize, _, cx| {
                                                 this.response_tab = *index;
                                                 cx.notify();
-                                            })),
+                                            }))),
                                     ),
                             )
                             .child(
@@ -491,6 +597,7 @@ impl Render for RequestEditor {
                                     &self.response_headers
                                 })
                                 .readonly(true)
+                                .context_menu(edit_menu(EditMenu::ReadOnly))
                                 .flex_1()
                                 .min_h_0(),
                             ),
@@ -500,11 +607,21 @@ impl Render for RequestEditor {
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    if d.as_secs() >= 1 {
-        format!("{:.2} s", d.as_secs_f64())
+fn format_duration(ms: u64) -> String {
+    if ms >= 1000 {
+        format!("{:.2} s", ms as f64 / 1000.0)
     } else {
-        format!("{} ms", d.as_millis())
+        format!("{ms} ms")
+    }
+}
+
+/// "saved 5 min ago" and similar, for a response restored from the cache.
+fn saved_age(seconds: u64) -> String {
+    match seconds {
+        0..60 => t!("request.saved_just_now").to_string(),
+        60..3600 => t!("request.saved_minutes_ago", count = seconds / 60).to_string(),
+        3600..86400 => t!("request.saved_hours_ago", count = seconds / 3600).to_string(),
+        _ => t!("request.saved_days_ago", count = seconds / 86400).to_string(),
     }
 }
 

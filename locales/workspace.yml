@@ -233,3 +233,59 @@ settings.open_file:
   es: Abrir archivo de ajustes
   de: Einstellungsdatei öffnen
   fr: Ouvrir le fichier de paramètres
+ws.responses_cleared:
+  en: "Cleared %{count} saved responses"
+  es: "Se borraron %{count} respuestas guardadas"
+  de: "%{count} gespeicherte Antworten gelöscht"
+  fr: "%{count} réponses enregistrées effacées"
+settings.remember_responses:
+  en: Remember last responses between sessions
+  es: Recordar las últimas respuestas entre sesiones
+  de: Letzte Antworten sitzungsübergreifend merken
+  fr: Mémoriser les dernières réponses entre les sessions
+settings.clear_responses:
+  en: Clear saved responses
+  es: Borrar las respuestas guardadas
+  de: Gespeicherte Antworten löschen
+  fr: Effacer les réponses enregistrées
+
+common.ok:
+  en: OK
+  es: Aceptar
+  de: OK
+  fr: OK
+common.cancel:
+  en: Cancel
+  es: Cancelar
+  de: Abbrechen
+  fr: Annuler
+palette.empty:
+  en: No matching commands
+  es: Ningún comando coincide
+  de: Keine passenden Befehle
+  fr: Aucune commande correspondante
+edit.cut:
+  en: Cut
+  es: Cortar
+  de: Ausschneiden
+  fr: Couper
+edit.copy:
+  en: Copy
+  es: Copiar
+  de: Kopieren
+  fr: Copier
+edit.paste:
+  en: Paste
+  es: Pegar
+  de: Einfügen
+  fr: Coller
+edit.select_all:
+  en: Select all
+  es: Seleccionar todo
+  de: Alles auswählen
+  fr: Tout sélectionner
+ws.import:
+  en: Import
+  es: Importar
+  de: Importieren
+  fr: Importer

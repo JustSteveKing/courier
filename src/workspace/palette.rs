@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
-use gpui_kit::component::{IconName, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, IconName, WindowExt as _};
 use gpui_kit::*;
 use rust_i18n::t;
 
@@ -80,7 +80,15 @@ impl Workspace {
                         let mut command = Command::new(&state)
                             .placeholder(t!("palette.placeholder").to_string())
                             .max_h(px(440.))
-                            .bordered(false);
+                            .bordered(false)
+                            .empty(|_, _, cx| {
+                                div()
+                                    .py_6()
+                                    .text_center()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(t!("palette.empty").to_string())
+                            });
                         for group in groups.iter() {
                             let items = group.entries.iter().map(|entry| {
                                 let mut item = CommandItem::new()
@@ -220,6 +228,20 @@ fn settings_entries(cx: &App) -> Group {
             .checked(settings.language.as_deref() == Some(code)),
         );
     }
+    let remember = settings.remember_responses;
+    entries.push(
+        Entry::new(t!("settings.remember_responses"), move |this, window, cx| {
+            this.set_remember_responses(!remember, window, cx)
+        })
+        .english("settings.remember_responses")
+        .keywords(["cache".into(), "history".into()])
+        .checked(remember),
+    );
+    entries.push(
+        Entry::new(t!("settings.clear_responses"), |this, window, cx| this.clear_saved_responses(window, cx))
+            .english("settings.clear_responses")
+            .keywords(["cache".into()]),
+    );
     let follow = settings.follow_omarchy_theme;
     entries.push(
         Entry::new(t!("settings.follow_omarchy"), move |_, _, cx| {

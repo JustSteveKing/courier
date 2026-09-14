@@ -5,9 +5,10 @@ pub mod palette;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -22,11 +23,13 @@ use rust_i18n::t;
 
 use crate::credentials::{hoist_credentials_with, hoist_header};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
+use crate::i18n::{EditMenu, dialog_footer, edit_menu};
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
 use crate::model::{CollectionFile, EnvironmentFile, RequestFile, Variables};
 use crate::paths::{AppPaths, AppState};
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
+use crate::response_cache::{CacheKey, Liveness, ResponseCache, cache_key};
 use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
 use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
@@ -58,7 +61,11 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| RequestEditor::new(window, cx));
+        let editor = cx.new(|cx| {
+            let mut editor = RequestEditor::new(window, cx);
+            editor.set_response_cache(ResponseCache::new(&paths.cache_dir));
+            editor
+        });
         let environment = cx.new(|cx| {
             SelectState::new(SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]), None, window, cx)
         });
@@ -107,6 +114,7 @@ impl Workspace {
             pending_secret_writes: Vec::new(),
         };
         this.connect_secret_store(window, cx);
+        this.start_response_tidy(cx);
         this.restore(window, cx);
         this.focus_handle.focus(window, cx);
         this
@@ -253,17 +261,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The response-cache key for a request in an open collection.
+    fn response_key(&self, path: &Path) -> Option<CacheKey> {
+        let collection = &self.collections[self.collection_index_for(path)?];
+        Some(cache_key(collection.file.id.as_deref(), &collection.root, path))
+    }
+
     fn select_request(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(request) = self.find_request(&path).cloned() else {
             return;
         };
+        let key = self.response_key(&path);
         if self.main_view == MainView::Environments && !self.close_environments(window, cx) {
             return;
         }
         self.editor.update(cx, |editor, cx| {
             // Switching requests saves the one you were editing, like most modern API clients.
             editor.save(cx);
-            editor.load(path.clone(), request, window, cx);
+            editor.load(path.clone(), request, key, window, cx);
         });
         self.state.last_request = Some(path);
         self.save_state();
@@ -359,6 +374,87 @@ impl Workspace {
         cx.refresh_windows();
     }
 
+    /// Shortly after startup and then hourly, deletes saved responses whose request is gone.
+    fn start_response_tidy(&mut self, cx: &mut Context<Self>) {
+        const FIRST_RUN: Duration = Duration::from_secs(30);
+        const EVERY: Duration = Duration::from_secs(60 * 60);
+        let cache = ResponseCache::new(&self.paths.cache_dir);
+        cx.spawn(async move |this, cx| {
+            let mut delay = FIRST_RUN;
+            loop {
+                cx.background_executor().timer(delay).await;
+                delay = EVERY;
+                // Collections are re-read from disk first, so requests deleted outside the app
+                // count as gone.
+                let Ok(live) = this.update(cx, |this, cx| {
+                    AppSettings::get(cx).remember_responses.then(|| this.response_liveness_from_disk())
+                }) else {
+                    break;
+                };
+                let Some(live) = live else {
+                    continue;
+                };
+                let cache = cache.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { cache.tidy(&live, std::time::SystemTime::now()) })
+                    .await;
+                match result {
+                    Ok(report) if report.removed > 0 => {
+                        eprintln!("tidied response cache: removed {}, kept {}", report.removed, report.kept)
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("could not tidy response cache: {e:#}"),
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Like [`Self::response_liveness`], but re-reads collections so outside changes count.
+    fn response_liveness_from_disk(&self) -> Liveness {
+        let mut live = Liveness::default();
+        for collection in &self.collections {
+            // An unreadable collection is skipped, so none of its responses count as orphans.
+            if let Ok(fresh) = storage::load_collection(&collection.root) {
+                let single = Workspace::liveness_of(&fresh);
+                live.keys.extend(single.keys);
+                live.collection_ids.extend(single.collection_ids);
+            }
+        }
+        live
+    }
+
+    fn liveness_of(collection: &Collection) -> Liveness {
+        fn walk(items: &[Item], collection: &Collection, live: &mut Liveness) {
+            for item in items {
+                match item {
+                    Item::Folder { children, .. } => walk(children, collection, live),
+                    Item::Request { path, .. } => {
+                        live.keys.insert(cache_key(collection.file.id.as_deref(), &collection.root, path).key);
+                    }
+                }
+            }
+        }
+        let mut live = Liveness::default();
+        live.collection_ids.extend(collection.file.id.clone());
+        walk(&collection.items, collection, &mut live);
+        live
+    }
+
+    fn set_remember_responses(&mut self, remember: bool, window: &mut Window, cx: &mut Context<Self>) {
+        AppSettings::update(cx, |settings| settings.remember_responses = remember);
+        if !remember {
+            // Turning it off means nothing should stay on disk.
+            self.clear_saved_responses(window, cx);
+        }
+    }
+
+    fn clear_saved_responses(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let removed = self.editor.update(cx, |editor, cx| editor.clear_responses(window, cx));
+        window.push_notification(Notification::success(t!("ws.responses_cleared", count = removed).to_string()), cx);
+    }
+
     fn choose_environment(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(collection) = self.active_collection(cx) else {
             return;
@@ -391,9 +487,10 @@ impl Workspace {
             dialog
                 .title(t!("ws.new_collection").to_string())
                 .w(px(420.))
+                .footer(dialog_footer(None, ButtonVariant::Primary))
                 .content({
                     let name = name.clone();
-                    move |content, _, _| content.child(Input::new(&name))
+                    move |content, _, _| content.child(Input::new(&name).context_menu(edit_menu(EditMenu::Editable)))
                 })
                 .on_ok(move |_, window, cx| {
                     let value = name.read(cx).value().trim().to_string();
@@ -448,10 +545,11 @@ impl Workspace {
             let dir = dir.clone();
             dialog
                 .title(t!("ws.import_curl_title").to_string())
+                .footer(dialog_footer(Some(t!("ws.import").to_string()), ButtonVariant::Primary))
                 .w(px(640.))
                 .content({
                     let command = command.clone();
-                    move |content, _, _| content.child(Textarea::new(&command))
+                    move |content, _, _| content.child(Textarea::new(&command).context_menu(edit_menu(EditMenu::Editable)))
                 })
                 .on_ok(move |_, window, cx| {
                     let text = command.read(cx).value().to_string();
@@ -773,7 +871,8 @@ impl Workspace {
                 self.flush_secret_writes(window, cx);
                 self.reload_collection(&root, window, cx);
                 if let Some(request) = self.find_request(&path).cloned() {
-                    self.editor.update(cx, |editor, cx| editor.load(path.clone(), request, window, cx));
+                    let key = self.response_key(&path);
+                    self.editor.update(cx, |editor, cx| editor.load(path.clone(), request, key, window, cx));
                 }
                 window.push_notification(Notification::success(message), cx);
             }
@@ -1240,6 +1339,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             state_dir: tmp.path().join("state"),
+            cache_dir: tmp.path().join("cache"),
         };
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -1316,7 +1416,7 @@ mod tests {
         })
         .await;
 
-        // Delete it through the confirmation dialog.
+        // Delete it through the confirmation dialog: Cancel keeps it, the Delete button removes it.
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             window.click("delete-environment", cx);
@@ -1325,7 +1425,21 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.press("enter", cx);
+            window.click("dialog-cancel", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(new_env.exists(), "cancel keeps the environment");
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx), "cancel closes the dialog");
+            window.render_frame(cx);
+            window.click("delete-environment", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
         })
         .unwrap();
         cx.run_until_parked();
@@ -1375,6 +1489,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             state_dir: tmp.path().join("state"),
+            cache_dir: tmp.path().join("cache"),
         };
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -1431,6 +1546,143 @@ mod tests {
         .unwrap();
     }
 
+    /// Answers one HTTP request on a local port; returns the port.
+    fn one_shot_server(response: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        port
+    }
+
+    #[gpui_kit::test]
+    async fn responses_stay_with_their_request_and_survive_restarts(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::request_editor::init(cx);
+            environment_editor::init(cx);
+            cx.set_global(AppSettings::load(&paths));
+        });
+        let open = |cx: &mut TestAppContext| {
+            let mut workspace = None;
+            let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+                let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+                workspace = Some(view.clone());
+                Root::new(view, window, cx)
+            });
+            (workspace.unwrap(), AnyWindowHandle::from(handle))
+        };
+
+        let (workspace, window) = open(cx);
+        let root = paths.collections_dir().join("example");
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let port = one_shot_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: session=SESSION_SECRET_42\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/json");
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        // Send from "Get JSON", then switch to "Echo POST" before the response arrives.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            let headers = workspace.read(cx).editor.read(cx).headers_entity();
+            headers.focus_handle(cx).focus(window, cx);
+            window.render_frame(cx);
+            window.press("ctrl-enter", cx);
+        })
+        .unwrap();
+        // Events from the key press are delivered when that update ends, so the send has
+        // started (but not finished) before this switch.
+        cx.update_window(window, |_, window, cx| {
+            assert!(workspace.read(cx).editor.read(cx).is_sending(), "send started");
+            workspace.update(cx, |this, cx| this.select_request(echo.clone(), window, cx));
+        })
+        .unwrap();
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if cx.update(|cx| workspace.read(cx).editor.read(cx).response_for(&get_json).is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cx.update(|cx| {
+            let editor = workspace.read(cx).editor.read(cx);
+            assert_eq!(editor.path(), Some(&echo));
+            assert!(editor.shown_response().is_none(), "the response must not land on Echo POST");
+            let Some(response) = editor.response_for(&get_json) else { panic!("response lost") };
+            assert!(matches!(response.outcome, crate::response_cache::Outcome::Response { status: 200, .. }));
+        });
+
+        // Switching back shows it again.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+            let editor = workspace.read(cx).editor.read(cx);
+            let (_, restored) = editor.shown_response().expect("shown after switching back");
+            assert!(!restored);
+        })
+        .unwrap();
+
+        // It was cached to disk with the session cookie masked.
+        cx.run_until_parked();
+        let cached: Vec<_> = all_files(&paths.cache_dir);
+        assert_eq!(cached.len(), 1, "{cached:?}");
+        assert_not_on_disk(tmp.path(), "SESSION_SECRET_42");
+
+        // A fresh workspace (as after a restart) restores it, marked as restored.
+        let (restarted, window) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+            restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+            let editor = restarted.read(cx).editor.read(cx);
+            let (response, restored) = editor.shown_response().expect("restored from cache");
+            assert!(restored);
+            let crate::response_cache::Outcome::Response { headers, .. } = &response.outcome else { panic!() };
+            assert!(headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("set-cookie") && v == crate::response_cache::MASK));
+        })
+        .unwrap();
+
+        // Deleting a request file outside the app makes its saved response an orphan that the
+        // background tidy removes; other requests keep theirs.
+        let cache = ResponseCache::new(&paths.cache_dir);
+        let echo_key = cx.update(|cx| restarted.read(cx).response_key(&echo).unwrap());
+        cache.save(&echo_key, &crate::response_cache::StoredResponse::from_result(&Err("x".into()), 0)).unwrap();
+        fs::remove_file(&get_json).unwrap();
+        let live = cx.update(|cx| restarted.read(cx).response_liveness_from_disk());
+        let later = std::time::SystemTime::now() + crate::response_cache::TIDY_GRACE + Duration::from_secs(1);
+        let report = cache.tidy(&live, later).unwrap();
+        assert_eq!(report, crate::response_cache::TidyReport { removed: 1, kept: 1 });
+        assert!(cache.load(&echo_key).is_some());
+
+        // Turning the setting off clears the cache.
+        cx.update_window(window, |_, window, cx| {
+            restarted.update(cx, |this, cx| this.set_remember_responses(false, window, cx));
+        })
+        .unwrap();
+        assert!(all_files(&paths.cache_dir).is_empty());
+    }
+
     #[gpui_kit::test]
     async fn secrets_never_reach_collection_files(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1438,6 +1690,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             state_dir: tmp.path().join("state"),
+            cache_dir: tmp.path().join("cache"),
         };
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -1548,7 +1801,8 @@ mod tests {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
                 let request = this.find_request(&request_path).cloned().unwrap();
-                this.editor.update(cx, |editor, cx| editor.load(request_path.clone(), request, window, cx));
+                let key = this.response_key(&request_path);
+                this.editor.update(cx, |editor, cx| editor.load(request_path.clone(), request, key, window, cx));
             });
             headers.focus_handle(cx).focus(window, cx);
             window.render_frame(cx);
