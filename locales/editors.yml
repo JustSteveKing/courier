@@ -541,3 +541,28 @@ request.ws_close_reason:
   es: "Conexión cerrada: %{reason}"
   de: "Verbindung geschlossen: %{reason}"
   fr: "Connexion fermée : %{reason}"
+request.graphql_query:
+  en: Query
+  es: Consulta
+  de: Abfrage
+  fr: Requête
+request.graphql_variables:
+  en: Variables (JSON)
+  es: Variables (JSON)
+  de: Variablen (JSON)
+  fr: Variables (JSON)
+request.graphql_operation_placeholder:
+  en: Operation name (optional)
+  es: Nombre de la operación (opcional)
+  de: Operationsname (optional)
+  fr: Nom de l’opération (facultatif)
+request.graphql_invalid_variables:
+  en: "GraphQL variables aren't valid JSON: %{error}"
+  es: "Las variables de GraphQL no son JSON válido: %{error}"
+  de: "Die GraphQL-Variablen sind kein gültiges JSON: %{error}"
+  fr: "Les variables GraphQL ne sont pas du JSON valide : %{error}"
+request.graphql_variables_not_object:
+  en: GraphQL variables must be a JSON object
+  es: Las variables de GraphQL deben ser un objeto JSON
+  de: GraphQL-Variablen müssen ein JSON-Objekt sein
+  fr: Les variables GraphQL doivent être un objet JSON

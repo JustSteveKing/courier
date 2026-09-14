@@ -20,7 +20,8 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 - `request_editor.rs`, `environment_editor.rs`: the two main panes
 - `model.rs` (YAML types, no I/O), `storage.rs` (load/save collections), `project.rs` (`.courier/` discovery)
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
-- `response_cache.rs` (last response per request + tidy), `http.rs` (blocking ureq on the background executor)
+- `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL bodies), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
+- `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
 - `import/` (curl, Postman), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`
 
 ## Rules
@@ -37,4 +38,6 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 - UI tests use `#[gpui_kit::test]` with the shared `setup`/`open_workspace` helpers in `workspace.rs` tests.
 - A module that `use gpui_kit::*` exports GPUI's `test` macro, which shadows `#[test]`; test modules there add `use core::prelude::v1::test;` or import gpui-kit names explicitly.
 - Events from `window.press`/`click` are delivered when the `update_window` closure ends; split steps that depend on them into separate `update_window` calls.
+- UI tests that talk to `transport` need `cx.executor().allow_parking()` (done in `setup`), since events arrive from the tokio thread.
+- Elements a test clicks or finds need `.test_support()` (buttons have it already).
 - GPUI's test scheduler rejects wake-ups from foreign threads (e.g. oo7's file backend); test such code outside GPUI tests.

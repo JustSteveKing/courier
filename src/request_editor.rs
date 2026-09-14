@@ -19,7 +19,7 @@ use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
 use crate::http::{self, Request};
-use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
+use crate::model::{Body, BodyKind, Graphql, RequestFile, Variables, headers_from_text, headers_to_text};
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
 use crate::settings::AppSettings;
@@ -28,6 +28,8 @@ use crate::transport;
 use crate::ui::{code_editor, readonly_editor, text_input};
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+/// The last entry in the method menu: a POST whose body is a GraphQL query and variables.
+const GRAPHQL: &str = "GraphQL";
 const CONTEXT: &str = "RequestEditor";
 
 gpui_kit::actions!(request_editor, [SaveRequest, SendRequest]);
@@ -185,6 +187,9 @@ pub struct RequestEditor {
     url: Entity<InputState>,
     headers: Entity<EditorState>,
     body: Entity<EditorState>,
+    graphql_query: Entity<EditorState>,
+    graphql_variables: Entity<EditorState>,
+    operation_name: Entity<InputState>,
 
     response_tab: usize,
     response_body: Entity<EditorState>,
@@ -201,7 +206,7 @@ impl RequestEditor {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.name_placeholder").to_string()));
         let method = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(METHODS.to_vec()),
+                SearchableVec::new(METHODS.iter().copied().chain([GRAPHQL]).collect::<Vec<_>>()),
                 Some(IndexPath::default()),
                 window,
                 cx,
@@ -210,6 +215,10 @@ impl RequestEditor {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("{{base_url}}/path"));
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let graphql_query = cx.new(|cx| EditorState::new(window, cx).language("graphql"));
+        let graphql_variables = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let operation_name = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t!("request.graphql_operation_placeholder").to_string()));
         let response_body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let stream_filter =
@@ -228,13 +237,15 @@ impl RequestEditor {
             _ => {}
         })
         .detach();
-        cx.subscribe(&name, |this, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                this.update_dirty(cx);
-            }
-        })
-        .detach();
-        for editor in [&headers, &body] {
+        for input in [&name, &operation_name] {
+            cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.update_dirty(cx);
+                }
+            })
+            .detach();
+        }
+        for editor in [&headers, &body, &graphql_query, &graphql_variables] {
             cx.subscribe(editor, |this, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
                     this.update_dirty(cx);
@@ -260,6 +271,9 @@ impl RequestEditor {
             url,
             headers,
             body,
+            graphql_query,
+            graphql_variables,
+            operation_name,
             response_tab: 0,
             response_body,
             response_headers,
@@ -293,6 +307,9 @@ impl RequestEditor {
         });
         self.stream_filter.update(cx, |s, cx| {
             s.set_placeholder(t!("request.stream_filter_placeholder").to_string(), window, cx)
+        });
+        self.operation_name.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.graphql_operation_placeholder").to_string(), window, cx)
         });
         cx.notify();
     }
@@ -331,6 +348,11 @@ impl RequestEditor {
     #[cfg(test)]
     pub fn stream_detail_text(&self, cx: &App) -> String {
         self.stream_detail.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
+    pub fn is_modified_for_test(&self, cx: &App) -> bool {
+        self.is_modified(cx)
     }
 
     #[cfg(test)]
@@ -404,10 +426,13 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let method_index = METHODS
-            .iter()
-            .position(|m| m.eq_ignore_ascii_case(&request.method))
-            .unwrap_or(0);
+        let method_index = match &request.graphql {
+            Some(_) => METHODS.len(),
+            None => METHODS
+                .iter()
+                .position(|m| m.eq_ignore_ascii_case(&request.method))
+                .unwrap_or(0),
+        };
         self.name
             .update(cx, |s, cx| s.set_value(request.name.clone(), window, cx));
         self.method.update(cx, |s, cx| {
@@ -419,6 +444,14 @@ impl RequestEditor {
             .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
+        let graphql = request.graphql.clone().unwrap_or_default();
+        self.graphql_query
+            .update(cx, |s, cx| s.set_value(graphql.query, window, cx));
+        self.graphql_variables
+            .update(cx, |s, cx| s.set_value(graphql.variables, window, cx));
+        self.operation_name.update(cx, |s, cx| {
+            s.set_value(graphql.operation_name.unwrap_or_default(), window, cx)
+        });
 
         let cache = self.cache(cx).cloned();
         let state = self.responses.entry(path.clone()).or_default();
@@ -438,19 +471,48 @@ impl RequestEditor {
         self.path = None;
         self.saved = None;
         self.dirty = false;
-        for input in [&self.name, &self.url] {
+        for input in [&self.name, &self.url, &self.operation_name] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
-        for editor in [&self.headers, &self.body, &self.response_body, &self.response_headers] {
+        for editor in [
+            &self.headers,
+            &self.body,
+            &self.graphql_query,
+            &self.graphql_variables,
+            &self.response_body,
+            &self.response_headers,
+        ] {
             editor.update(cx, |s, cx| s.set_value("", window, cx));
         }
         cx.notify();
+    }
+
+    /// Whether "GraphQL" is picked in the method menu.
+    fn is_graphql(&self, cx: &App) -> bool {
+        self.method.read(cx).selected_value() == Some(&GRAPHQL)
     }
 
     /// The request as currently shown in the editor.
     fn current(&self, cx: &App) -> RequestFile {
         let saved = self.saved.clone().unwrap_or_else(|| RequestFile::new(""));
         let headers = headers_from_text(&self.headers.read(cx).value());
+        if self.is_graphql(cx) {
+            let operation_name = self.operation_name.read(cx).value().trim().to_string();
+            return RequestFile {
+                name: self.name.read(cx).value().trim().to_string(),
+                method: "POST".into(),
+                url: self.url.read(cx).value().to_string(),
+                headers,
+                body: None,
+                order: saved.order,
+                messages: saved.messages,
+                graphql: Some(Graphql {
+                    query: self.graphql_query.read(cx).value().to_string(),
+                    variables: self.graphql_variables.read(cx).value().to_string(),
+                    operation_name: (!operation_name.is_empty()).then_some(operation_name),
+                }),
+            };
+        }
         let content = self.body.read(cx).value().to_string();
         let body = if content.trim().is_empty() {
             None
@@ -479,7 +541,7 @@ impl RequestEditor {
             body,
             order: saved.order,
             messages: saved.messages,
-            graphql: saved.graphql,
+            graphql: None,
         }
     }
 
@@ -552,6 +614,7 @@ impl RequestEditor {
         if websocket {
             // The composer's text is sent as messages, not with the handshake.
             file.body = None;
+            file.graphql = None;
         }
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
@@ -571,7 +634,7 @@ impl RequestEditor {
                             })?;
                             variables.extend(found);
                         }
-                        Ok::<_, String>((Request::resolve(&file, &variables), variables))
+                        Ok::<_, String>((Request::resolve(&file, &variables)?, variables))
                     })
                     .await;
             let events = this.update(cx, |this, cx| {
@@ -946,6 +1009,7 @@ impl Render for RequestEditor {
         };
         let sending = self.state().is_some_and(|s| s.live.is_some());
         let websocket = self.is_websocket(cx);
+        let graphql = !websocket && self.is_graphql(cx);
         let sse_log = self.state().and_then(|s| s.sse.as_ref());
         let ws_log = self.state().and_then(|s| s.ws.as_ref()).filter(|_| websocket);
         let body_tab_label = match (ws_log, sse_log) {
@@ -1050,15 +1114,31 @@ impl Render for RequestEditor {
                             .child(label(t!("request.headers_label").to_string()))
                             .child(code_editor(&self.headers).h_32())
                             .children(self.render_credential_warning(cx))
-                            .child(label(
-                                if websocket {
-                                    t!("request.ws_message")
-                                } else {
-                                    t!("request.body")
-                                }
-                                .to_string(),
-                            ))
-                            .child(code_editor(&self.body).flex_1().min_h_0())
+                            .when(graphql, |column| {
+                                column
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(div().flex_1().child(label(t!("request.graphql_query").to_string())))
+                                            .child(div().w_48().child(text_input(&self.operation_name).small())),
+                                    )
+                                    .child(code_editor(&self.graphql_query).flex_1().min_h_0())
+                                    .child(label(t!("request.graphql_variables").to_string()))
+                                    .child(code_editor(&self.graphql_variables).h_32())
+                            })
+                            .when(!graphql, |column| {
+                                column.child(label(
+                                    if websocket {
+                                        t!("request.ws_message")
+                                    } else {
+                                        t!("request.body")
+                                    }
+                                    .to_string(),
+                                ))
+                            })
+                            .when(!graphql, |column| {
+                                column.child(code_editor(&self.body).flex_1().min_h_0())
+                            })
                             .when(websocket, |column| column.child(self.render_composer_actions(cx))),
                     )
                     .child(

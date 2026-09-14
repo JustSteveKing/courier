@@ -2114,6 +2114,97 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn graphql_requests_post_query_and_variables(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // Reads the whole request (headers and body) before answering.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Read as _, Write as _};
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let (mut head, mut length) = (String::new(), 0);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let reply = "{\"data\":{\"pets\":[]}}";
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+            sent.send((head, String::from_utf8(body).unwrap())).unwrap();
+        });
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.method = "POST".into();
+        request.url = format!("http://127.0.0.1:{port}/graphql");
+        request.body = None;
+        request.graphql = Some(crate::model::Graphql {
+            query: "query Pets($first: Int) { pets(first: $first) { id } }".into(),
+            variables: "{\"first\": 2}".into(),
+            operation_name: Some("Pets".into()),
+        });
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (head, body) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("POST /graphql "), "{head}");
+        assert!(
+            head.to_ascii_lowercase().contains("content-type: application/json"),
+            "{head}"
+        );
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["query"], "query Pets($first: Int) { pets(first: $first) { id } }");
+        assert_eq!(body["variables"]["first"], 2);
+        assert_eq!(body["operationName"], "Pets");
+        cx.update(|cx| {
+            let (response, _) = editor.read(cx).shown_response().expect("response shown");
+            assert!(matches!(
+                response.outcome,
+                crate::response_cache::Outcome::Response { status: 200, .. }
+            ));
+        });
+
+        // The editor reproduces the GraphQL section exactly, so loading it isn't an edit.
+        assert!(cx.update(|cx| !editor.read(cx).is_modified_for_test(cx)));
+    }
+
+    #[gpui_kit::test]
     async fn secrets_never_reach_collection_files(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = setup(cx, tmp.path());
