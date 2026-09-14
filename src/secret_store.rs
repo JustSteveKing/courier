@@ -200,7 +200,7 @@ impl SecretStore {
 
 /// Human-readable keyring item label, shown in tools like Seahorse.
 pub fn label(collection_name: &str, scope_name: &str, variable: &str) -> String {
-    format!("gpui-playground · {collection_name} · {scope_name} · {variable}")
+    format!("Courier · {collection_name} · {scope_name} · {variable}")
 }
 
 /// Plain variables and secret references in effect for a request, after layering the

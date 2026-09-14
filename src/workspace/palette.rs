@@ -154,11 +154,9 @@ impl Workspace {
 
     fn action_group(&self, cx: &App) -> Group {
         let mut entries = vec![
-            Entry::new(t!("ws.new_collection_ellipsis"), |this, window, cx| this.new_collection_dialog(window, cx))
-                .english("ws.new_collection_ellipsis")
-                .icon(IconName::Plus),
-            Entry::new(t!("ws.open_collection_folder"), |this, window, cx| this.open_folder(window, cx))
-                .english("ws.open_collection_folder")
+            Entry::new(t!("ws.open_project_ellipsis"), |this, window, cx| this.open_project(window, cx))
+                .english("ws.open_project_ellipsis")
+                .keywords(["folder".into(), "collection".into()])
                 .icon(IconName::FolderOpen),
             Entry::new(t!("ws.new_collection_from_postman"), |this, window, cx| this.import_postman_as_new(window, cx))
                 .english("ws.new_collection_from_postman"),

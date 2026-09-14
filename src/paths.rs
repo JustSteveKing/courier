@@ -1,7 +1,7 @@
 //! XDG base directories and the small amount of app state kept between runs.
 //!
 //! - `$XDG_CONFIG_HOME/<app>/` — user settings (reserved; nothing written yet)
-//! - `$XDG_DATA_HOME/<app>/collections/` — default home for new collections
+//! - `$XDG_DATA_HOME/<app>/` — the encrypted secrets fallback, when there is no keyring
 //! - `$XDG_STATE_HOME/<app>/state.yaml` — open collections, active environments, last request
 //! - `$XDG_CACHE_HOME/<app>/responses/` — last response per request (disposable)
 
@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::{read_yaml, write_yaml};
 
-pub const APP_NAME: &str = "gpui-playground";
-pub const APP_ID: &str = "dev.steve.gpui-playground";
+pub const APP_NAME: &str = "courier";
+pub const APP_ID: &str = "dev.steve.courier";
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
@@ -36,10 +36,6 @@ impl AppPaths {
         })
     }
 
-    pub fn collections_dir(&self) -> PathBuf {
-        self.data_dir.join("collections")
-    }
-
     fn state_file(&self) -> PathBuf {
         self.state_dir.join("state.yaml")
     }
@@ -57,7 +53,8 @@ impl AppPaths {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct AppState {
     #[serde(default)]
-    pub open_collections: Vec<PathBuf>,
+    /// Project folders (each holding a `.courier/` collection) open in the sidebar.
+    pub open_projects: Vec<PathBuf>,
     /// Collection root to environment file.
     #[serde(default)]
     pub active_environments: BTreeMap<PathBuf, PathBuf>,

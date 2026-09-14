@@ -6,6 +6,7 @@ mod import;
 mod model;
 mod omarchy_theme;
 mod paths;
+mod project;
 mod request_editor;
 mod response_cache;
 mod secret_store;
@@ -18,7 +19,7 @@ use gpui_kit::*;
 
 use crate::paths::{APP_ID, AppPaths};
 use crate::settings::AppSettings;
-use crate::workspace::Workspace;
+use crate::workspace::{Launch, Workspace};
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -28,6 +29,14 @@ fn main() {
         Err(e) => {
             eprintln!("could not determine XDG directories: {e:#}");
             std::process::exit(1);
+        }
+    };
+
+    let launch = match launch_from_args() {
+        Ok(launch) => launch,
+        Err(message) => {
+            println!("{message}");
+            return;
         }
     };
 
@@ -54,10 +63,27 @@ fn main() {
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| Workspace::new(paths, window, cx));
+                let view = cx.new(|cx| Workspace::new(paths, launch, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open window");
             cx.activate(true);
         });
+}
+
+/// `courier [PROJECT]`: opens PROJECT, or the project containing the current directory.
+fn launch_from_args() -> Result<Option<Launch>, String> {
+    let mut args = std::env::args_os().skip(1);
+    match args.next() {
+        Some(arg) if arg == "-h" || arg == "--help" => Err(
+            "Usage: courier [PROJECT]\n\nOpens PROJECT's .courier collection (offering to create one), or the\nproject containing the current directory."
+                .into(),
+        ),
+        Some(arg) => {
+            let dir = std::path::PathBuf::from(arg);
+            let dir = dir.canonicalize().map_err(|e| format!("courier: {}: {e}", dir.display()))?;
+            Ok(Some(Launch { dir, explicit: true }))
+        }
+        None => Ok(std::env::current_dir().ok().map(|dir| Launch { dir, explicit: false })),
+    }
 }

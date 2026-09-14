@@ -148,6 +148,7 @@ pub fn unique_path(dir: &Path, name: &str, extension: &str) -> PathBuf {
 }
 
 /// Creates `parent/<slug>/collection.yaml` and returns the new collection's root.
+#[cfg(test)]
 pub fn create_collection(parent: &Path, file: &CollectionFile) -> Result<PathBuf> {
     let root = unique_path(parent, &file.name, "");
     write_yaml(&root.join(COLLECTION_FILE), file)?;

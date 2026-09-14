@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -26,8 +26,9 @@ use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Targe
 use crate::i18n::{EditMenu, dialog_footer, edit_menu};
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
-use crate::model::{CollectionFile, EnvironmentFile, RequestFile, Variables};
+use crate::model::{CollectionFile, RequestFile, Variables};
 use crate::paths::{AppPaths, AppState};
+use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
 use crate::response_cache::{CacheKey, Liveness, ResponseCache, cache_key};
 use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
@@ -36,6 +37,13 @@ use crate::storage::{self, Collection, Item};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
 
+
+/// A folder the app was started with (argument or working directory).
+pub struct Launch {
+    pub dir: PathBuf,
+    /// Given on the command line, so offer to create a collection if there isn't one.
+    pub explicit: bool,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum MainView {
@@ -60,7 +68,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(paths: AppPaths, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| {
             let mut editor = RequestEditor::new(window, cx);
             editor.set_response_cache(ResponseCache::new(&paths.cache_dir));
@@ -115,26 +123,20 @@ impl Workspace {
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
-        this.restore(window, cx);
+        this.restore(launch, window, cx);
         this.focus_handle.focus(window, cx);
         this
     }
 
-    /// Reopens what was open last time. On first run, opens (or creates) collections
-    /// in the default data directory.
-    fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.open_collections.is_empty()
-            && let Err(e) = self.discover_default_collections()
-        {
-            eprintln!("could not prepare default collections: {e:#}");
-        }
-        for root in self.state.open_collections.clone() {
-            match storage::load_collection(&root) {
+    /// Reopens last session's projects, then the project the app was launched for.
+    fn restore(&mut self, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) {
+        for project in self.state.open_projects.clone() {
+            match storage::load_collection(&project::collection_dir(&project)) {
                 Ok(collection) => self.collections.push(collection),
-                Err(e) => eprintln!("skipping collection {}: {e:#}", root.display()),
+                Err(e) => eprintln!("skipping project {}: {e:#}", project.display()),
             }
         }
-        self.state.open_collections = self.collections.iter().map(|c| c.root.clone()).collect();
+        self.state.open_projects = self.collections.iter().map(|c| project::project_dir(&c.root).to_path_buf()).collect();
         self.save_state();
 
         let last = self.state.last_request.clone().filter(|p| self.find_request(p).is_some());
@@ -144,22 +146,20 @@ impl Workspace {
         } else {
             self.refresh_environments(window, cx);
         }
-    }
 
-    fn discover_default_collections(&mut self) -> Result<()> {
-        let dir = self.paths.collections_dir();
-        fs::create_dir_all(&dir)?;
-        let mut roots: Vec<PathBuf> = fs::read_dir(&dir)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| storage::is_collection(p))
-            .collect();
-        if roots.is_empty() {
-            roots.push(create_example_collection(&dir)?);
+        if let Some(launch) = launch {
+            match project::find(&launch.dir) {
+                Some(root) => self.open_collection(root, window, cx),
+                None if launch.explicit => {
+                    let weak = cx.entity().downgrade();
+                    // Dialogs need the window's root view, which exists once this view does.
+                    window.defer(cx, move |window, cx| {
+                        weak.update(cx, |this, cx| this.offer_init_project(launch.dir, window, cx)).ok();
+                    });
+                }
+                None => {}
+            }
         }
-        roots.sort();
-        self.state.open_collections = roots;
-        Ok(())
     }
 
     fn save_state(&self) {
@@ -192,6 +192,15 @@ impl Workspace {
 
     fn open_collection(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.collections.iter().any(|c| c.root == root) {
+            // Already open: just bring it into view.
+            self.collapsed.remove(&root);
+            if let Some(path) = self.collections.iter().find(|c| c.root == root).and_then(|c| first_request(&c.items))
+                && self.collection_index_for(self.editor.read(cx).path().map(PathBuf::as_path).unwrap_or(Path::new("")))
+                    != self.collections.iter().position(|c| c.root == root)
+            {
+                self.select_request(path, window, cx);
+            }
+            cx.notify();
             return;
         }
         match storage::load_collection(&root) {
@@ -201,7 +210,7 @@ impl Workspace {
                 }
                 let first = first_request(&collection.items);
                 self.collections.push(collection);
-                self.state.open_collections.push(root);
+                self.state.open_projects.push(project::project_dir(&root).to_path_buf());
                 self.save_state();
                 if let Some(path) = first {
                     self.select_request(path, window, cx);
@@ -254,7 +263,7 @@ impl Workspace {
             self.main_view = MainView::Request;
         }
         self.collections.retain(|c| c.root != root);
-        self.state.open_collections.retain(|r| r != root);
+        self.state.open_projects.retain(|p| p != project::project_dir(root));
         self.state.active_environments.remove(root);
         self.save_state();
         self.refresh_environments(window, cx);
@@ -475,45 +484,18 @@ impl Workspace {
 
     // MARK: Dialogs and imports
 
-    fn new_collection_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("ws.collection_name_placeholder").to_string()));
-        name.focus_handle(cx).focus(window, cx);
-        let weak = cx.entity().downgrade();
-        let parent = self.paths.collections_dir();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let name = name.clone();
-            let weak = weak.clone();
-            let parent = parent.clone();
-            dialog
-                .title(t!("ws.new_collection").to_string())
-                .w(px(420.))
-                .footer(dialog_footer(None, ButtonVariant::Primary))
-                .content({
-                    let name = name.clone();
-                    move |content, _, _| content.child(Input::new(&name).context_menu(edit_menu(EditMenu::Editable)))
-                })
-                .on_ok(move |_, window, cx| {
-                    let value = name.read(cx).value().trim().to_string();
-                    if value.is_empty() {
-                        return false;
-                    }
-                    let result = storage::create_collection(&parent, &CollectionFile::new(value));
-                    weak.update(cx, |this, cx| match result {
-                        Ok(root) => this.open_collection(root, window, cx),
-                        Err(e) => notify_error(format!("{e:#}"), window, cx),
-                    })
-                    .ok();
-                    true
-                })
-        });
-    }
-
-    fn open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks for a project folder, then hands it to `apply`.
+    fn pick_project_folder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some(t!("ws.open_collection").to_string().into()),
+            prompt: Some(t!("ws.open_project").to_string().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -522,13 +504,40 @@ impl Workspace {
             let Some(dir) = paths.into_iter().next() else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| match init_collection_dir(&dir) {
-                Ok(()) => this.open_collection(dir, window, cx),
-                Err(e) => notify_error(format!("{e:#}"), window, cx),
-            })
-            .ok();
+            this.update_in(cx, |this, window, cx| apply(this, dir, window, cx)).ok();
         })
         .detach();
+    }
+
+    fn open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_project_folder(window, cx, |this, dir, window, cx| match project::find(&dir) {
+            Some(root) => this.open_collection(root, window, cx),
+            None => this.offer_init_project(dir, window, cx),
+        });
+    }
+
+    /// Confirms, then creates `.courier/` in a folder that has no collection yet.
+    fn offer_init_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (weak, dir) = (weak.clone(), dir.clone());
+            let message = t!("ws.init_project_message", path = dir.display(), dir = project::DOT_DIR, name = name).to_string();
+            dialog
+                .title(t!("ws.init_project_title").to_string())
+                .w(px(480.))
+                .content(move |content, _, _| content.child(message.clone()))
+                .footer(dialog_footer(Some(t!("ws.create").to_string()), ButtonVariant::Primary))
+                .on_ok(move |_, window, cx| {
+                    let result = project::init(&dir);
+                    weak.update(cx, |this, cx| match result {
+                        Ok(root) => this.open_collection(root, window, cx),
+                        Err(e) => notify_error(format!("{e:#}"), window, cx),
+                    })
+                    .ok();
+                    true
+                })
+        });
     }
 
     fn import_curl_dialog(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -620,11 +629,25 @@ impl Workspace {
         .detach();
     }
 
+    /// Picks a project folder without a collection, then a Postman file to create it from.
     fn import_postman_as_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let parent = self.paths.collections_dir();
-        self.pick_postman_file(window, cx, move |this, json, window, cx| {
-            let import = postman::parse_collection(&json)?;
-            let root = postman::write_new_collection(&parent, &import)?;
+        self.pick_project_folder(window, cx, |this, dir, window, cx| {
+            if let Some(existing) = project::find(&dir) {
+                notify_error(
+                    t!("ws.project_has_collection", path = project::project_dir(&existing).display()).to_string(),
+                    window,
+                    cx,
+                );
+                return;
+            }
+            this.pick_postman_file(window, cx, move |this, json, window, cx| this.create_project_from_postman(&dir, &json, window, cx));
+        });
+    }
+
+    fn create_project_from_postman(&mut self, dir: &Path, json: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+        {
+            let import = postman::parse_collection(json)?;
+            let root = postman::write_project_collection(dir, &import)?;
             let collection = storage::load_collection(&root)?;
             let id = collection.file.id.clone().unwrap_or_default();
             let values = import
@@ -635,11 +658,11 @@ impl Workspace {
                     (SecretRef::new(&id, DEFAULTS_SCOPE, name), label, value.clone())
                 })
                 .collect();
-            this.store_secrets(values, window, cx);
-            this.open_collection(root, window, cx);
+            self.store_secrets(values, window, cx);
+            self.open_collection(root, window, cx);
             notify_import(&import.warnings, window, cx);
             Ok(())
-        });
+        }
     }
 
     fn import_postman_into(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -910,7 +933,7 @@ impl Workspace {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme.sidebar_border)
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("ws.collections").to_string()))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("ws.projects").to_string()))
                     .child(
                         Button::new("sidebar-add")
                             .ghost()
@@ -918,11 +941,8 @@ impl Workspace {
                             .icon(IconName::Plus)
                             .tooltip(t!("ws.new_or_import").to_string())
                             .dropdown_menu(move |menu, _, _| {
-                                menu.item(menu_item(t!("ws.new_collection_ellipsis"), &weak, |this, window, cx| {
-                                    this.new_collection_dialog(window, cx)
-                                }))
-                                .item(menu_item(t!("ws.open_collection_folder"), &weak, |this, window, cx| {
-                                    this.open_folder(window, cx)
+                                menu.item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
+                                    this.open_project(window, cx)
                                 }))
                                 .separator()
                                 .item(menu_item(t!("ws.new_collection_from_postman"), &weak, |this, window, cx| {
@@ -939,6 +959,40 @@ impl Workspace {
                     .overflow_y_scroll()
                     .p_1()
                     .children(rows),
+            )
+    }
+
+    fn render_no_projects(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        v_flex()
+            .size_full()
+            .justify_center()
+            .items_center()
+            .gap_3()
+            .child(div().text_lg().child(t!("ws.empty_title").to_string()))
+            .child(
+                div()
+                    .max_w(px(460.))
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(t!("ws.empty_hint", dir = project::DOT_DIR).to_string()),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("empty-open-project")
+                            .primary()
+                            .icon(IconName::FolderOpen)
+                            .label(t!("ws.open_project_ellipsis").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| this.open_project(window, cx))),
+                    )
+                    .child(
+                        Button::new("empty-import-postman")
+                            .label(t!("ws.new_collection_from_postman").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| this.import_postman_as_new(window, cx))),
+                    ),
             )
     }
 
@@ -1141,7 +1195,9 @@ impl Render for Workspace {
                                 )
                             }),
                     )
-                    .child(div().flex_1().min_h_0().child(if managing {
+                    .child(div().flex_1().min_h_0().child(if self.collections.is_empty() {
+                        self.render_no_projects(cx).into_any_element()
+                    } else if managing {
                         self.environment_editor.clone().into_any_element()
                     } else {
                         self.editor.clone().into_any_element()
@@ -1274,24 +1330,17 @@ fn first_request(items: &[Item]) -> Option<PathBuf> {
     })
 }
 
-/// Accepts an existing collection, or turns an empty folder into one.
-fn init_collection_dir(dir: &Path) -> Result<()> {
-    if storage::is_collection(dir) {
-        return Ok(());
-    }
-    if fs::read_dir(dir)?.next().is_some() {
-        bail!("{}", t!("ws.not_a_collection", path = dir.display()));
-    }
-    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("Collection".into());
-    storage::write_yaml(&dir.join(crate::model::COLLECTION_FILE), &CollectionFile::new(name))
-}
-
-fn create_example_collection(parent: &Path) -> Result<PathBuf> {
+/// An example project for tests: `dir/example/.courier` with two requests and a
+/// "Local" environment. Returns the collection root.
+#[cfg(test)]
+fn create_example_project(dir: &Path) -> Result<PathBuf> {
+    let project = dir.join("example");
+    fs::create_dir_all(&project)?;
     let mut file = CollectionFile::new("Example");
     file.variables.insert("base_url".into(), "https://httpbin.org".into());
-    let root = storage::create_collection(parent, &file)?;
+    let root = project::init_with(&project, &file)?;
 
-    let mut env = EnvironmentFile::new("Local");
+    let mut env = crate::model::EnvironmentFile::new("Local");
     env.variables.insert("base_url".into(), "http://localhost:8080".into());
     storage::create_environment(&root, &env)?;
 
@@ -1326,6 +1375,10 @@ mod tests {
     #[allow(unused_imports)]
     use core::prelude::v1::test;
 
+    fn launch(root: &Path) -> Option<Launch> {
+        Some(Launch { dir: project::project_dir(root).to_path_buf(), explicit: true })
+    }
+
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
     }
@@ -1341,6 +1394,7 @@ mod tests {
             state_dir: tmp.path().join("state"),
             cache_dir: tmp.path().join("cache"),
         };
+        let root = create_example_project(tmp.path()).unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
@@ -1350,12 +1404,11 @@ mod tests {
 
         let mut workspace = None;
         let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
             workspace = Some(view.clone());
             Root::new(view, window, cx)
         });
         let workspace = workspace.unwrap();
-        let root = paths.collections_dir().join("example");
         let window: AnyWindowHandle = handle.into();
 
         // Open the manager from the toolbar button.
@@ -1483,6 +1536,68 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn launching_in_a_folder_offers_to_create_a_collection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        let plain = tmp.path().join("plain");
+        let einvoicing = tmp.path().join("einvoicing");
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&einvoicing).unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::request_editor::init(cx);
+            environment_editor::init(cx);
+            cx.set_global(AppSettings::load(&paths));
+        });
+        let open = |cx: &mut TestAppContext, launch: Launch| {
+            let mut workspace = None;
+            let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+                let view = cx.new(|cx| Workspace::new(paths.clone(), Some(launch), window, cx));
+                workspace = Some(view.clone());
+                Root::new(view, window, cx)
+            });
+            (workspace.unwrap(), AnyWindowHandle::from(handle))
+        };
+
+        // Started from a folder that isn't a project (e.g. $HOME): empty state, no dialog.
+        let (workspace, window) = open(cx, Launch { dir: plain.clone(), explicit: false });
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            assert!(workspace.read(cx).collections.is_empty());
+            window.render_frame(cx);
+            assert!(window.try_find("empty-open-project").is_some(), "empty state offers Open project");
+        })
+        .unwrap();
+        assert!(!plain.join(".courier").exists());
+
+        // `courier ~/Work/einvoicing` offers to create the collection; Create makes and opens it.
+        let (workspace, window) = open(cx, Launch { dir: einvoicing.clone(), explicit: true });
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(window.has_active_dialog(cx), "offers to create .courier");
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let root = einvoicing.join(".courier");
+        assert!(read(&root.join("collection.yaml")).contains("name: einvoicing"));
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.collections.len(), 1);
+            assert_eq!(ws.state.open_projects, vec![einvoicing.clone()], "remembered as a project");
+        });
+        let state = read(&paths.state_dir.join("state.yaml"));
+        assert!(state.contains("einvoicing"), "{state}");
+    }
+
+    #[gpui_kit::test]
     async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = AppPaths {
@@ -1491,6 +1606,7 @@ mod tests {
             state_dir: tmp.path().join("state"),
             cache_dir: tmp.path().join("cache"),
         };
+        let root = create_example_project(tmp.path()).unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
@@ -1500,13 +1616,13 @@ mod tests {
         });
         let mut workspace = None;
         let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
             workspace = Some(view.clone());
             Root::new(view, window, cx)
         });
         let workspace = workspace.unwrap();
         let window: AnyWindowHandle = handle.into();
-        let echo = paths.collections_dir().join("example/echo-post.yaml");
+        let echo = root.join("echo-post.yaml");
 
         // Every label resolves to real text, not a missing translation key.
         cx.update(|cx| {
@@ -1576,6 +1692,7 @@ mod tests {
             state_dir: tmp.path().join("state"),
             cache_dir: tmp.path().join("cache"),
         };
+        let root = create_example_project(tmp.path()).unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
@@ -1585,7 +1702,7 @@ mod tests {
         let open = |cx: &mut TestAppContext| {
             let mut workspace = None;
             let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-                let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+                let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
                 workspace = Some(view.clone());
                 Root::new(view, window, cx)
             });
@@ -1593,7 +1710,6 @@ mod tests {
         };
 
         let (workspace, window) = open(cx);
-        let root = paths.collections_dir().join("example");
         let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
         let port = one_shot_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: session=SESSION_SECRET_42\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
@@ -1692,6 +1808,7 @@ mod tests {
             state_dir: tmp.path().join("state"),
             cache_dir: tmp.path().join("cache"),
         };
+        let root = create_example_project(tmp.path()).unwrap();
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
@@ -1700,13 +1817,12 @@ mod tests {
         });
         let mut workspace = None;
         let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
             workspace = Some(view.clone());
             Root::new(view, window, cx)
         });
         let workspace = workspace.unwrap();
         let window: AnyWindowHandle = handle.into();
-        let root = paths.collections_dir().join("example");
         cx.run_until_parked();
         cx.update(|cx| assert!(workspace.read(cx).secret_store.is_some(), "store connected"));
 

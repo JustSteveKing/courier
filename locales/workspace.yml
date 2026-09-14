@@ -1,11 +1,6 @@
 _version: 2
 # Workspace, sidebar, imports, command palette and settings.
 
-ws.collections:
-  en: Collections
-  es: Colecciones
-  de: Sammlungen
-  fr: Collections
 ws.new_or_import:
   en: New or import
   es: Nuevo o importar
@@ -26,36 +21,11 @@ ws.new_request:
   es: Nueva solicitud
   de: Neue Anfrage
   fr: Nouvelle requête
-ws.new_collection:
-  en: New collection
-  es: Nueva colección
-  de: Neue Sammlung
-  fr: Nouvelle collection
-ws.new_collection_ellipsis:
-  en: New collection…
-  es: Nueva colección…
-  de: Neue Sammlung…
-  fr: Nouvelle collection…
-ws.collection_name_placeholder:
-  en: My API
-  es: Mi API
-  de: Meine API
-  fr: Mon API
-ws.open_collection:
-  en: Open collection
-  es: Abrir colección
-  de: Sammlung öffnen
-  fr: Ouvrir une collection
-ws.open_collection_folder:
-  en: Open collection folder…
-  es: Abrir carpeta de colección…
-  de: Sammlungsordner öffnen…
-  fr: Ouvrir un dossier de collection…
 ws.new_collection_from_postman:
-  en: New collection from Postman…
-  es: Nueva colección desde Postman…
-  de: Neue Sammlung aus Postman…
-  fr: Nouvelle collection depuis Postman…
+  en: New project collection from Postman…
+  es: Nueva colección de proyecto desde Postman…
+  de: Neue Projektsammlung aus Postman…
+  fr: Nouvelle collection de projet depuis Postman…
 ws.import_curl:
   en: Import from curl…
   es: Importar desde curl…
@@ -171,11 +141,6 @@ ws.no_literal_credential:
   es: Ese encabezado no contiene credenciales en texto plano
   de: Dieser Header enthält keine Zugangsdaten im Klartext
   fr: Cet en-tête ne contient aucun identifiant en clair
-ws.not_a_collection:
-  en: "%{path} is not a collection (no collection.yaml) and is not empty"
-  es: "%{path} no es una colección (no tiene collection.yaml) y no está vacía"
-  de: "%{path} ist keine Sammlung (keine collection.yaml) und nicht leer"
-  fr: "%{path} n'est pas une collection (pas de collection.yaml) et n'est pas vide"
 
 palette.open_tooltip:
   en: Command palette (Ctrl+Shift+P)
@@ -289,3 +254,48 @@ ws.import:
   es: Importar
   de: Importieren
   fr: Importer
+ws.projects:
+  en: Projects
+  es: Proyectos
+  de: Projekte
+  fr: Projets
+ws.open_project:
+  en: Open project
+  es: Abrir proyecto
+  de: Projekt öffnen
+  fr: Ouvrir un projet
+ws.open_project_ellipsis:
+  en: Open project…
+  es: Abrir proyecto…
+  de: Projekt öffnen…
+  fr: Ouvrir un projet…
+ws.init_project_title:
+  en: Create a Courier collection?
+  es: ¿Crear una colección de Courier?
+  de: Courier-Sammlung anlegen?
+  fr: Créer une collection Courier ?
+ws.init_project_message:
+  en: "%{path} has no %{dir} folder yet. Create one, named “%{name}”? Its requests and environments are plain files you can commit with the project."
+  es: "%{path} todavía no tiene una carpeta %{dir}. ¿Crear una llamada «%{name}»? Sus solicitudes y entornos son archivos normales que puedes versionar con el proyecto."
+  de: "%{path} hat noch keinen Ordner %{dir}. Einen mit dem Namen „%{name}“ anlegen? Anfragen und Umgebungen sind normale Dateien, die mit dem Projekt eingecheckt werden können."
+  fr: "%{path} n'a pas encore de dossier %{dir}. En créer un, nommé « %{name} » ? Ses requêtes et environnements sont de simples fichiers à versionner avec le projet."
+ws.create:
+  en: Create
+  es: Crear
+  de: Anlegen
+  fr: Créer
+ws.project_has_collection:
+  en: "%{path} already has a Courier collection. Open it, then use “Import Postman collection here…”."
+  es: "%{path} ya tiene una colección de Courier. Ábrela y usa «Importar colección de Postman aquí…»."
+  de: "%{path} hat bereits eine Courier-Sammlung. Öffne sie und nutze „Postman-Sammlung hierher importieren…“."
+  fr: "%{path} a déjà une collection Courier. Ouvrez-la, puis utilisez « Importer une collection Postman ici… »."
+ws.empty_title:
+  en: Open a project to get started
+  es: Abre un proyecto para empezar
+  de: Öffne ein Projekt, um loszulegen
+  fr: Ouvrez un projet pour commencer
+ws.empty_hint:
+  en: "Courier keeps a project's requests and environments in a %{dir} folder inside it, so they live in git with the code. Secret values stay in your keyring."
+  es: "Courier guarda las solicitudes y entornos de un proyecto en una carpeta %{dir} dentro de él, para que vivan en git junto al código. Los valores secretos se quedan en tu llavero."
+  de: "Courier speichert Anfragen und Umgebungen eines Projekts in einem Ordner %{dir} darin, sodass sie mit dem Code in git liegen. Secret-Werte bleiben in deinem Schlüsselbund."
+  fr: "Courier range les requêtes et environnements d'un projet dans un dossier %{dir} à l'intérieur, pour qu'ils vivent dans git avec le code. Les valeurs secrètes restent dans votre trousseau."

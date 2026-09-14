@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 /// Points the app at a specific theme directory instead of the active Omarchy theme,
 /// e.g. `/usr/share/omarchy/themes/catppuccin-latte`. For previewing and development.
-pub const THEME_DIR_OVERRIDE: &str = "GPUI_PLAYGROUND_THEME_DIR";
+pub const THEME_DIR_OVERRIDE: &str = "COURIER_THEME_DIR";
 
 const DEBOUNCE: Duration = Duration::from_millis(250);
 

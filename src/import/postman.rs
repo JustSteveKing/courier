@@ -12,7 +12,7 @@ use crate::model::{
     Body, BodyKind, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, Header, RequestFile,
     Variables, headers_from_text, slugify,
 };
-use crate::storage::{create_collection, create_request, is_collection, unique_path};
+use crate::storage::{create_request, is_collection, unique_path};
 
 #[derive(Debug)]
 pub struct PostmanImport {
@@ -147,12 +147,10 @@ pub fn parse_environment(json: &str) -> Result<EnvironmentImport> {
     Ok(EnvironmentImport { file, secrets, warnings })
 }
 
-/// Creates a brand-new collection directory under `parent`; returns its root. Only secret
-/// names are written; the caller stores `import.secrets` values in the secret store.
-pub fn write_new_collection(parent: &Path, import: &PostmanImport) -> Result<PathBuf> {
-    let mut file = import.collection.clone();
-    file.ensure_id();
-    let root = create_collection(parent, &file)?;
+/// Creates the `.courier` collection for `project` from an import; returns its root. Only
+/// secret names are written; the caller stores `import.secrets` values in the secret store.
+pub fn write_project_collection(project: &Path, import: &PostmanImport) -> Result<PathBuf> {
+    let root = crate::project::init_with(project, &import.collection)?;
     write_items(&root, &import.items)?;
     Ok(root)
 }
@@ -670,8 +668,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut import = parse_collection(COLLECTION).unwrap();
         import.items.push(ImportItem::Folder { name: "Environments".into(), children: vec![] });
-        let root = write_new_collection(tmp.path(), &import).unwrap();
-        assert_eq!(root, tmp.path().join("petstore"));
+        let root = write_project_collection(tmp.path(), &import).unwrap();
+        assert_eq!(root, tmp.path().join(".courier"));
 
         let loaded = load_collection(&root).unwrap();
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
