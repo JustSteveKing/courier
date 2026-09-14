@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 
-use super::curl::{base64_encode, percent_encode};
+use crate::encoding::{base64_encode, percent_encode};
 use crate::credentials::{hoist_credentials_with, looks_sensitive_name};
 use crate::model::{
     Body, BodyKind, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, Header, RequestFile,
@@ -38,6 +38,18 @@ pub struct EnvironmentImport {
 pub enum ImportItem {
     Folder { name: String, children: Vec<ImportItem> },
     Request(RequestFile),
+}
+
+impl ImportItem {
+    /// Visits every request in `items`, depth first.
+    pub fn for_each_request_mut(items: &mut [ImportItem], f: &mut impl FnMut(&mut RequestFile)) {
+        for item in items {
+            match item {
+                ImportItem::Folder { children, .. } => Self::for_each_request_mut(children, f),
+                ImportItem::Request(request) => f(request),
+            }
+        }
+    }
 }
 
 pub fn parse_collection(json: &str) -> Result<PostmanImport> {
@@ -113,14 +125,9 @@ fn hoist_items(
     is_reserved: &dyn Fn(&str) -> bool,
     hoisted: &mut Vec<String>,
 ) {
-    for item in items {
-        match item {
-            ImportItem::Folder { children, .. } => hoist_items(children, secrets, is_reserved, hoisted),
-            ImportItem::Request(request) => {
-                hoisted.extend(hoist_credentials_with(request, secrets, is_reserved));
-            }
-        }
-    }
+    ImportItem::for_each_request_mut(items, &mut |request| {
+        hoisted.extend(hoist_credentials_with(request, secrets, is_reserved));
+    });
 }
 
 pub fn parse_environment(json: &str) -> Result<EnvironmentImport> {
@@ -427,7 +434,7 @@ fn apply_auth(file: &mut RequestFile, auth: &Value, path: &str, warnings: &mut V
     if let Some((name, value)) = header
         && !file.headers.iter().any(|h| h.enabled && h.name.eq_ignore_ascii_case(&name))
     {
-        file.headers.push(Header { name, value, enabled: true });
+        file.headers.push(Header::new(name, value));
     }
 }
 

@@ -89,14 +89,10 @@ impl AppSettings {
 mod tests {
     use super::*;
 
-    fn paths(root: &std::path::Path) -> AppPaths {
-        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state"), cache_dir: root.join("cache") }
-    }
-
     #[test]
     fn defaults_when_missing_or_partial() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = paths(tmp.path());
+        let paths = AppPaths::under(tmp.path());
         assert_eq!(AppSettings::load(&paths).settings, Settings::default());
 
         std::fs::create_dir_all(&paths.config_dir).unwrap();

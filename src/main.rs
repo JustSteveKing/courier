@@ -1,4 +1,5 @@
 mod credentials;
+mod encoding;
 mod environment_editor;
 mod http;
 mod i18n;
@@ -12,6 +13,7 @@ mod response_cache;
 mod secret_store;
 mod settings;
 mod storage;
+mod ui;
 mod workspace;
 
 use gpui_kit::component::Root;

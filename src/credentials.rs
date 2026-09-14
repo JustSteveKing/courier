@@ -3,7 +3,8 @@
 //! Hoisting replaces a literal value with a `{{name}}` placeholder and records the value
 //! under that name in a secrets map, so only the placeholder is ever written to YAML.
 
-use crate::model::{Header, RequestFile, Variables};
+use crate::encoding::base64_decode;
+use crate::model::{Header, RequestFile, Variables, placeholder};
 
 /// Replaces literal credentials in `request` (header values and URL query parameters) with
 /// `{{name}}` placeholders. `secrets` is the name -> value map accumulated so far (e.g. across
@@ -136,7 +137,7 @@ fn hoist_header_inner(
     let header = request.headers.get(index)?;
     let plan = plan_header(header)?;
     let (name, is_new) = allocate(&plan.base_name, &plan.value, secrets, is_reserved);
-    request.headers[index].value = format!("{}{{{{{name}}}}}", plan.prefix);
+    request.headers[index].value = format!("{}{}", plan.prefix, placeholder(&name));
     Some((name, is_new))
 }
 
@@ -169,7 +170,7 @@ fn hoist_query(request: &mut RequestFile, secrets: &mut Variables, is_reserved: 
                 added.push(name.clone());
             }
             changed = true;
-            format!("{key}={{{{{name}}}}}")
+            format!("{key}={}", placeholder(&name))
         })
         .collect();
 
@@ -186,14 +187,26 @@ fn allocate(base: &str, value: &str, secrets: &mut Variables, is_reserved: &dyn 
         return (name.clone(), false);
     }
     let base = if base.is_empty() { "secret" } else { base };
+    let name = unique_name(base, |name| secrets.contains_key(name) || is_reserved(name));
+    secrets.insert(name.clone(), value.to_string());
+    (name, true)
+}
+
+/// `base`, or `base_2`, `base_3`… — the first that `taken` rejects.
+pub fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
     let mut name = base.to_string();
     let mut n = 2;
-    while secrets.contains_key(&name) || is_reserved(&name) {
+    while taken(&name) {
         name = format!("{base}_{n}");
         n += 1;
     }
-    secrets.insert(name.clone(), value.to_string());
-    (name, true)
+    name
+}
+
+/// A secrets map holding only `names`, with a value that never matches a real credential, so
+/// hoisting picks fresh names instead of reusing these.
+pub fn reserved_names(names: impl IntoIterator<Item = String>) -> Variables {
+    names.into_iter().map(|name| (name, "\0existing".to_string())).collect()
 }
 
 /// Lower-case word parts, splitting on non-alphanumerics and camelCase boundaries.
@@ -225,36 +238,13 @@ fn snake_case(name: &str) -> String {
     word_parts(name).join("_")
 }
 
-fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut buffer = 0u32;
-    let mut bits = 0;
-    for c in text.trim_end_matches('=').bytes() {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            _ => return None,
-        };
-        buffer = (buffer << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-        }
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::import::curl;
 
     fn header(name: &str, value: &str) -> Header {
-        Header { name: name.into(), value: value.into(), enabled: true }
+        Header::new(name, value)
     }
 
     fn request_with(headers: Vec<Header>, url: &str) -> RequestFile {

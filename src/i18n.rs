@@ -5,17 +5,8 @@
 //! unless the user picks one in settings. Low-level error details (file system, parser and
 //! network errors) stay in English.
 //!
-//! GPUI Kit's components carry their own strings (dialog buttons, the input context menu,
-//! "No results found."), translated only into Chinese and Italian. The helpers below
-//! supply ours wherever a component lets us override them.
-
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Copy, Cut, Paste, SelectAll};
-use gpui_kit::component::native_menu::NativeMenu;
-use gpui_kit::component::dialog::{Cancel, Confirm};
-use gpui_kit::{App, IntoElement, ParentElement as _, Window};
-use rust_i18n::t;
+//! GPUI Kit's components carry their own strings (dialog buttons, the input context menu),
+//! translated only into Chinese and Italian; `crate::ui` builds components with ours.
 
 /// Supported languages: code and native name, in the order shown to users.
 pub const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("es", "Español"), ("de", "Deutsch"), ("fr", "Français")];
@@ -50,48 +41,6 @@ fn supported(locale: &str) -> Option<&'static str> {
 pub fn apply(code: &str) {
     // One global shared with GPUI Kit's own component strings.
     rust_i18n::set_locale(code);
-}
-
-/// Cancel and confirm buttons for a dialog, in the interface language. They dispatch the
-/// same actions as Escape and Enter, so the dialog's `on_ok` / `on_cancel` handle both.
-/// (A plain GPUI Kit `Dialog` renders no buttons unless given a footer.)
-pub fn dialog_footer(ok_label: Option<String>, variant: ButtonVariant) -> impl IntoElement {
-    DialogFooter::new()
-        .child(
-            Button::new("dialog-cancel")
-                .label(t!("common.cancel").to_string())
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
-        )
-        .child(
-            Button::new("dialog-ok")
-                .label(ok_label.unwrap_or_else(|| t!("common.ok").to_string()))
-                .with_variant(variant)
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(Confirm { secondary: false }), cx)),
-        )
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum EditMenu {
-    Editable,
-    ReadOnly,
-    /// Masked values: no Cut or Copy, so a secret can't reach the clipboard from here.
-    Secret,
-}
-
-/// A right-click menu for an input or editor, in the interface language.
-pub fn edit_menu(kind: EditMenu) -> impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static {
-    move |mut menu, _, cx| {
-        if kind == EditMenu::Editable {
-            menu = menu.menu(t!("edit.cut"), Box::new(Cut));
-        }
-        if kind != EditMenu::Secret {
-            menu = menu.menu(t!("edit.copy"), Box::new(Copy));
-        }
-        if kind != EditMenu::ReadOnly {
-            menu = menu.menu_with_disabled(t!("edit.paste"), cx.read_from_clipboard().is_none(), Box::new(Paste));
-        }
-        menu.separator().menu(t!("edit.select_all"), Box::new(SelectAll))
-    }
 }
 
 #[cfg(test)]

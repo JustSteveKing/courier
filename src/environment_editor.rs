@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -16,9 +16,9 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::credentials::looks_sensitive_name;
-use crate::i18n::{EditMenu, edit_menu};
-use crate::model::{EnvironmentFile, Variables, variables_from_text, variables_to_text};
-use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
+use crate::ui::{code_editor, secret_input, text_input};
+use crate::model::{CollectionFile, EnvironmentFile, Variables, variables_from_text, variables_to_text};
+use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::storage::{self, Collection};
 
 const CONTEXT: &str = "EnvironmentEditor";
@@ -218,8 +218,7 @@ impl EnvironmentEditor {
     }
 
     fn environment(&self, path: &Path) -> Option<&EnvironmentFile> {
-        let collection = self.collection.as_ref()?;
-        collection.environments.iter().find(|e| e.path == path).map(|e| &e.file)
+        self.collection.as_ref()?.environment(path).map(|e| &e.file)
     }
 
     fn saved(&self) -> Option<Saved> {
@@ -414,7 +413,7 @@ impl EnvironmentEditor {
             .iter()
             .filter_map(|row| Self::pending_value(row, cx).map(|value| (row.name.clone(), value)))
             .collect();
-        let Some(store) = self.store.clone().filter(|_| true) else {
+        let Some(store) = self.store.clone() else {
             if !pending.is_empty() || !self.removed_secrets.is_empty() {
                 return self.fail(t!("secrets.store_unavailable_retry"), cx);
             }
@@ -429,10 +428,12 @@ impl EnvironmentEditor {
         }
 
         // The collection may have just been given an id; build refs from the updated file.
-        let scope_name = if target == Target::Defaults { "Defaults".to_string() } else { name };
+        let scope_label = if target == Target::Defaults { DEFAULTS_LABEL.to_string() } else { name };
+        let file = self.collection.as_ref().map(|c| c.file.clone()).unwrap_or_else(|| CollectionFile::new(""));
+        let scope = Self::scope_for(&target);
         let sets: Vec<_> = pending
             .into_iter()
-            .map(|(var, value)| (self.secret_ref(&target, &var), self.secret_label(&scope_name, &var), value))
+            .map(|(var, value)| SecretWrite::new(&file, &scope, &scope_label, &var, value))
             .collect();
         let deletes: Vec<_> = removed
             .iter()
@@ -441,7 +442,7 @@ impl EnvironmentEditor {
             .collect();
 
         for row in &mut self.secret_rows {
-            if sets.iter().any(|(secret, _, _)| secret.name == row.name) {
+            if sets.iter().any(|write| write.secret.name == row.name) {
                 row.stored = Stored::Set;
                 row.revealed = None;
                 row.shown = false;
@@ -456,15 +457,7 @@ impl EnvironmentEditor {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    for (secret, label, value) in &sets {
-                        store.set(secret, label, value).await?;
-                    }
-                    for secret in &deletes {
-                        store.delete(secret).await?;
-                    }
-                    anyhow::Ok(())
-                })
+                .spawn(async move { store.apply(&sets, &deletes).await })
                 .await;
             if let Err(e) = result {
                 this.update(cx, |_, cx| {
@@ -481,11 +474,7 @@ impl EnvironmentEditor {
     fn write_files(&mut self, mut collection: Collection, name: String, variables: Variables, cx: &mut Context<Self>) -> bool {
         let secrets: Vec<String> = self.secret_rows.iter().map(|r| r.name.clone()).collect();
         let root = collection.root.clone();
-        let (_, assigned_id) = if secrets.is_empty() {
-            (String::new(), false)
-        } else {
-            collection.file.ensure_id()
-        };
+        let assigned_id = !secrets.is_empty() && collection.file.ensure_id().1;
         let result = match &self.target {
             Target::Defaults => {
                 collection.file.name = name;
@@ -616,7 +605,7 @@ impl EnvironmentEditor {
                 .title(t!("env.delete_title", name = name).to_string())
                 .w(px(420.))
                 .content(move |content, _, _| content.child(message.clone()))
-                .footer(crate::i18n::dialog_footer(Some(t!("env.delete").to_string()), ButtonVariant::Danger))
+                .footer(crate::ui::dialog_footer(Some(t!("env.delete").to_string()), ButtonVariant::Danger))
                 .on_ok(move |_, window, cx| {
                     let result = storage::delete_file(&path);
                     let secret_refs = secret_refs.clone();
@@ -633,7 +622,6 @@ impl EnvironmentEditor {
                                     })
                                     .detach();
                             }
-                            this.dirty = false;
                             cx.emit(EnvironmentEditorEvent::Deleted { root: root.clone(), path: path.clone() });
                             this.load_target(Target::Defaults, window, cx);
                         }
@@ -807,21 +795,19 @@ impl EnvironmentEditor {
         )
     }
 
-    fn render_secrets(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_secrets(&self, variables: Option<&Variables>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let description = match &self.store {
             Some(store) => store.kind().describe(),
             None => t!("secrets.connecting").to_string(),
         };
 
-        let sensitive: Vec<String> = variables_from_text(&self.variables.read(cx).value())
-            .map(|vars| {
-                vars.into_iter()
-                    .filter(|(name, value)| looks_sensitive_name(name) && !value.is_empty() && !value.contains("{{"))
-                    .map(|(name, _)| name)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let sensitive: Vec<String> = variables
+            .into_iter()
+            .flatten()
+            .filter(|(name, value)| looks_sensitive_name(name) && !value.is_empty() && !value.contains("{{"))
+            .map(|(name, _)| name.clone())
+            .collect();
 
         let mut rows = v_flex().id("secret-rows").gap_1().max_h(px(240.)).overflow_y_scroll();
         for (ix, row) in self.secret_rows.iter().enumerate() {
@@ -838,7 +824,7 @@ impl EnvironmentEditor {
                 h_flex()
                     .gap_2()
                     .child(div().w(px(180.)).flex_none().truncate().text_sm().font_family("monospace").child(row.name.clone()))
-                    .child(div().flex_1().min_w_0().child(Input::new(&row.input).small().context_menu(edit_menu(EditMenu::Secret))))
+                    .child(div().flex_1().min_w_0().child(secret_input(&row.input).small()))
                     .child(div().w(px(150.)).flex_none().text_xs().text_color(color).child(status.to_string()))
                     .child(
                         Button::new(("reveal-secret", ix))
@@ -897,7 +883,7 @@ impl EnvironmentEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(180.)).flex_none().child(Input::new(&self.new_secret).small().context_menu(edit_menu(EditMenu::Editable))))
+                    .child(div().w(px(180.)).flex_none().child(text_input(&self.new_secret).small()))
                     .child(
                         Button::new("add-secret")
                             .small()
@@ -918,15 +904,17 @@ impl Focusable for EnvironmentEditor {
 impl Render for EnvironmentEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let Some(collection) = self.collection.clone() else {
+        let Some(collection) = self.collection.as_ref() else {
             return div().into_any_element();
         };
         let is_defaults = self.target == Target::Defaults;
+        // Parsed once per frame and shared by the hint and the secrets section.
+        let parsed = variables_from_text(&self.variables.read(cx).value()).ok();
 
         let hint = if is_defaults {
             t!("env.hint_defaults").to_string()
         } else {
-            let own = variables_from_text(&self.variables.read(cx).value()).unwrap_or_default();
+            let own = parsed.clone().unwrap_or_default();
             let inherited: Vec<_> = collection
                 .file
                 .variables
@@ -952,7 +940,7 @@ impl Render for EnvironmentEditor {
             .items_start()
             .p_3()
             .gap_4()
-            .child(self.render_list(&collection, cx))
+            .child(self.render_list(collection, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -965,7 +953,7 @@ impl Render for EnvironmentEditor {
                             .child(
                                 div()
                                     .flex_1()
-                                    .child(Input::new(&self.name).context_menu(edit_menu(EditMenu::Editable)))
+                                    .child(text_input(&self.name))
                                     .when(is_defaults, |s| {
                                         s.child(
                                             div()
@@ -1013,12 +1001,12 @@ impl Render for EnvironmentEditor {
                             .text_color(theme.muted_foreground)
                             .child(t!("env.variables_hint").to_string()),
                     )
-                    .child(Editor::new(&self.variables).flex_1().min_h(px(120.)).context_menu(edit_menu(EditMenu::Editable)))
+                    .child(code_editor(&self.variables).flex_1().min_h(px(120.)))
                     .child(match &self.error {
                         Some(error) => div().text_sm().text_color(theme.danger).child(error.clone()),
                         None => div().text_xs().text_color(theme.muted_foreground).child(hint),
                     })
-                    .child(self.render_secrets(cx)),
+                    .child(self.render_secrets(parsed.as_ref(), cx)),
             )
             .into_any_element()
     }

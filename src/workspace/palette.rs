@@ -8,11 +8,10 @@ use gpui_kit::component::{ActiveTheme as _, IconName, WindowExt as _};
 use gpui_kit::*;
 use rust_i18n::t;
 
-use super::Workspace;
+use super::{RootAction, Workspace};
 use crate::i18n::{self, LANGUAGES};
 use crate::omarchy_theme;
 use crate::settings::AppSettings;
-use crate::storage::Item;
 
 gpui_kit::actions!(workspace, [OpenCommandPalette]);
 
@@ -129,25 +128,20 @@ impl Workspace {
     }
 
     fn request_entries(&self) -> Group {
-        fn walk(items: &[Item], trail: &str, entries: &mut Vec<Entry>) {
-            for item in items {
-                match item {
-                    Item::Folder { name, children, .. } => walk(children, &format!("{trail} › {name}"), entries),
-                    Item::Request { path, request } => {
-                        let path = path.clone();
-                        entries.push(
-                            Entry::new(format!("{trail} › {}", request.name), move |this, window, cx| {
-                                this.select_request(path.clone(), window, cx)
-                            })
-                            .keywords([request.method.clone(), request.url.clone()]),
-                        );
-                    }
-                }
-            }
-        }
         let mut entries = Vec::new();
         for collection in &self.collections {
-            walk(&collection.items, &collection.file.name, &mut entries);
+            for entry in collection.requests() {
+                let label = std::iter::once(collection.file.name.as_str())
+                    .chain(entry.folders.iter().copied())
+                    .chain([entry.request.name.as_str()])
+                    .collect::<Vec<_>>()
+                    .join(" › ");
+                let path = entry.path.to_path_buf();
+                entries.push(
+                    Entry::new(label, move |this, window, cx| this.select_request(path.clone(), window, cx))
+                        .keywords([entry.request.method.clone(), entry.request.url.clone()]),
+                );
+            }
         }
         Group { label: t!("palette.group.requests").to_string().into(), entries }
     }
@@ -162,7 +156,7 @@ impl Workspace {
                 .english("ws.new_collection_from_postman"),
         ];
         if let Some(root) = self.active_collection(cx).map(|c| c.root.clone()) {
-            let with_root = |key: &'static str, run: fn(&mut Workspace, std::path::PathBuf, &mut Window, &mut Context<Workspace>)| {
+            let with_root = |key: &'static str, run: RootAction| {
                 let root = root.clone();
                 Entry::new(t!(key), move |this, window, cx| run(this, root.clone(), window, cx)).english(key)
             };

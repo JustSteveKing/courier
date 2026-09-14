@@ -2,6 +2,7 @@
 
 use anyhow::{Result, bail};
 
+use crate::encoding::{base64_encode, percent_encode};
 use crate::model::{Body, BodyKind, Header, RequestFile};
 
 /// Parses a curl command line (as copied from browser devtools / docs) into a request.
@@ -123,7 +124,7 @@ impl Parsed {
             }
         } else if let Some(name) = line.trim().strip_suffix(';') {
             // `-H "Name;"` sends the header with an empty value.
-            self.headers.push(Header { name: name.trim().to_string(), value: String::new(), enabled: true });
+            self.headers.push(Header::new(name.trim(), ""));
         }
     }
 
@@ -133,7 +134,7 @@ impl Parsed {
 
     fn set_header(&mut self, name: &str, value: String) {
         self.headers.retain(|h| !h.name.eq_ignore_ascii_case(name));
-        self.headers.push(Header { name: name.to_string(), value, enabled: true });
+        self.headers.push(Header::new(name, value));
     }
 
     fn into_request(mut self) -> Result<RequestFile> {
@@ -197,7 +198,7 @@ impl Parsed {
 }
 
 fn header(name: &str, value: &str) -> Header {
-    Header { name: name.into(), value: value.into(), enabled: true }
+    Header::new(name, value)
 }
 
 fn short_takes_value(c: char) -> bool {
@@ -364,52 +365,6 @@ fn ansi_c_quoted(chars: &[char], mut i: usize, out: &mut String) -> Result<usize
             }
         }
     }
-}
-
-/// Standard base64 with padding.
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16
-            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
-            | *chunk.get(2).unwrap_or(&0) as u32;
-        for (position, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            if position <= chunk.len() {
-                out.push(ALPHABET[(n >> shift & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
-/// Percent-encodes for form bodies and query strings, leaving `{{variable}}` placeholders intact
-/// so they still interpolate.
-pub(crate) fn percent_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while !rest.is_empty() {
-        if rest.starts_with("{{")
-            && let Some(end) = rest.find("}}")
-        {
-            out.push_str(&rest[..end + 2]);
-            rest = &rest[end + 2..];
-            continue;
-        }
-        let c = rest.chars().next().unwrap();
-        if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
-            out.push(c);
-        } else {
-            let mut buf = [0; 4];
-            for byte in c.encode_utf8(&mut buf).bytes() {
-                out.push_str(&format!("%{byte:02X}"));
-            }
-        }
-        rest = &rest[c.len_utf8()..];
-    }
-    out
 }
 
 #[cfg(test)]

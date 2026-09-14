@@ -77,11 +77,14 @@ pub fn pretty_body(body: &str) -> String {
         .unwrap_or_else(|| body.to_string())
 }
 
+/// One agent for the whole app, so repeated requests to a host reuse its connections.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| ureq::Agent::config_builder().http_status_as_error(false).build().into())
+}
+
 pub fn send(request: &Request) -> Result<Response, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
+    let agent = agent();
 
     let mut builder = ureq::http::Request::builder()
         .method(request.method.as_str())

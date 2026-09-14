@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -21,17 +21,17 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
-use crate::credentials::{hoist_credentials_with, hoist_header};
+use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
-use crate::i18n::{EditMenu, dialog_footer, edit_menu};
+use crate::ui::{dialog_footer, textarea};
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
-use crate::model::{CollectionFile, RequestFile, Variables};
+use crate::model::{RequestFile, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
-use crate::response_cache::{CacheKey, Liveness, ResponseCache, cache_key};
-use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
+use crate::response_cache::{CacheKey, Liveness, ResponseCache};
+use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
 
@@ -62,18 +62,11 @@ pub struct Workspace {
     main_view: MainView,
     focus_handle: FocusHandle,
     secret_store: Option<SecretStore>,
-    /// Secret values collected synchronously (e.g. inside a dialog callback without a
-    /// window-bound context) and written by the next `flush_secret_writes`.
-    pending_secret_writes: Vec<(SecretRef, String, String)>,
 }
 
 impl Workspace {
     pub fn new(paths: AppPaths, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            let mut editor = RequestEditor::new(window, cx);
-            editor.set_response_cache(ResponseCache::new(&paths.cache_dir));
-            editor
-        });
+        let editor = cx.new(|cx| RequestEditor::new(ResponseCache::new(&paths.cache_dir), window, cx));
         let environment = cx.new(|cx| {
             SelectState::new(SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]), None, window, cx)
         });
@@ -119,7 +112,6 @@ impl Workspace {
             main_view: MainView::Request,
             focus_handle: cx.focus_handle(),
             secret_store: None,
-            pending_secret_writes: Vec::new(),
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
@@ -140,7 +132,7 @@ impl Workspace {
         self.save_state();
 
         let last = self.state.last_request.clone().filter(|p| self.find_request(p).is_some());
-        let first = || self.collections.iter().find_map(|c| first_request(&c.items));
+        let first = || self.collections.iter().find_map(Collection::first_request);
         if let Some(path) = last.or_else(first) {
             self.select_request(path, window, cx);
         } else {
@@ -191,13 +183,11 @@ impl Workspace {
     // MARK: Collections
 
     fn open_collection(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.collections.iter().any(|c| c.root == root) {
-            // Already open: just bring it into view.
+        if let Some(ix) = self.collections.iter().position(|c| c.root == root) {
+            // Already open: bring it into view, unless one of its requests is already showing.
             self.collapsed.remove(&root);
-            if let Some(path) = self.collections.iter().find(|c| c.root == root).and_then(|c| first_request(&c.items))
-                && self.collection_index_for(self.editor.read(cx).path().map(PathBuf::as_path).unwrap_or(Path::new("")))
-                    != self.collections.iter().position(|c| c.root == root)
-            {
+            let showing = self.editor.read(cx).path().is_some_and(|p| self.collection_index_for(p) == Some(ix));
+            if !showing && let Some(path) = self.collections[ix].first_request() {
                 self.select_request(path, window, cx);
             }
             cx.notify();
@@ -208,7 +198,7 @@ impl Workspace {
                 for (path, error) in &collection.errors {
                     eprintln!("{}: {error}", path.display());
                 }
-                let first = first_request(&collection.items);
+                let first = collection.first_request();
                 self.collections.push(collection);
                 self.state.open_projects.push(project::project_dir(&root).to_path_buf());
                 self.save_state();
@@ -231,8 +221,10 @@ impl Workspace {
                     let files: Vec<_> = collection.errors.iter().map(|(p, _)| p.display().to_string()).collect();
                     notify_error(t!("ws.could_not_read", files = files.join(", ")).to_string(), window, cx);
                 }
-                self.environment_editor
-                    .update(cx, |editor, cx| editor.update_collection(collection.clone(), window, cx));
+                if self.environment_editor.read(cx).root() == Some(root) {
+                    self.environment_editor
+                        .update(cx, |editor, cx| editor.update_collection(collection.clone(), window, cx));
+                }
                 self.collections[ix] = collection;
             }
             Err(e) => notify_error(format!("{e:#}"), window, cx),
@@ -272,23 +264,27 @@ impl Workspace {
 
     /// The response-cache key for a request in an open collection.
     fn response_key(&self, path: &Path) -> Option<CacheKey> {
-        let collection = &self.collections[self.collection_index_for(path)?];
-        Some(cache_key(collection.file.id.as_deref(), &collection.root, path))
+        Some(self.collections[self.collection_index_for(path)?].response_key(path))
+    }
+
+    /// Shows a request from an open collection in the editor.
+    fn load_in_editor(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request) = self.find_request(path).cloned() {
+            let key = self.response_key(path);
+            self.editor.update(cx, |editor, cx| editor.load(path.to_path_buf(), request, key, window, cx));
+        }
     }
 
     fn select_request(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(request) = self.find_request(&path).cloned() else {
+        if self.find_request(&path).is_none() {
             return;
-        };
-        let key = self.response_key(&path);
+        }
         if self.main_view == MainView::Environments && !self.close_environments(window, cx) {
             return;
         }
-        self.editor.update(cx, |editor, cx| {
-            // Switching requests saves the one you were editing, like most modern API clients.
-            editor.save(cx);
-            editor.load(path.clone(), request, key, window, cx);
-        });
+        // Switching requests saves the one you were editing, like most modern API clients.
+        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.load_in_editor(&path, window, cx);
         self.state.last_request = Some(path);
         self.save_state();
         self.refresh_environments(window, cx);
@@ -309,7 +305,7 @@ impl Workspace {
     // MARK: Environments
 
     fn refresh_environments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (names, selected, layered) = match self.active_collection(cx) {
+        let (names, selected, layered, active) = match self.active_collection(cx) {
             Some(collection) => {
                 let active = self.state.active_environments.get(&collection.root);
                 let selected = active
@@ -321,9 +317,9 @@ impl Workspace {
                 let names = std::iter::once(SharedString::from(t!("ws.no_environment").to_string()))
                     .chain(collection.environments.iter().map(|e| e.file.name.clone().into()))
                     .collect::<Vec<_>>();
-                (names, selected.unwrap_or(0), secret_store::layer(&collection.file, environment))
+                (names, selected.unwrap_or(0), secret_store::layer(&collection.file, environment), active.cloned())
             }
-            None => (vec![t!("ws.no_environment").to_string().into()], 0, secret_store::Layered::default()),
+            None => (vec![t!("ws.no_environment").to_string().into()], 0, secret_store::Layered::default(), None),
         };
         self.environment.update(cx, |select, cx| {
             select.set_items(SearchableVec::new(names), window, cx);
@@ -331,9 +327,6 @@ impl Workspace {
         });
         self.editor
             .update(cx, |editor, _| editor.set_variables(layered.variables, layered.secrets));
-        let active = self
-            .active_collection(cx)
-            .and_then(|c| self.state.active_environments.get(&c.root).cloned());
         self.environment_editor.update(cx, |editor, cx| editor.set_active(active, cx));
     }
 
@@ -393,20 +386,19 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(delay).await;
                 delay = EVERY;
-                // Collections are re-read from disk first, so requests deleted outside the app
-                // count as gone.
-                let Ok(live) = this.update(cx, |this, cx| {
-                    AppSettings::get(cx).remember_responses.then(|| this.response_liveness_from_disk())
+                let Ok(roots) = this.update(cx, |this, cx| {
+                    let roots: Vec<_> = this.collections.iter().map(|c| c.root.clone()).collect();
+                    AppSettings::get(cx).remember_responses.then_some(roots)
                 }) else {
                     break;
                 };
-                let Some(live) = live else {
+                let Some(roots) = roots else {
                     continue;
                 };
                 let cache = cache.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move { cache.tidy(&live, std::time::SystemTime::now()) })
+                    .spawn(async move { cache.tidy(&liveness_from_disk(&roots), std::time::SystemTime::now()) })
                     .await;
                 match result {
                     Ok(report) if report.removed > 0 => {
@@ -418,37 +410,6 @@ impl Workspace {
             }
         })
         .detach();
-    }
-
-    /// Like [`Self::response_liveness`], but re-reads collections so outside changes count.
-    fn response_liveness_from_disk(&self) -> Liveness {
-        let mut live = Liveness::default();
-        for collection in &self.collections {
-            // An unreadable collection is skipped, so none of its responses count as orphans.
-            if let Ok(fresh) = storage::load_collection(&collection.root) {
-                let single = Workspace::liveness_of(&fresh);
-                live.keys.extend(single.keys);
-                live.collection_ids.extend(single.collection_ids);
-            }
-        }
-        live
-    }
-
-    fn liveness_of(collection: &Collection) -> Liveness {
-        fn walk(items: &[Item], collection: &Collection, live: &mut Liveness) {
-            for item in items {
-                match item {
-                    Item::Folder { children, .. } => walk(children, collection, live),
-                    Item::Request { path, .. } => {
-                        live.keys.insert(cache_key(collection.file.id.as_deref(), &collection.root, path).key);
-                    }
-                }
-            }
-        }
-        let mut live = Liveness::default();
-        live.collection_ids.extend(collection.file.id.clone());
-        walk(&collection.items, collection, &mut live);
-        live
     }
 
     fn set_remember_responses(&mut self, remember: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -484,18 +445,20 @@ impl Workspace {
 
     // MARK: Dialogs and imports
 
-    /// Asks for a project folder, then hands it to `apply`.
-    fn pick_project_folder(
+    /// Shows the file chooser, then hands the chosen path to `apply`.
+    fn pick_path(
         &mut self,
+        directories: bool,
+        prompt: String,
         window: &mut Window,
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
+            files: !directories,
+            directories,
             multiple: false,
-            prompt: Some(t!("ws.open_project").to_string().into()),
+            prompt: Some(prompt.into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -507,6 +470,16 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| apply(this, dir, window, cx)).ok();
         })
         .detach();
+    }
+
+    /// Asks for a project folder, then hands it to `apply`.
+    fn pick_project_folder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, PathBuf, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.pick_path(true, t!("ws.open_project").to_string(), window, cx, apply);
     }
 
     fn open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -558,21 +531,21 @@ impl Workspace {
                 .w(px(640.))
                 .content({
                     let command = command.clone();
-                    move |content, _, _| content.child(Textarea::new(&command).context_menu(edit_menu(EditMenu::Editable)))
+                    move |content, _, _| content.child(textarea(&command))
                 })
                 .on_ok(move |_, window, cx| {
                     let text = command.read(cx).value().to_string();
                     let result = curl::parse(&text).and_then(|mut request| {
-                        let hoisted = weak
+                        let (hoisted, writes) = weak
                             .update(cx, |this, _| this.hoist_into_defaults(&dir, &mut request))
                             .map_err(|_| anyhow::anyhow!("workspace closed"))??;
                         let path = storage::create_request(&dir, &request)?;
-                        Ok((path, hoisted))
+                        Ok((path, hoisted, writes))
                     });
                     match result {
-                        Ok((path, hoisted)) => {
+                        Ok((path, hoisted, writes)) => {
                             weak.update(cx, |this, cx| {
-                                this.flush_secret_writes(window, cx);
+                                this.store_secrets(writes, window, cx);
                                 this.reload_containing(&path, window, cx);
                                 this.select_request(path, window, cx);
                                 if !hoisted.is_empty() {
@@ -603,30 +576,14 @@ impl Workspace {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<()> + 'static,
     ) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some(t!("ws.import_postman_file").to_string().into()),
+        self.pick_path(false, t!("ws.import_postman_file").to_string(), window, cx, |this, file, window, cx| {
+            let result = fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))
+                .and_then(|json| apply(this, json, window, cx));
+            if let Err(e) = result {
+                notify_error(format!("{e:#}"), window, cx);
+            }
         });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
-            };
-            let Some(file) = paths.into_iter().next() else {
-                return;
-            };
-            this.update_in(cx, |this, window, cx| {
-                let result = fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))
-                    .and_then(|json| apply(this, json, window, cx));
-                if let Err(e) = result {
-                    notify_error(format!("{e:#}"), window, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// Picks a project folder without a collection, then a Postman file to create it from.
@@ -645,24 +602,18 @@ impl Workspace {
     }
 
     fn create_project_from_postman(&mut self, dir: &Path, json: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
-        {
-            let import = postman::parse_collection(json)?;
-            let root = postman::write_project_collection(dir, &import)?;
-            let collection = storage::load_collection(&root)?;
-            let id = collection.file.id.clone().unwrap_or_default();
-            let values = import
-                .secrets
-                .iter()
-                .map(|(name, value)| {
-                    let label = secret_store::label(&collection.file.name, "Defaults", name);
-                    (SecretRef::new(&id, DEFAULTS_SCOPE, name), label, value.clone())
-                })
-                .collect();
-            self.store_secrets(values, window, cx);
-            self.open_collection(root, window, cx);
-            notify_import(&import.warnings, window, cx);
-            Ok(())
-        }
+        let import = postman::parse_collection(json)?;
+        let root = postman::write_project_collection(dir, &import)?;
+        let collection = storage::load_collection(&root)?;
+        let writes = import
+            .secrets
+            .iter()
+            .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
+            .collect();
+        self.store_secrets(writes, window, cx);
+        self.open_collection(root, window, cx);
+        notify_import(&import.warnings, window, cx);
+        Ok(())
     }
 
     fn import_postman_into(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -670,17 +621,14 @@ impl Workspace {
             let mut import = postman::parse_collection(&json)?;
             let mut collection = storage::load_collection(&root)?;
             // Imported secret names that clash with this collection's names get a suffix.
-            let taken = |name: &str, file: &CollectionFile| {
-                file.secrets.iter().any(|s| s == name) || file.variables.contains_key(name)
-            };
             let mut renamed = Variables::new();
             for (name, value) in std::mem::take(&mut import.secrets) {
-                let mut new_name = name.clone();
-                let mut n = 2;
-                while taken(&new_name, &collection.file) || renamed.contains_key(&new_name) {
-                    new_name = format!("{name}_{n}");
-                    n += 1;
-                }
+                let file = &collection.file;
+                let new_name = unique_name(&name, |candidate| {
+                    file.secrets.iter().any(|s| s == candidate)
+                        || file.variables.contains_key(candidate)
+                        || renamed.contains_key(candidate)
+                });
                 if new_name != name {
                     rename_placeholder(&mut import.items, &name, &new_name);
                 }
@@ -688,17 +636,14 @@ impl Workspace {
             }
             postman::write_items(&root, &import.items)?;
             if !renamed.is_empty() {
-                let (id, _) = collection.file.ensure_id();
+                collection.file.ensure_id();
                 collection.file.secrets.extend(renamed.keys().cloned());
                 storage::save_collection_file(&root, &collection.file)?;
-                let values = renamed
+                let writes = renamed
                     .iter()
-                    .map(|(name, value)| {
-                        let label = secret_store::label(&collection.file.name, "Defaults", name);
-                        (SecretRef::new(&id, DEFAULTS_SCOPE, name), label, value.clone())
-                    })
+                    .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
                     .collect();
-                this.store_secrets(values, window, cx);
+                this.store_secrets(writes, window, cx);
             }
             this.reload_collection(&root, window, cx);
             notify_import(&import.warnings, window, cx);
@@ -710,21 +655,17 @@ impl Workspace {
         self.pick_postman_file(window, cx, move |this, json, window, cx| {
             let import = postman::parse_environment(&json)?;
             let mut collection = storage::load_collection(&root)?;
-            let (id, assigned) = collection.file.ensure_id();
-            if assigned {
+            if collection.file.ensure_id().1 {
                 storage::save_collection_file(&root, &collection.file)?;
             }
             let path = storage::create_environment(&root, &import.file)?;
             let scope = SecretRef::environment_scope(&path);
-            let values = import
+            let writes = import
                 .secrets
                 .iter()
-                .map(|(name, value)| {
-                    let label = secret_store::label(&collection.file.name, &import.file.name, name);
-                    (SecretRef::new(&id, &scope, name), label, value.clone())
-                })
+                .map(|(name, value)| SecretWrite::new(&collection.file, &scope, &import.file.name, name, value))
                 .collect();
-            this.store_secrets(values, window, cx);
+            this.store_secrets(writes, window, cx);
             this.state.active_environments.insert(root.clone(), path);
             this.save_state();
             this.reload_collection(&root, window, cx);
@@ -774,32 +715,17 @@ impl Workspace {
     }
 
     /// Writes secret values in the background, reporting failures.
-    fn store_secrets(&self, values: Vec<(SecretRef, String, String)>, window: &mut Window, cx: &mut Context<Self>) {
-        if values.is_empty() {
+    fn store_secrets(&self, writes: Vec<SecretWrite>, window: &mut Window, cx: &mut Context<Self>) {
+        if writes.is_empty() {
             return;
         }
         let Some(store) = self.secret_store.clone() else {
-            notify_error(
-                t!(
-                    "ws.store_unavailable_no_value",
-                    names = values.iter().map(|(r, _, _)| r.name.as_str()).collect::<Vec<_>>().join(", ")
-                )
-                .to_string(),
-                window,
-                cx,
-            );
+            let names = writes.iter().map(|w| w.secret.name.as_str()).collect::<Vec<_>>().join(", ");
+            notify_error(t!("ws.store_unavailable_no_value", names = names).to_string(), window, cx);
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    for (secret, label, value) in &values {
-                        store.set(secret, label, value).await?;
-                    }
-                    anyhow::Ok(())
-                })
-                .await;
+            let result = cx.background_executor().spawn(async move { store.apply(&writes, &[]).await }).await;
             this.update_in(cx, |_, window, cx| {
                 if let Err(e) = result {
                     notify_error(t!("ws.could_not_store_secrets", error = format!("{e:#}")).to_string(), window, cx);
@@ -811,39 +737,32 @@ impl Workspace {
     }
 
     /// Hoists literal credentials from a request being imported into `dir` into the owning
-    /// collection's secret defaults. Saves the collection file and stores the values; the
-    /// caller writes the request. Returns the secret names used.
-    fn hoist_into_defaults(&mut self, dir: &Path, request: &mut RequestFile) -> Result<Vec<String>> {
+    /// collection's secret defaults and saves the collection file. The caller writes the
+    /// request, then stores the returned secret values once that has succeeded.
+    fn hoist_into_defaults(&self, dir: &Path, request: &mut RequestFile) -> Result<(Vec<String>, Vec<SecretWrite>)> {
         let Some(ix) = self.collection_index_for(dir) else {
-            return Ok(Vec::new());
+            return Ok(Default::default());
         };
         let mut file = self.collections[ix].file.clone();
-        let root = self.collections[ix].root.clone();
-        // Existing names are placeholders that never match a real value, so new names avoid them.
-        let mut secrets: Variables = file.secrets.iter().map(|n| (n.clone(), "\0existing".to_string())).collect();
-        let reserved = file.variables.clone();
-        let added = hoist_credentials_with(request, &mut secrets, &|name| reserved.contains_key(name));
+        let mut secrets = reserved_names(file.secrets.iter().cloned());
+        let added = hoist_credentials_with(request, &mut secrets, &|name| file.variables.contains_key(name));
         if added.is_empty() {
-            return Ok(added);
+            return Ok(Default::default());
         }
-        let (id, _) = file.ensure_id();
+        file.ensure_id();
         file.secrets.extend(added.iter().cloned());
-        storage::save_collection_file(&root, &file)?;
-        let values: Vec<_> = added
+        storage::save_collection_file(&self.collections[ix].root, &file)?;
+        let writes = added
             .iter()
-            .map(|name| {
-                let label = secret_store::label(&file.name, "Defaults", name);
-                (SecretRef::new(&id, DEFAULTS_SCOPE, name), label, secrets[name].clone())
-            })
+            .map(|name| SecretWrite::new(&file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, secrets[name].clone()))
             .collect();
-        self.pending_secret_writes.extend(values);
-        Ok(added)
+        Ok((added, writes))
     }
 
     /// Moves one header's literal credential into a secret in the active environment, or in
     /// the collection defaults when no environment is active.
     fn move_header_to_secret(&mut self, path: PathBuf, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let result = (|| -> Result<(PathBuf, String)> {
+        let result = (|| -> Result<(PathBuf, String, SecretWrite)> {
             let ix = self.collection_index_for(&path).context(t!("ws.not_in_open_collection").to_string())?;
             let root = self.collections[ix].root.clone();
             let mut request: RequestFile = storage::read_yaml(&path)?;
@@ -852,22 +771,18 @@ impl Workspace {
                 .state
                 .active_environments
                 .get(&root)
-                .and_then(|env_path| self.collections[ix].environments.iter().find(|e| &e.path == env_path))
+                .and_then(|env_path| self.collections[ix].environment(env_path))
                 .cloned();
 
             let (scope_names, scope_vars) = match &environment {
                 Some(env) => (env.file.secrets.clone(), env.file.variables.clone()),
                 None => (file.secrets.clone(), file.variables.clone()),
             };
-            let mut secrets: Variables = scope_names
-                .iter()
-                .chain(scope_vars.keys())
-                .map(|n| (n.clone(), "\0existing".to_string()))
-                .collect();
+            let mut secrets = reserved_names(scope_names.into_iter().chain(scope_vars.into_keys()));
             let name = hoist_header(&mut request, index, &mut secrets).context(t!("ws.no_literal_credential").to_string())?;
             let value = secrets[&name].clone();
 
-            let (id, assigned) = file.ensure_id();
+            let assigned = file.ensure_id().1;
             let (scope, scope_label) = match environment {
                 Some(mut env) => {
                     if assigned {
@@ -884,28 +799,19 @@ impl Workspace {
                 }
             };
             storage::write_yaml(&path, &request)?;
-            let label = secret_store::label(&file.name, &scope_label, &name);
-            self.pending_secret_writes.push((SecretRef::new(&id, scope, &name), label, value));
-            Ok((root, t!("ws.moved_to_secret", name = name, scope = scope_label).to_string()))
+            let write = SecretWrite::new(&file, &scope, &scope_label, &name, value);
+            Ok((root, t!("ws.moved_to_secret", name = name, scope = scope_label).to_string(), write))
         })();
 
         match result {
-            Ok((root, message)) => {
-                self.flush_secret_writes(window, cx);
+            Ok((root, message, write)) => {
+                self.store_secrets(vec![write], window, cx);
                 self.reload_collection(&root, window, cx);
-                if let Some(request) = self.find_request(&path).cloned() {
-                    let key = self.response_key(&path);
-                    self.editor.update(cx, |editor, cx| editor.load(path.clone(), request, key, window, cx));
-                }
+                self.load_in_editor(&path, window, cx);
                 window.push_notification(Notification::success(message), cx);
             }
             Err(e) => notify_error(format!("{e:#}"), window, cx),
         }
-    }
-
-    fn flush_secret_writes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let values = std::mem::take(&mut self.pending_secret_writes);
-        self.store_secrets(values, window, cx);
     }
 
     // MARK: Rendering
@@ -1221,42 +1127,24 @@ fn menu_item(
     })
 }
 
+/// A collection action, as used by the collection menu and the command palette.
+pub(super) type RootAction = fn(&mut Workspace, PathBuf, &mut Window, &mut Context<Workspace>);
+
 fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -> PopupMenu {
-    let r = |root: &Path| root.to_path_buf();
-    menu.item(menu_item(t!("ws.new_request"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.new_request(root.clone(), window, cx)
-    }))
-    .item(menu_item(t!("ws.manage_environments_ellipsis"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.manage_environments(root.clone(), window, cx)
-    }))
-    .separator()
-    .item(menu_item(t!("ws.import_curl"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.import_curl_dialog(root.clone(), window, cx)
-    }))
-    .item(menu_item(t!("ws.import_postman_here"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.import_postman_into(root.clone(), window, cx)
-    }))
-    .item(menu_item(t!("ws.import_postman_environment"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.import_postman_environment(root.clone(), window, cx)
-    }))
-    .separator()
-    .item(menu_item(t!("ws.show_in_file_manager"), weak, {
-        let root = r(root);
-        move |_, _, cx| cx.reveal_path(&root)
-    }))
-    .item(menu_item(t!("ws.reload_from_disk"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.reload_collection(&root, window, cx)
-    }))
-    .item(menu_item(t!("ws.close_collection"), weak, {
-        let root = r(root);
-        move |this, window, cx| this.close_collection(&root, window, cx)
-    }))
+    let item = |key: &str, action: RootAction| {
+        let root = root.to_path_buf();
+        menu_item(t!(key), weak, move |this, window, cx| action(this, root.clone(), window, cx))
+    };
+    menu.item(item("ws.new_request", Workspace::new_request))
+        .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
+        .separator()
+        .item(item("ws.import_curl", Workspace::import_curl_dialog))
+        .item(item("ws.import_postman_here", Workspace::import_postman_into))
+        .item(item("ws.import_postman_environment", Workspace::import_postman_environment))
+        .separator()
+        .item(item("ws.show_in_file_manager", |_, root, _, cx| cx.reveal_path(&root)))
+        .item(item("ws.reload_from_disk", |this, root, window, cx| this.reload_collection(&root, window, cx)))
+        .item(item("ws.close_collection", |this, root, window, cx| this.close_collection(&root, window, cx)))
 }
 
 fn chevron(collapsed: bool) -> Icon {
@@ -1306,28 +1194,28 @@ fn notify_import(warnings: &[String], window: &mut Window, cx: &mut App) {
 
 /// Renames `{{old}}` to `{{new}}` everywhere in imported requests.
 fn rename_placeholder(items: &mut [ImportItem], old: &str, new: &str) {
-    let (from, to) = (format!("{{{{{old}}}}}"), format!("{{{{{new}}}}}"));
-    for item in items {
-        match item {
-            ImportItem::Folder { children, .. } => rename_placeholder(children, old, new),
-            ImportItem::Request(request) => {
-                request.url = request.url.replace(&from, &to);
-                for header in &mut request.headers {
-                    header.value = header.value.replace(&from, &to);
-                }
-                if let Some(body) = &mut request.body {
-                    body.content = body.content.replace(&from, &to);
-                }
-            }
+    let (from, to) = (placeholder(old), placeholder(new));
+    ImportItem::for_each_request_mut(items, &mut |request| {
+        request.url = request.url.replace(&from, &to);
+        for header in &mut request.headers {
+            header.value = header.value.replace(&from, &to);
         }
-    }
+        if let Some(body) = &mut request.body {
+            body.content = body.content.replace(&from, &to);
+        }
+    });
 }
 
-fn first_request(items: &[Item]) -> Option<PathBuf> {
-    items.iter().find_map(|item| match item {
-        Item::Request { path, .. } => Some(path.clone()),
-        Item::Folder { children, .. } => first_request(children),
-    })
+/// Every request of the collections at `roots`, re-read from disk so requests deleted
+/// outside the app count as gone. Unreadable collections are skipped, so none of their
+/// responses count as orphans.
+fn liveness_from_disk(roots: &[PathBuf]) -> Liveness {
+    let mut live = Liveness::default();
+    for collection in roots.iter().filter_map(|root| storage::load_collection(root).ok()) {
+        live.collection_ids.extend(collection.file.id.clone());
+        live.keys.extend(collection.requests().iter().map(|entry| collection.response_key(entry.path).key));
+    }
+    live
 }
 
 /// An example project for tests: `dir/example/.courier` with two requests and a
@@ -1336,7 +1224,7 @@ fn first_request(items: &[Item]) -> Option<PathBuf> {
 fn create_example_project(dir: &Path) -> Result<PathBuf> {
     let project = dir.join("example");
     fs::create_dir_all(&project)?;
-    let mut file = CollectionFile::new("Example");
+    let mut file = crate::model::CollectionFile::new("Example");
     file.variables.insert("base_url".into(), "https://httpbin.org".into());
     let root = project::init_with(&project, &file)?;
 
@@ -1375,6 +1263,29 @@ mod tests {
     #[allow(unused_imports)]
     use core::prelude::v1::test;
 
+    /// Globals and key bindings for a UI test, with every app directory under `tmp`.
+    fn setup(cx: &mut TestAppContext, tmp: &Path) -> AppPaths {
+        let paths = AppPaths::under(tmp);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::request_editor::init(cx);
+            environment_editor::init(cx);
+            palette::init(cx);
+            cx.set_global(AppSettings::load(&paths));
+        });
+        paths
+    }
+
+    fn open_workspace(cx: &mut TestAppContext, paths: &AppPaths, launch: Option<Launch>) -> (Entity<Workspace>, AnyWindowHandle) {
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(paths.clone(), launch, window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        (workspace.unwrap(), handle.into())
+    }
+
     fn launch(root: &Path) -> Option<Launch> {
         Some(Launch { dir: project::project_dir(root).to_path_buf(), explicit: true })
     }
@@ -1388,28 +1299,9 @@ mod tests {
     #[gpui_kit::test]
     async fn manages_environments_end_to_end(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = AppPaths {
-            config_dir: tmp.path().join("config"),
-            data_dir: tmp.path().join("data"),
-            state_dir: tmp.path().join("state"),
-            cache_dir: tmp.path().join("cache"),
-        };
+        let paths = setup(cx, tmp.path());
         let root = create_example_project(tmp.path()).unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::request_editor::init(cx);
-            environment_editor::init(cx);
-            cx.set_global(AppSettings::load(&paths));
-        });
-
-        let mut workspace = None;
-        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
-            workspace = Some(view.clone());
-            Root::new(view, window, cx)
-        });
-        let workspace = workspace.unwrap();
-        let window: AnyWindowHandle = handle.into();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
 
         // Open the manager from the toolbar button.
         cx.update_window(window, |_, window, cx| {
@@ -1538,34 +1430,14 @@ mod tests {
     #[gpui_kit::test]
     async fn launching_in_a_folder_offers_to_create_a_collection(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = AppPaths {
-            config_dir: tmp.path().join("config"),
-            data_dir: tmp.path().join("data"),
-            state_dir: tmp.path().join("state"),
-            cache_dir: tmp.path().join("cache"),
-        };
+        let paths = setup(cx, tmp.path());
         let plain = tmp.path().join("plain");
         let einvoicing = tmp.path().join("einvoicing");
         fs::create_dir_all(&plain).unwrap();
         fs::create_dir_all(&einvoicing).unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::request_editor::init(cx);
-            environment_editor::init(cx);
-            cx.set_global(AppSettings::load(&paths));
-        });
-        let open = |cx: &mut TestAppContext, launch: Launch| {
-            let mut workspace = None;
-            let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-                let view = cx.new(|cx| Workspace::new(paths.clone(), Some(launch), window, cx));
-                workspace = Some(view.clone());
-                Root::new(view, window, cx)
-            });
-            (workspace.unwrap(), AnyWindowHandle::from(handle))
-        };
 
         // Started from a folder that isn't a project (e.g. $HOME): empty state, no dialog.
-        let (workspace, window) = open(cx, Launch { dir: plain.clone(), explicit: false });
+        let (workspace, window) = open_workspace(cx, &paths, Some(Launch { dir: plain.clone(), explicit: false }));
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(!window.has_active_dialog(cx));
@@ -1577,7 +1449,7 @@ mod tests {
         assert!(!plain.join(".courier").exists());
 
         // `courier ~/Work/einvoicing` offers to create the collection; Create makes and opens it.
-        let (workspace, window) = open(cx, Launch { dir: einvoicing.clone(), explicit: true });
+        let (workspace, window) = open_workspace(cx, &paths, Some(Launch { dir: einvoicing.clone(), explicit: true }));
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx), "offers to create .courier");
@@ -1600,28 +1472,9 @@ mod tests {
     #[gpui_kit::test]
     async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = AppPaths {
-            config_dir: tmp.path().join("config"),
-            data_dir: tmp.path().join("data"),
-            state_dir: tmp.path().join("state"),
-            cache_dir: tmp.path().join("cache"),
-        };
+        let paths = setup(cx, tmp.path());
         let root = create_example_project(tmp.path()).unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::request_editor::init(cx);
-            environment_editor::init(cx);
-            palette::init(cx);
-            cx.set_global(AppSettings::load(&paths));
-        });
-        let mut workspace = None;
-        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
-            workspace = Some(view.clone());
-            Root::new(view, window, cx)
-        });
-        let workspace = workspace.unwrap();
-        let window: AnyWindowHandle = handle.into();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
         let echo = root.join("echo-post.yaml");
 
         // Every label resolves to real text, not a missing translation key.
@@ -1662,10 +1515,12 @@ mod tests {
         .unwrap();
     }
 
-    /// Answers one HTTP request on a local port; returns the port.
-    fn one_shot_server(response: &'static str) -> u16 {
+    /// Answers one HTTP request on a local port. Returns the port and a channel that
+    /// receives the raw request text.
+    fn one_shot_server(response: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (sent, received) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             use std::io::{Read as _, Write as _};
             let (mut stream, _) = listener.accept().unwrap();
@@ -1679,39 +1534,19 @@ mod tests {
                 request.extend_from_slice(&buf[..n]);
             }
             stream.write_all(response.as_bytes()).unwrap();
+            let _ = sent.send(String::from_utf8_lossy(&request).into_owned());
         });
-        port
+        (port, received)
     }
 
     #[gpui_kit::test]
     async fn responses_stay_with_their_request_and_survive_restarts(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = AppPaths {
-            config_dir: tmp.path().join("config"),
-            data_dir: tmp.path().join("data"),
-            state_dir: tmp.path().join("state"),
-            cache_dir: tmp.path().join("cache"),
-        };
+        let paths = setup(cx, tmp.path());
         let root = create_example_project(tmp.path()).unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::request_editor::init(cx);
-            environment_editor::init(cx);
-            cx.set_global(AppSettings::load(&paths));
-        });
-        let open = |cx: &mut TestAppContext| {
-            let mut workspace = None;
-            let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-                let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
-                workspace = Some(view.clone());
-                Root::new(view, window, cx)
-            });
-            (workspace.unwrap(), AnyWindowHandle::from(handle))
-        };
-
-        let (workspace, window) = open(cx);
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
         let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
-        let port = one_shot_server(
+        let (port, _) = one_shot_server(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: session=SESSION_SECRET_42\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
         );
         let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
@@ -1768,7 +1603,7 @@ mod tests {
         assert_not_on_disk(tmp.path(), "SESSION_SECRET_42");
 
         // A fresh workspace (as after a restart) restores it, marked as restored.
-        let (restarted, window) = open(cx);
+        let (restarted, window) = open_workspace(cx, &paths, launch(&root));
         cx.update_window(window, |_, window, cx| {
             restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
             let editor = restarted.read(cx).editor.read(cx);
@@ -1785,7 +1620,8 @@ mod tests {
         let echo_key = cx.update(|cx| restarted.read(cx).response_key(&echo).unwrap());
         cache.save(&echo_key, &crate::response_cache::StoredResponse::from_result(&Err("x".into()), 0)).unwrap();
         fs::remove_file(&get_json).unwrap();
-        let live = cx.update(|cx| restarted.read(cx).response_liveness_from_disk());
+        let roots: Vec<_> = cx.update(|cx| restarted.read(cx).collections.iter().map(|c| c.root.clone()).collect());
+        let live = liveness_from_disk(&roots);
         let later = std::time::SystemTime::now() + crate::response_cache::TIDY_GRACE + Duration::from_secs(1);
         let report = cache.tidy(&live, later).unwrap();
         assert_eq!(report, crate::response_cache::TidyReport { removed: 1, kept: 1 });
@@ -1802,27 +1638,9 @@ mod tests {
     #[gpui_kit::test]
     async fn secrets_never_reach_collection_files(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = AppPaths {
-            config_dir: tmp.path().join("config"),
-            data_dir: tmp.path().join("data"),
-            state_dir: tmp.path().join("state"),
-            cache_dir: tmp.path().join("cache"),
-        };
+        let paths = setup(cx, tmp.path());
         let root = create_example_project(tmp.path()).unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            crate::request_editor::init(cx);
-            environment_editor::init(cx);
-            cx.set_global(AppSettings::load(&paths));
-        });
-        let mut workspace = None;
-        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
-            let view = cx.new(|cx| Workspace::new(paths.clone(), launch(&root), window, cx));
-            workspace = Some(view.clone());
-            Root::new(view, window, cx)
-        });
-        let workspace = workspace.unwrap();
-        let window: AnyWindowHandle = handle.into();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
         cx.run_until_parked();
         cx.update(|cx| assert!(workspace.read(cx).secret_store.is_some(), "store connected"));
 
@@ -1892,24 +1710,7 @@ mod tests {
         assert_not_on_disk(tmp.path(), token);
 
         // 3. Sending resolves the placeholder from the store: the real token goes on the wire.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (sent, received) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::{Read as _, Write as _};
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0u8; 1024];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = stream.read(&mut buf).unwrap();
-                if n == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..n]);
-            }
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
-            sent.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
-        });
+        let (port, received) = one_shot_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
         let mut request: RequestFile = storage::read_yaml(&request_path).unwrap();
         request.url = format!("http://127.0.0.1:{port}/json");
         storage::write_yaml(&request_path, &request).unwrap();

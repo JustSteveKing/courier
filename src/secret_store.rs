@@ -182,19 +182,49 @@ impl SecretStore {
         Ok(())
     }
 
-    /// Looks up every secret, returning the values found and the names with no value.
-    pub async fn get_all(&self, secrets: &IndexMap<String, SecretRef>) -> Result<(Variables, Vec<String>)> {
+    /// The values of every secret that has one. (Unset ones show up as unresolved
+    /// placeholders when the request is resolved.)
+    pub async fn get_all(&self, secrets: &IndexMap<String, SecretRef>) -> Result<Variables> {
         let mut found = Variables::new();
-        let mut missing = Vec::new();
         for (name, secret) in secrets {
-            match self.get(secret).await? {
-                Some(value) => {
-                    found.insert(name.clone(), value);
-                }
-                None => missing.push(name.clone()),
+            if let Some(value) = self.get(secret).await? {
+                found.insert(name.clone(), value);
             }
         }
-        Ok((found, missing))
+        Ok(found)
+    }
+
+    /// Stores `sets` and removes `deletes`, stopping at the first failure.
+    pub async fn apply(&self, sets: &[SecretWrite], deletes: &[SecretRef]) -> Result<()> {
+        for write in sets {
+            self.set(&write.secret, &write.label, &write.value).await?;
+        }
+        for secret in deletes {
+            self.delete(secret).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Scope label used in keyring labels for a collection's own secret defaults.
+pub const DEFAULTS_LABEL: &str = "Defaults";
+
+/// A secret value waiting to be stored, with its keyring label.
+#[derive(Clone, Debug)]
+pub struct SecretWrite {
+    pub secret: SecretRef,
+    pub label: String,
+    pub value: String,
+}
+
+impl SecretWrite {
+    /// A write for `name` in a scope of `collection`, whose id must already be assigned.
+    pub fn new(collection: &CollectionFile, scope: &str, scope_label: &str, name: &str, value: impl Into<String>) -> Self {
+        Self {
+            secret: SecretRef::new(collection.id.clone().unwrap_or_default(), scope, name),
+            label: label(&collection.name, scope_label, name),
+            value: value.into(),
+        }
     }
 }
 
@@ -266,15 +296,11 @@ mod tests {
 
     use super::*;
 
-    fn paths(root: &Path) -> AppPaths {
-        AppPaths { config_dir: root.join("config"), data_dir: root.join("data"), state_dir: root.join("state"), cache_dir: root.join("cache") }
-    }
-
     #[test]
     fn file_backend_round_trips_without_plaintext_on_disk() {
         futures_lite::future::block_on(async {
             let tmp = tempfile::tempdir().unwrap();
-            let paths = paths(tmp.path());
+            let paths = AppPaths::under(tmp.path());
             let token = SecretRef::new("c1", "production", "api_token");
             let value = "sk_live_super_secret_value_123";
 
@@ -304,7 +330,7 @@ mod tests {
     fn file_backend_rejects_a_different_key() {
         futures_lite::future::block_on(async {
             let tmp = tempfile::tempdir().unwrap();
-            let paths = paths(tmp.path());
+            let paths = AppPaths::under(tmp.path());
             let token = SecretRef::new("c1", DEFAULTS_SCOPE, "token");
             SecretStore::open_file(&paths).await.unwrap().set(&token, "label", "abc").await.unwrap();
 
@@ -350,7 +376,7 @@ mod tests {
     fn real_keyring_round_trip() {
         futures_lite::future::block_on(async {
             let tmp = tempfile::tempdir().unwrap();
-            let store = SecretStore::open(&paths(tmp.path())).await.unwrap();
+            let store = SecretStore::open(&AppPaths::under(tmp.path())).await.unwrap();
             assert_eq!(store.kind(), BackendKind::Keyring);
             let secret = SecretRef::new("test-collection", DEFAULTS_SCOPE, "round_trip");
             store.set(&secret, &label("Test", "Defaults", "round_trip"), "hello").await.unwrap();

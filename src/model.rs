@@ -1,9 +1,9 @@
 //! The on-disk YAML format. Everything here is plain data with no I/O.
 //!
-//! A collection is a directory:
+//! A collection is the `.courier/` directory of a project (see `crate::project`):
 //!
 //! ```text
-//! my-api/
+//! my-project/.courier/
 //!   collection.yaml        CollectionFile
 //!   environments/
 //!     local.yaml           EnvironmentFile
@@ -122,6 +122,13 @@ pub struct Header {
     pub enabled: bool,
 }
 
+impl Header {
+    /// An enabled header.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { name: name.into(), value: value.into(), enabled: true }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Body {
     #[serde(rename = "type")]
@@ -235,6 +242,11 @@ pub fn variables_from_text(text: &str) -> Result<Variables, String> {
         }
     }
     Ok(variables)
+}
+
+/// The `{{name}}` placeholder for a variable.
+pub fn placeholder(name: &str) -> String {
+    format!("{{{{{name}}}}}")
 }
 
 /// Replaces `{{name}}` with values from `variables`. Returns the names that had no value;

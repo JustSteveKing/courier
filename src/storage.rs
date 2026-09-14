@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::response_cache::{CacheKey, cache_key};
 use crate::model::{
     COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, RequestFile, slugify,
 };
@@ -33,16 +34,50 @@ pub struct Environment {
     pub file: EnvironmentFile,
 }
 
+/// A request found by [`Collection::requests`], with the names of the folders it's in.
+pub struct RequestEntry<'a> {
+    pub folders: Vec<&'a str>,
+    pub path: &'a Path,
+    pub request: &'a RequestFile,
+}
+
 impl Collection {
-    pub fn find_request(&self, path: &Path) -> Option<&RequestFile> {
-        fn find<'a>(items: &'a [Item], path: &Path) -> Option<&'a RequestFile> {
-            items.iter().find_map(|item| match item {
-                Item::Request { path: p, request } if p == path => Some(request),
-                Item::Folder { children, .. } => find(children, path),
-                _ => None,
-            })
+    /// Every request, depth first in sidebar order.
+    pub fn requests(&self) -> Vec<RequestEntry<'_>> {
+        fn walk<'a>(items: &'a [Item], folders: &mut Vec<&'a str>, out: &mut Vec<RequestEntry<'a>>) {
+            for item in items {
+                match item {
+                    Item::Folder { name, children, .. } => {
+                        folders.push(name);
+                        walk(children, folders, out);
+                        folders.pop();
+                    }
+                    Item::Request { path, request } => {
+                        out.push(RequestEntry { folders: folders.clone(), path, request })
+                    }
+                }
+            }
         }
-        find(&self.items, path)
+        let mut out = Vec::new();
+        walk(&self.items, &mut Vec::new(), &mut out);
+        out
+    }
+
+    pub fn find_request(&self, path: &Path) -> Option<&RequestFile> {
+        self.requests().into_iter().find(|entry| entry.path == path).map(|entry| entry.request)
+    }
+
+    pub fn first_request(&self) -> Option<PathBuf> {
+        self.requests().first().map(|entry| entry.path.to_path_buf())
+    }
+
+    pub fn environment(&self, path: &Path) -> Option<&Environment> {
+        self.environments.iter().find(|e| e.path == path)
+    }
+
+    /// The response-cache key for one of this collection's requests.
+    pub fn response_key(&self, request: &Path) -> CacheKey {
+        cache_key(self.file.id.as_deref(), &self.root, request)
     }
 }
 
@@ -147,14 +182,6 @@ pub fn unique_path(dir: &Path, name: &str, extension: &str) -> PathBuf {
     path
 }
 
-/// Creates `parent/<slug>/collection.yaml` and returns the new collection's root.
-#[cfg(test)]
-pub fn create_collection(parent: &Path, file: &CollectionFile) -> Result<PathBuf> {
-    let root = unique_path(parent, &file.name, "");
-    write_yaml(&root.join(COLLECTION_FILE), file)?;
-    Ok(root)
-}
-
 pub fn create_request(dir: &Path, request: &RequestFile) -> Result<PathBuf> {
     let path = unique_path(dir, &request.name, ".yaml");
     write_yaml(&path, request)?;
@@ -182,8 +209,8 @@ mod tests {
     #[test]
     fn creates_and_loads_a_collection() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = create_collection(tmp.path(), &CollectionFile::new("My API")).unwrap();
-        assert_eq!(root, tmp.path().join("my-api"));
+        let root = crate::project::init_with(tmp.path(), &CollectionFile::new("My API")).unwrap();
+        assert_eq!(root, tmp.path().join(".courier"));
 
         let mut env = EnvironmentFile::new("Local");
         env.variables.insert("base_url".into(), "http://localhost:8080".into());

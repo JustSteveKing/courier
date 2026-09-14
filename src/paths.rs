@@ -1,8 +1,8 @@
 //! XDG base directories and the small amount of app state kept between runs.
 //!
-//! - `$XDG_CONFIG_HOME/<app>/` — user settings (reserved; nothing written yet)
+//! - `$XDG_CONFIG_HOME/<app>/settings.yaml` — user settings
 //! - `$XDG_DATA_HOME/<app>/` — the encrypted secrets fallback, when there is no keyring
-//! - `$XDG_STATE_HOME/<app>/state.yaml` — open collections, active environments, last request
+//! - `$XDG_STATE_HOME/<app>/state.yaml` — open projects, active environments, last request
 //! - `$XDG_CACHE_HOME/<app>/responses/` — last response per request (disposable)
 
 use std::collections::BTreeMap;
@@ -34,6 +34,17 @@ impl AppPaths {
             state_dir: xdg.state_dir().unwrap_or_else(|| xdg.data_dir()).join(APP_NAME),
             cache_dir: xdg.cache_dir().join(APP_NAME),
         })
+    }
+
+    /// Every directory under `root`, for tests.
+    #[cfg(test)]
+    pub fn under(root: &std::path::Path) -> Self {
+        Self {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+            cache_dir: root.join("cache"),
+        }
     }
 
     fn state_file(&self) -> PathBuf {

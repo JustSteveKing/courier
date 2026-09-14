@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex, v_flex};
@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
-use crate::i18n::{EditMenu, edit_menu};
+use crate::ui::{code_editor, readonly_editor, text_input};
 use crate::http::{self, Request};
 use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
@@ -31,6 +31,9 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-s", SaveRequest, Some(CONTEXT)),
         KeyBinding::new("ctrl-enter", SendRequest, Some(CONTEXT)),
+        // Text inputs bind their own "secondary enter"; this deeper binding wins inside the
+        // editor's fields, so Ctrl+Enter sends from any of them.
+        KeyBinding::new("secondary-enter", SendRequest, Some("RequestEditor > Input")),
     ]);
 }
 
@@ -56,6 +59,37 @@ struct ResponseState {
     cache_key: Option<CacheKey>,
 }
 
+impl ResponseState {
+    fn outcome(&self) -> Option<&Outcome> {
+        self.response.as_ref().map(|r| &r.outcome)
+    }
+
+    fn clear(&mut self) {
+        self.response = None;
+        self.restored = false;
+        self.missing_variables.clear();
+    }
+
+    /// Loads the saved response, if this request has none yet and isn't mid-send.
+    fn restore_from(&mut self, cache: &ResponseCache) {
+        if self.response.is_none()
+            && !self.sending
+            && let Some(key) = &self.cache_key
+            && let Some(response) = cache.load(key)
+        {
+            self.response = Some(response);
+            self.restored = true;
+        }
+    }
+
+    fn finish(&mut self, response: StoredResponse, missing_variables: Vec<String>) {
+        self.response = Some(response);
+        self.restored = false;
+        self.sending = false;
+        self.missing_variables = missing_variables;
+    }
+}
+
 pub struct RequestEditor {
     focus_handle: FocusHandle,
     /// The file being edited, and its contents as last loaded or saved.
@@ -76,11 +110,11 @@ pub struct RequestEditor {
     response_body: Entity<EditorState>,
     response_headers: Entity<EditorState>,
     responses: HashMap<PathBuf, ResponseState>,
-    response_cache: Option<ResponseCache>,
+    response_cache: ResponseCache,
 }
 
 impl RequestEditor {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(response_cache: ResponseCache, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.name_placeholder").to_string()));
         let method = cx.new(|cx| {
             SelectState::new(SearchableVec::new(METHODS.to_vec()), Some(IndexPath::default()), window, cx)
@@ -92,7 +126,7 @@ impl RequestEditor {
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
 
         cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.send(window, cx),
+            InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
             InputEvent::Change => this.update_dirty(cx),
             _ => {}
         })
@@ -104,12 +138,10 @@ impl RequestEditor {
         })
         .detach();
         for editor in [&headers, &body] {
-            cx.subscribe_in(editor, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => this.update_dirty(cx),
-                // Text inputs claim Ctrl+Enter themselves, so the SendRequest binding never
-                // fires while typing in them; treat their "secondary enter" as send.
-                InputEvent::PressEnter { secondary: true, .. } => this.send(window, cx),
-                _ => {}
+            cx.subscribe(editor, |this, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.update_dirty(cx);
+                }
             })
             .detach();
         }
@@ -135,7 +167,7 @@ impl RequestEditor {
             response_body,
             response_headers,
             responses: HashMap::new(),
-            response_cache: None,
+            response_cache,
         }
     }
 
@@ -161,8 +193,9 @@ impl RequestEditor {
         cx.notify();
     }
 
-    pub fn set_response_cache(&mut self, cache: ResponseCache) {
-        self.response_cache = Some(cache);
+    /// The response cache, unless saving responses is turned off.
+    fn cache(&self, cx: &App) -> Option<&ResponseCache> {
+        AppSettings::get(cx).remember_responses.then_some(&self.response_cache)
     }
 
     #[cfg(test)]
@@ -182,12 +215,8 @@ impl RequestEditor {
 
     /// Forgets every response (in memory and on disk), except requests still in flight.
     pub fn clear_responses(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        let removed = self.response_cache.as_ref().map(|c| c.clear().unwrap_or(0)).unwrap_or(0);
-        for state in self.responses.values_mut() {
-            state.response = None;
-            state.restored = false;
-            state.missing_variables.clear();
-        }
+        let removed = self.response_cache.clear().unwrap_or(0);
+        self.responses.values_mut().for_each(ResponseState::clear);
         self.show_response(window, cx);
         removed
     }
@@ -198,7 +227,7 @@ impl RequestEditor {
 
     /// Puts the current request's response (if any) into the response panes.
     fn show_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (body, headers) = match self.state().and_then(|s| s.response.as_ref()).map(|r| &r.outcome) {
+        let (body, headers) = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, body, .. }) => (
                 http::pretty_body(body),
                 headers.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n"),
@@ -244,17 +273,11 @@ impl RequestEditor {
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
 
-        let remember = AppSettings::get(cx).remember_responses;
+        let cache = self.cache(cx).cloned();
         let state = self.responses.entry(path.clone()).or_default();
         state.cache_key = cache_key;
-        if state.response.is_none()
-            && !state.sending
-            && remember
-            && let (Some(cache), Some(key)) = (&self.response_cache, &state.cache_key)
-            && let Some(response) = cache.load(key)
-        {
-            state.response = Some(response);
-            state.restored = true;
+        if let Some(cache) = cache {
+            state.restore_from(&cache);
         }
 
         self.path = Some(path);
@@ -362,7 +385,7 @@ impl RequestEditor {
                     if !secrets.is_empty() {
                         match store {
                             Some(store) => match store.get_all(&secrets).await {
-                                Ok((found, _)) => variables.extend(found),
+                                Ok(found) => variables.extend(found),
                                 Err(e) => {
                                     let error = format!("{e:#}");
                                     return (Err(t!("request.could_not_read_secrets", error = error).to_string()), Vec::new());
@@ -378,14 +401,10 @@ impl RequestEditor {
             let stored = StoredResponse::from_result(&result, response_cache::now());
             this.update_in(cx, |this, window, cx| {
                 // The response belongs to the request that sent it, whichever one is open now.
+                let cache = this.cache(cx).cloned();
                 let state = this.responses.entry(path.clone()).or_default();
-                state.response = Some(stored.clone());
-                state.restored = false;
-                state.sending = false;
-                state.missing_variables = missing;
-                if AppSettings::get(cx).remember_responses
-                    && let (Some(cache), Some(key)) = (this.response_cache.clone(), state.cache_key.clone())
-                {
+                state.finish(stored.clone(), missing);
+                if let (Some(cache), Some(key)) = (cache, state.cache_key.clone()) {
                     cx.background_executor()
                         .spawn(async move {
                             if let Err(e) = cache.save(&key, &stored) {
@@ -512,7 +531,7 @@ impl Render for RequestEditor {
 
         let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         let response_tab = self.response_tab;
-        let header_count = match self.state().and_then(|s| s.response.as_ref()).map(|r| &r.outcome) {
+        let header_count = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, .. }) => t!("request.headers_tab_count", count = headers.len()).to_string(),
             _ => t!("request.headers_tab").to_string(),
         };
@@ -529,7 +548,7 @@ impl Render for RequestEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.name).context_menu(edit_menu(EditMenu::Editable))))
+                    .child(div().flex_1().child(text_input(&self.name)))
                     .child(
                         div()
                             .text_xs()
@@ -541,7 +560,7 @@ impl Render for RequestEditor {
                 h_flex()
                     .gap_2()
                     .child(div().w_32().child(Select::new(&self.method)))
-                    .child(div().flex_1().child(Input::new(&self.url).context_menu(edit_menu(EditMenu::Editable))))
+                    .child(div().flex_1().child(text_input(&self.url)))
                     .child(
                         Button::new("send")
                             .primary()
@@ -563,10 +582,10 @@ impl Render for RequestEditor {
                             .min_w_0()
                             .gap_1()
                             .child(label(t!("request.headers_label").to_string()))
-                            .child(Editor::new(&self.headers).h_32().context_menu(edit_menu(EditMenu::Editable)))
+                            .child(code_editor(&self.headers).h_32())
                             .children(self.render_credential_warning(cx))
                             .child(label(t!("request.body").to_string()))
-                            .child(Editor::new(&self.body).flex_1().min_h_0().context_menu(edit_menu(EditMenu::Editable))),
+                            .child(code_editor(&self.body).flex_1().min_h_0()),
                     )
                     .child(
                         v_flex()
@@ -591,13 +610,11 @@ impl Render for RequestEditor {
                                     ),
                             )
                             .child(
-                                Editor::new(if response_tab == 0 {
+                                readonly_editor(if response_tab == 0 {
                                     &self.response_body
                                 } else {
                                     &self.response_headers
                                 })
-                                .readonly(true)
-                                .context_menu(edit_menu(EditMenu::ReadOnly))
                                 .flex_1()
                                 .min_h_0(),
                             ),
