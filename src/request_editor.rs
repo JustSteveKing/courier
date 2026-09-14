@@ -10,13 +10,14 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use indexmap::IndexMap;
+use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
 use crate::http::{self, Request, Response};
 use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
 use crate::secret_store::{SecretRef, SecretStore};
 use crate::storage::write_yaml;
-use indexmap::IndexMap;
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 const CONTEXT: &str = "RequestEditor";
@@ -66,7 +67,7 @@ pub struct RequestEditor {
 
 impl RequestEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Request name"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.name_placeholder").to_string()));
         let method = cx.new(|cx| {
             SelectState::new(SearchableVec::new(METHODS.to_vec()), Some(IndexPath::default()), window, cx)
         });
@@ -137,6 +138,14 @@ impl RequestEditor {
     #[cfg(test)]
     pub fn headers_entity(&self) -> Entity<EditorState> {
         self.headers.clone()
+    }
+
+    /// Re-applies strings set at construction after the interface language changes. Strings
+    /// built during render update on their own.
+    pub fn relocalize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.name
+            .update(cx, |s, cx| s.set_placeholder(t!("request.name_placeholder").to_string(), window, cx));
+        cx.notify();
     }
 
     pub fn set_secret_store(&mut self, store: SecretStore) {
@@ -244,7 +253,7 @@ impl RequestEditor {
                 self.dirty = false;
                 cx.emit(RequestEditorEvent::Saved(path));
             }
-            Err(e) => cx.emit(RequestEditorEvent::Error(format!("Could not save: {e:#}"))),
+            Err(e) => cx.emit(RequestEditorEvent::Error(t!("request.could_not_save", error = format!("{e:#}")).to_string())),
         }
         cx.notify();
     }
@@ -270,9 +279,12 @@ impl RequestEditor {
                         match store {
                             Some(store) => match store.get_all(&secrets).await {
                                 Ok((found, _)) => variables.extend(found),
-                                Err(e) => return (Err(format!("Could not read secrets: {e:#}")), Vec::new()),
+                                Err(e) => {
+                                    let error = format!("{e:#}");
+                                    return (Err(t!("request.could_not_read_secrets", error = error).to_string()), Vec::new());
+                                }
                             },
-                            None => return (Err("The secret store isn't available yet".into()), Vec::new()),
+                            None => return (Err(t!("secrets.store_unavailable").to_string()), Vec::new()),
                         }
                     }
                     let (request, missing) = Request::resolve(&file, &variables);
@@ -301,10 +313,10 @@ impl RequestEditor {
             self.missing_variables.iter().cloned().partition(|name| self.secrets.contains_key(name));
         let mut parts = Vec::new();
         if !plain.is_empty() {
-            parts.push(format!("Undefined: {}", plain.join(", ")));
+            parts.push(t!("request.undefined", names = plain.join(", ")).to_string());
         }
         if !secrets.is_empty() {
-            parts.push(format!("Secret not set on this machine: {}", secrets.join(", ")));
+            parts.push(t!("request.secret_not_set", names = secrets.join(", ")).to_string());
         }
         parts.join("  ·  ")
     }
@@ -328,7 +340,7 @@ impl RequestEditor {
                 Button::new(("move-header-to-secret", index))
                     .xsmall()
                     .warning()
-                    .label(format!("Move {} to a secret", header.name))
+                    .label(t!("request.move_header_to_secret", header = header.name).to_string())
                     .on_click(cx.listener(move |this, _, _, cx| this.move_header_to_secret(index, cx)))
             })
             .collect();
@@ -338,7 +350,7 @@ impl RequestEditor {
                 .gap_2()
                 .text_xs()
                 .text_color(theme.warning)
-                .child("Literal credential in headers, saved in plain text:")
+                .child(t!("request.literal_credential").to_string())
                 .children(buttons)
         })
     }
@@ -346,9 +358,9 @@ impl RequestEditor {
     fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (line, color) = match &self.last {
-            None if self.sending => ("Sending…".to_string(), theme.muted_foreground),
-            None => ("No response yet".to_string(), theme.muted_foreground),
-            Some(Err(_)) => ("Request failed".to_string(), theme.danger),
+            None if self.sending => (t!("request.status_sending").to_string(), theme.muted_foreground),
+            None => (t!("request.status_none").to_string(), theme.muted_foreground),
+            Some(Err(_)) => (t!("request.status_failed").to_string(), theme.danger),
             Some(Ok(r)) => (
                 format!(
                     "{} {}  ·  {}  ·  {}",
@@ -389,15 +401,15 @@ impl Render for RequestEditor {
                 .justify_center()
                 .items_center()
                 .text_color(theme.muted_foreground)
-                .child("Select a request, or create one from a collection's menu")
+                .child(t!("request.empty_state").to_string())
                 .into_any_element();
         }
 
-        let label = |text: &'static str| div().text_xs().text_color(theme.muted_foreground).child(text);
+        let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         let response_tab = self.response_tab;
         let header_count = match &self.last {
-            Some(Ok(r)) => format!("Headers ({})", r.headers.len()),
-            _ => "Headers".into(),
+            Some(Ok(r)) => t!("request.headers_tab_count", count = r.headers.len()).to_string(),
+            _ => t!("request.headers_tab").to_string(),
         };
 
         v_flex()
@@ -416,7 +428,7 @@ impl Render for RequestEditor {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(if self.dirty { "Unsaved · Ctrl+S" } else { "Saved" }),
+                            .child(if self.dirty { t!("request.unsaved") } else { t!("request.saved") }.to_string()),
                     ),
             )
             .child(
@@ -427,8 +439,8 @@ impl Render for RequestEditor {
                     .child(
                         Button::new("send")
                             .primary()
-                            .label("Send")
-                            .tooltip("Ctrl+Enter")
+                            .label(t!("request.send").to_string())
+                            .tooltip(t!("request.send_shortcut").to_string())
                             .loading(self.sending)
                             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
                     ),
@@ -444,10 +456,10 @@ impl Render for RequestEditor {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(label("Headers (Name: value, # to disable)"))
+                            .child(label(t!("request.headers_label").to_string()))
                             .child(Editor::new(&self.headers).h_32())
                             .children(self.render_credential_warning(cx))
-                            .child(label("Body"))
+                            .child(label(t!("request.body").to_string()))
                             .child(Editor::new(&self.body).flex_1().min_h_0()),
                     )
                     .child(
@@ -464,7 +476,7 @@ impl Render for RequestEditor {
                                             .segmented()
                                             .small()
                                             .selected_index(response_tab)
-                                            .child(Tab::new().label("Body"))
+                                            .child(Tab::new().label(t!("request.body").to_string()))
                                             .child(Tab::new().label(header_count))
                                             .on_click(cx.listener(|this, index: &usize, _, cx| {
                                                 this.response_tab = *index;

@@ -14,6 +14,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rust_i18n::t;
 
 use crate::credentials::looks_sensitive_name;
 use crate::model::{EnvironmentFile, Variables, variables_from_text, variables_to_text};
@@ -95,13 +96,13 @@ pub struct EnvironmentEditor {
 
 impl EnvironmentEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("env.name_placeholder").to_string()));
         let variables = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("yaml")
                 .placeholder("base_url: https://api.example.com")
         });
-        let new_secret = cx.new(|cx| InputState::new(window, cx).placeholder("new_secret_name"));
+        let new_secret = cx.new(|cx| InputState::new(window, cx).placeholder(t!("secrets.new_name_placeholder").to_string()));
         cx.subscribe(&name, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 this.update_dirty(cx);
@@ -166,6 +167,16 @@ impl EnvironmentEditor {
     #[cfg(test)]
     pub fn name_value(&self, cx: &App) -> SharedString {
         self.name.read(cx).value()
+    }
+
+    /// Re-applies strings set at construction after the interface language changes. Strings
+    /// built during render update on their own.
+    pub fn relocalize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.name
+            .update(cx, |s, cx| s.set_placeholder(t!("env.name_placeholder").to_string(), window, cx));
+        self.new_secret
+            .update(cx, |s, cx| s.set_placeholder(t!("secrets.new_name_placeholder").to_string(), window, cx));
+        cx.notify();
     }
 
     pub fn set_active(&mut self, active: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -389,14 +400,14 @@ impl EnvironmentEditor {
         };
         let name = self.name.read(cx).value().trim().to_string();
         if name.is_empty() {
-            return self.fail("Name can't be empty", cx);
+            return self.fail(t!("env.name_empty"), cx);
         }
         let variables = match variables_from_text(&self.variables.read(cx).value()) {
             Ok(variables) => variables,
             Err(e) => return self.fail(e, cx),
         };
         if let Some(row) = self.secret_rows.iter().find(|row| variables.contains_key(&row.name)) {
-            return self.fail(format!("`{}` is both a variable and a secret", row.name), cx);
+            return self.fail(t!("secrets.both_variable_and_secret", name = row.name), cx);
         }
         let pending: Vec<_> = self
             .secret_rows
@@ -405,7 +416,7 @@ impl EnvironmentEditor {
             .collect();
         let Some(store) = self.store.clone().filter(|_| true) else {
             if !pending.is_empty() || !self.removed_secrets.is_empty() {
-                return self.fail("The secret store isn't available yet; try again in a moment", cx);
+                return self.fail(t!("secrets.store_unavailable_retry"), cx);
             }
             return self.write_files(collection, name, variables, cx);
         };
@@ -457,7 +468,7 @@ impl EnvironmentEditor {
                 .await;
             if let Err(e) = result {
                 this.update(cx, |_, cx| {
-                    cx.emit(EnvironmentEditorEvent::Error(format!("Could not store secrets: {e:#}")))
+                    cx.emit(EnvironmentEditorEvent::Error(t!("secrets.could_not_store", error = format!("{e:#}")).to_string()))
                 })
                 .ok();
             }
@@ -505,7 +516,7 @@ impl EnvironmentEditor {
                 true
             }
             Err(e) => {
-                cx.emit(EnvironmentEditorEvent::Error(format!("Could not save: {e:#}")));
+                cx.emit(EnvironmentEditorEvent::Error(t!("request.could_not_save", error = format!("{e:#}")).to_string()));
                 false
             }
         }
@@ -549,7 +560,9 @@ impl EnvironmentEditor {
                             .await;
                         this.update_in(cx, |this, window, cx| match result {
                             Ok(()) => this.check_stored(window, cx),
-                            Err(e) => cx.emit(EnvironmentEditorEvent::Error(format!("Could not copy secrets: {e:#}"))),
+                            Err(e) => cx.emit(EnvironmentEditorEvent::Error(
+                                t!("secrets.could_not_copy", error = format!("{e:#}")).to_string(),
+                            )),
                         })
                         .ok();
                     })
@@ -571,7 +584,7 @@ impl EnvironmentEditor {
         }
         if let Some(saved) = self.saved() {
             let file = EnvironmentFile {
-                name: format!("{} copy", saved.name),
+                name: t!("env.copy_name", name = saved.name).to_string(),
                 variables: saved.variables,
                 secrets: saved.secrets,
             };
@@ -595,17 +608,17 @@ impl EnvironmentEditor {
         window.open_dialog(cx, move |dialog, _, _| {
             let (weak, path, root, secret_refs) = (weak.clone(), path.clone(), root.clone(), secret_refs.clone());
             let message = if secret_refs.is_empty() {
-                format!("This deletes {}.", path.display())
+                t!("env.delete_message", path = path.display()).to_string()
             } else {
-                format!("This deletes {} and its {} stored secret(s).", path.display(), secret_refs.len())
+                t!("env.delete_message_with_secrets", path = path.display(), count = secret_refs.len()).to_string()
             };
             dialog
-                .title(format!("Delete “{name}”?"))
+                .title(t!("env.delete_title", name = name).to_string())
                 .w(px(420.))
                 .content(move |content, _, _| content.child(message.clone()))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Delete")
+                        .ok_text(t!("env.delete").to_string())
                         .ok_variant(ButtonVariant::Danger)
                         .show_cancel(true),
                 )
@@ -641,16 +654,16 @@ impl EnvironmentEditor {
 
     fn validate_secret_name(&self, name: &str, cx: &App) -> Result<(), String> {
         if name.is_empty() {
-            return Err("Secret name can't be empty".into());
+            return Err(t!("secrets.name_empty").to_string());
         }
         if name.contains(['{', '}', ':']) || name.chars().any(char::is_whitespace) {
-            return Err(format!("`{name}` can't contain spaces, colons or braces"));
+            return Err(t!("secrets.name_invalid", name = name).to_string());
         }
         if self.secret_rows.iter().any(|row| row.name == name) {
-            return Err(format!("`{name}` is already a secret"));
+            return Err(t!("secrets.name_taken_secret", name = name).to_string());
         }
         if variables_from_text(&self.variables.read(cx).value()).is_ok_and(|vars| vars.contains_key(name)) {
-            return Err(format!("`{name}` is already a variable; use “Move to secrets” instead"));
+            return Err(t!("secrets.name_taken_variable", name = name).to_string());
         }
         Ok(())
     }
@@ -732,7 +745,9 @@ impl EnvironmentEditor {
                         }
                     }
                     Ok(None) => {}
-                    Err(e) => cx.emit(EnvironmentEditorEvent::Error(format!("Could not read secret: {e:#}"))),
+                    Err(e) => cx.emit(EnvironmentEditorEvent::Error(
+                        t!("secrets.could_not_read", error = format!("{e:#}")).to_string(),
+                    )),
                 }
                 cx.notify();
             })
@@ -758,7 +773,7 @@ impl EnvironmentEditor {
                 .when(selected, |s| s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground))
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .child(div().flex_1().min_w_0().truncate().child(label))
-                .when(active, |s| s.child(div().text_xs().text_color(theme.success).child("active")))
+                .when(active, |s| s.child(div().text_xs().text_color(theme.success).child(t!("env.active").to_string())))
                 .on_click(cx.listener(move |this, _, window, cx| this.select(target.clone(), window, cx)))
         };
 
@@ -774,14 +789,14 @@ impl EnvironmentEditor {
                     .text_color(theme.muted_foreground)
                     .child(collection.file.name.clone()),
             )
-            .child(row(0, "Collection defaults".into(), Target::Defaults, false, cx))
-            .child(div().px_2().pt_2().pb_1().text_xs().text_color(theme.muted_foreground).child("Environments"));
+            .child(row(0, t!("env.collection_defaults").to_string(), Target::Defaults, false, cx))
+            .child(div().px_2().pt_2().pb_1().text_xs().text_color(theme.muted_foreground).child(t!("env.environments").to_string()));
         for (ix, env) in collection.environments.iter().enumerate() {
             let active = self.active.as_ref() == Some(&env.path);
             list = list.child(row(ix + 1, env.file.name.clone(), Target::Environment(env.path.clone()), active, cx));
         }
         if collection.environments.is_empty() {
-            list = list.child(div().px_2().text_sm().text_color(theme.muted_foreground).child("None yet"));
+            list = list.child(div().px_2().text_sm().text_color(theme.muted_foreground).child(t!("env.none_yet").to_string()));
         }
         list.child(
             h_flex().child(
@@ -789,9 +804,9 @@ impl EnvironmentEditor {
                     .ghost()
                     .small()
                     .icon(IconName::Plus)
-                    .label("New environment")
+                    .label(t!("env.new").to_string())
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.create(EnvironmentFile::new("New environment"), None, window, cx);
+                        this.create(EnvironmentFile::new(t!("env.new")), None, window, cx);
                     })),
             ),
         )
@@ -801,7 +816,7 @@ impl EnvironmentEditor {
         let theme = cx.theme().clone();
         let description = match &self.store {
             Some(store) => store.kind().describe(),
-            None => "Connecting to the secret store…",
+            None => t!("secrets.connecting").to_string(),
         };
 
         let sensitive: Vec<String> = variables_from_text(&self.variables.read(cx).value())
@@ -817,11 +832,11 @@ impl EnvironmentEditor {
         for (ix, row) in self.secret_rows.iter().enumerate() {
             let has_input = !row.input.read(cx).value().is_empty();
             let (status, color) = match (row.stored, has_input) {
-                (_, true) if row.revealed.is_none() => ("will be saved", theme.warning),
-                (Stored::Checking, _) => ("checking…", theme.muted_foreground),
-                (Stored::Set, _) => ("set", theme.success),
-                (Stored::NotSet, _) => ("not set on this machine", theme.danger),
-                (Stored::Unknown, _) => ("unavailable", theme.danger),
+                (_, true) if row.revealed.is_none() => (t!("secrets.status_will_save"), theme.warning),
+                (Stored::Checking, _) => (t!("secrets.status_checking"), theme.muted_foreground),
+                (Stored::Set, _) => (t!("secrets.status_set"), theme.success),
+                (Stored::NotSet, _) => (t!("secrets.status_not_set"), theme.danger),
+                (Stored::Unknown, _) => (t!("secrets.status_unavailable"), theme.danger),
             };
             let can_reveal = row.stored == Stored::Set || has_input;
             rows = rows.child(
@@ -829,13 +844,13 @@ impl EnvironmentEditor {
                     .gap_2()
                     .child(div().w(px(180.)).flex_none().truncate().text_sm().font_family("monospace").child(row.name.clone()))
                     .child(div().flex_1().min_w_0().child(Input::new(&row.input).small()))
-                    .child(div().w(px(150.)).flex_none().text_xs().text_color(color).child(status))
+                    .child(div().w(px(150.)).flex_none().text_xs().text_color(color).child(status.to_string()))
                     .child(
                         Button::new(("reveal-secret", ix))
                             .ghost()
                             .xsmall()
                             .icon(IconName::Eye)
-                            .tooltip("Show or hide")
+                            .tooltip(t!("secrets.show_or_hide").to_string())
                             .disabled(!can_reveal)
                             .on_click(cx.listener(move |this, _, window, cx| this.reveal_secret(ix, window, cx))),
                     )
@@ -844,7 +859,7 @@ impl EnvironmentEditor {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .tooltip("Remove secret")
+                            .tooltip(t!("secrets.remove").to_string())
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_secret(ix, cx))),
                     ),
             );
@@ -858,7 +873,7 @@ impl EnvironmentEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Secrets"))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("secrets.title").to_string()))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
             )
             .when(!sensitive.is_empty(), |this| {
@@ -868,12 +883,12 @@ impl EnvironmentEditor {
                         .gap_2()
                         .text_xs()
                         .text_color(theme.warning)
-                        .child("These variables look like credentials and are saved in plain text:")
+                        .child(t!("secrets.looks_like_credentials").to_string())
                         .children(sensitive.into_iter().enumerate().map(|(ix, name)| {
                             Button::new(("move-to-secret", ix))
                                 .small()
                                 .warning()
-                                .label(format!("Move {name} to secrets"))
+                                .label(t!("secrets.move_variable", name = name).to_string())
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.move_variable_to_secret(name.clone(), window, cx)
                                 }))
@@ -881,7 +896,7 @@ impl EnvironmentEditor {
                 )
             })
             .when(self.secret_rows.is_empty(), |this| {
-                this.child(div().text_xs().text_color(theme.muted_foreground).child("No secrets yet."))
+                this.child(div().text_xs().text_color(theme.muted_foreground).child(t!("secrets.none_yet").to_string()))
             })
             .child(rows)
             .child(
@@ -892,7 +907,7 @@ impl EnvironmentEditor {
                         Button::new("add-secret")
                             .small()
                             .icon(IconName::Plus)
-                            .label("Add secret")
+                            .label(t!("secrets.add").to_string())
                             .on_click(cx.listener(|this, _, window, cx| this.add_secret(window, cx))),
                     ),
             )
@@ -914,7 +929,7 @@ impl Render for EnvironmentEditor {
         let is_defaults = self.target == Target::Defaults;
 
         let hint = if is_defaults {
-            "Defaults apply to every environment. Environments override them by name.".to_string()
+            t!("env.hint_defaults").to_string()
         } else {
             let own = variables_from_text(&self.variables.read(cx).value()).unwrap_or_default();
             let inherited: Vec<_> = collection
@@ -926,9 +941,9 @@ impl Render for EnvironmentEditor {
                 .cloned()
                 .collect();
             if inherited.is_empty() {
-                "Overrides the collection defaults by name.".to_string()
+                t!("env.hint_overrides").to_string()
             } else {
-                format!("Inherited from collection defaults: {}", inherited.join(", "))
+                t!("env.hint_inherited", names = inherited.join(", ")).to_string()
             }
         };
 
@@ -962,7 +977,7 @@ impl Render for EnvironmentEditor {
                                                 .pt_1()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
-                                                .child("Collection name"),
+                                                .child(t!("env.collection_name").to_string()),
                                         )
                                     }),
                             )
@@ -970,21 +985,21 @@ impl Render for EnvironmentEditor {
                                 s.child(
                                     Button::new("duplicate-environment")
                                         .ghost()
-                                        .label("Duplicate")
+                                        .label(t!("env.duplicate").to_string())
                                         .on_click(cx.listener(|this, _, window, cx| this.duplicate(window, cx))),
                                 )
                                 .child(
                                     Button::new("delete-environment")
                                         .ghost()
-                                        .label("Delete")
+                                        .label(t!("env.delete").to_string())
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_delete(window, cx))),
                                 )
                             })
                             .child(
                                 Button::new("save-environment")
                                     .primary()
-                                    .label("Save")
-                                    .tooltip("Ctrl+S")
+                                    .label(t!("env.save").to_string())
+                                    .tooltip(t!("env.save_shortcut").to_string())
                                     .disabled(!self.dirty)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.save(window, cx);
@@ -993,7 +1008,7 @@ impl Render for EnvironmentEditor {
                             .child(
                                 Button::new("close-environments")
                                     .ghost()
-                                    .label("Done")
+                                    .label(t!("env.done").to_string())
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(EnvironmentEditorEvent::Close))),
                             ),
                     )
@@ -1001,7 +1016,7 @@ impl Render for EnvironmentEditor {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Variables: one per line as name: value. Use them in requests as {{name}}."),
+                            .child(t!("env.variables_hint").to_string()),
                     )
                     .child(Editor::new(&self.variables).flex_1().min_h(px(120.)))
                     .child(match &self.error {

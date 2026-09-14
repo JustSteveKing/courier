@@ -1,5 +1,7 @@
 //! The window's main view: collection sidebar, environment picker, and request editor.
 
+pub mod palette;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,20 +18,21 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rust_i18n::t;
 
-use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
 use crate::credentials::{hoist_credentials_with, hoist_header};
+use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
-use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
 use crate::model::{CollectionFile, EnvironmentFile, RequestFile, Variables};
 use crate::paths::{AppPaths, AppState};
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
+use crate::secret_store::{self, DEFAULTS_SCOPE, SecretRef, SecretStore};
+use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
 
-const NO_ENVIRONMENT: &str = "No environment";
 
 #[derive(Clone, Copy, PartialEq)]
 enum MainView {
@@ -46,6 +49,7 @@ pub struct Workspace {
     environment: Entity<EnvironmentSelect>,
     environment_editor: Entity<EnvironmentEditor>,
     main_view: MainView,
+    focus_handle: FocusHandle,
     secret_store: Option<SecretStore>,
     /// Secret values collected synchronously (e.g. inside a dialog callback without a
     /// window-bound context) and written by the next `flush_secret_writes`.
@@ -56,7 +60,7 @@ impl Workspace {
     pub fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| RequestEditor::new(window, cx));
         let environment = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(vec![SharedString::from(NO_ENVIRONMENT)]), None, window, cx)
+            SelectState::new(SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]), None, window, cx)
         });
 
         cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
@@ -98,11 +102,13 @@ impl Workspace {
             environment,
             environment_editor,
             main_view: MainView::Request,
+            focus_handle: cx.focus_handle(),
             secret_store: None,
             pending_secret_writes: Vec::new(),
         };
         this.connect_secret_store(window, cx);
         this.restore(window, cx);
+        this.focus_handle.focus(window, cx);
         this
     }
 
@@ -206,7 +212,7 @@ impl Workspace {
             Ok(collection) => {
                 if !collection.errors.is_empty() {
                     let files: Vec<_> = collection.errors.iter().map(|(p, _)| p.display().to_string()).collect();
-                    notify_error(format!("Could not read: {}", files.join(", ")), window, cx);
+                    notify_error(t!("ws.could_not_read", files = files.join(", ")).to_string(), window, cx);
                 }
                 self.environment_editor
                     .update(cx, |editor, cx| editor.update_collection(collection.clone(), window, cx));
@@ -266,7 +272,7 @@ impl Workspace {
     }
 
     fn new_request(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match storage::create_request(&dir, &RequestFile::new("New request")) {
+        match storage::create_request(&dir, &RequestFile::new(t!("ws.new_request"))) {
             Ok(path) => {
                 self.collapsed.remove(&dir);
                 self.reload_containing(&path, window, cx);
@@ -288,12 +294,12 @@ impl Workspace {
                 let environment = selected
                     .map(|ix| &collection.environments[ix - 1])
                     .map(|env| (env.path.as_path(), &env.file));
-                let names = std::iter::once(SharedString::from(NO_ENVIRONMENT))
+                let names = std::iter::once(SharedString::from(t!("ws.no_environment").to_string()))
                     .chain(collection.environments.iter().map(|e| e.file.name.clone().into()))
                     .collect::<Vec<_>>();
                 (names, selected.unwrap_or(0), secret_store::layer(&collection.file, environment))
             }
-            None => (vec![NO_ENVIRONMENT.into()], 0, secret_store::Layered::default()),
+            None => (vec![t!("ws.no_environment").to_string().into()], 0, secret_store::Layered::default()),
         };
         self.environment.update(cx, |select, cx| {
             select.set_items(SearchableVec::new(names), window, cx);
@@ -342,6 +348,17 @@ impl Workspace {
         true
     }
 
+    fn set_language(&mut self, language: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        AppSettings::update(cx, |settings| settings.language = language.clone());
+        crate::i18n::apply(crate::i18n::resolve(language.as_deref()));
+        // Strings built during render update on the next frame; placeholders set when inputs
+        // were created need re-applying.
+        self.editor.update(cx, |editor, cx| editor.relocalize(window, cx));
+        self.environment_editor.update(cx, |editor, cx| editor.relocalize(window, cx));
+        self.refresh_environments(window, cx);
+        cx.refresh_windows();
+    }
+
     fn choose_environment(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(collection) = self.active_collection(cx) else {
             return;
@@ -363,7 +380,7 @@ impl Workspace {
     // MARK: Dialogs and imports
 
     fn new_collection_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("My API"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("ws.collection_name_placeholder").to_string()));
         name.focus_handle(cx).focus(window, cx);
         let weak = cx.entity().downgrade();
         let parent = self.paths.collections_dir();
@@ -372,7 +389,7 @@ impl Workspace {
             let weak = weak.clone();
             let parent = parent.clone();
             dialog
-                .title("New collection")
+                .title(t!("ws.new_collection").to_string())
                 .w(px(420.))
                 .content({
                     let name = name.clone();
@@ -399,7 +416,7 @@ impl Workspace {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open collection".into()),
+            prompt: Some(t!("ws.open_collection").to_string().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -421,7 +438,7 @@ impl Workspace {
         let command = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .rows(8)
-                .placeholder("curl https://api.example.com/users -H 'Accept: application/json'")
+                .placeholder(t!("ws.curl_placeholder").to_string())
         });
         command.focus_handle(cx).focus(window, cx);
         let weak = cx.entity().downgrade();
@@ -430,7 +447,7 @@ impl Workspace {
             let weak = weak.clone();
             let dir = dir.clone();
             dialog
-                .title("Import from curl")
+                .title(t!("ws.import_curl_title").to_string())
                 .w(px(640.))
                 .content({
                     let command = command.clone();
@@ -453,10 +470,9 @@ impl Workspace {
                                 this.select_request(path, window, cx);
                                 if !hoisted.is_empty() {
                                     window.push_notification(
-                                        Notification::info(format!(
-                                            "Moved to secrets in collection defaults: {}",
-                                            hoisted.join(", ")
-                                        )),
+                                        Notification::info(
+                                            t!("ws.moved_to_defaults", names = hoisted.join(", ")).to_string(),
+                                        ),
                                         cx,
                                     );
                                 }
@@ -484,7 +500,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Import Postman file".into()),
+            prompt: Some(t!("ws.import_postman_file").to_string().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -593,7 +609,7 @@ impl Workspace {
             this.reload_collection(&root, window, cx);
             if import.warnings.is_empty() {
                 window.push_notification(
-                    Notification::success(format!("Imported environment {}", import.file.name)),
+                    Notification::success(t!("ws.imported_environment", name = import.file.name).to_string()),
                     cx,
                 );
             } else {
@@ -629,7 +645,7 @@ impl Workspace {
                         .update(cx, |editor, cx| editor.set_store(store.clone(), window, cx));
                     this.secret_store = Some(store);
                 }
-                Err(e) => notify_error(format!("Secrets are unavailable: {e:#}"), window, cx),
+                Err(e) => notify_error(t!("ws.secrets_unavailable", error = format!("{e:#}")).to_string(), window, cx),
             })
             .ok();
         })
@@ -643,10 +659,11 @@ impl Workspace {
         }
         let Some(store) = self.secret_store.clone() else {
             notify_error(
-                format!(
-                    "The secret store isn't available, so these secrets have no value yet: {}",
-                    values.iter().map(|(r, _, _)| r.name.as_str()).collect::<Vec<_>>().join(", ")
-                ),
+                t!(
+                    "ws.store_unavailable_no_value",
+                    names = values.iter().map(|(r, _, _)| r.name.as_str()).collect::<Vec<_>>().join(", ")
+                )
+                .to_string(),
                 window,
                 cx,
             );
@@ -664,7 +681,7 @@ impl Workspace {
                 .await;
             this.update_in(cx, |_, window, cx| {
                 if let Err(e) = result {
-                    notify_error(format!("Could not store secrets: {e:#}"), window, cx);
+                    notify_error(t!("ws.could_not_store_secrets", error = format!("{e:#}")).to_string(), window, cx);
                 }
             })
             .ok();
@@ -706,7 +723,7 @@ impl Workspace {
     /// the collection defaults when no environment is active.
     fn move_header_to_secret(&mut self, path: PathBuf, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let result = (|| -> Result<(PathBuf, String)> {
-            let ix = self.collection_index_for(&path).context("request is not in an open collection")?;
+            let ix = self.collection_index_for(&path).context(t!("ws.not_in_open_collection").to_string())?;
             let root = self.collections[ix].root.clone();
             let mut request: RequestFile = storage::read_yaml(&path)?;
             let mut file = self.collections[ix].file.clone();
@@ -726,7 +743,7 @@ impl Workspace {
                 .chain(scope_vars.keys())
                 .map(|n| (n.clone(), "\0existing".to_string()))
                 .collect();
-            let name = hoist_header(&mut request, index, &mut secrets).context("that header has no literal credential")?;
+            let name = hoist_header(&mut request, index, &mut secrets).context(t!("ws.no_literal_credential").to_string())?;
             let value = secrets[&name].clone();
 
             let (id, assigned) = file.ensure_id();
@@ -742,13 +759,13 @@ impl Workspace {
                 None => {
                     file.secrets.push(name.clone());
                     storage::save_collection_file(&root, &file)?;
-                    (DEFAULTS_SCOPE.to_string(), "Defaults".to_string())
+                    (DEFAULTS_SCOPE.to_string(), t!("ws.defaults").to_string())
                 }
             };
             storage::write_yaml(&path, &request)?;
             let label = secret_store::label(&file.name, &scope_label, &name);
             self.pending_secret_writes.push((SecretRef::new(&id, scope, &name), label, value));
-            Ok((root, format!("Moved to secret `{name}` ({scope_label})")))
+            Ok((root, t!("ws.moved_to_secret", name = name, scope = scope_label).to_string()))
         })();
 
         match result {
@@ -794,22 +811,22 @@ impl Workspace {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme.sidebar_border)
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Collections"))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("ws.collections").to_string()))
                     .child(
                         Button::new("sidebar-add")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
-                            .tooltip("New or import")
+                            .tooltip(t!("ws.new_or_import").to_string())
                             .dropdown_menu(move |menu, _, _| {
-                                menu.item(menu_item("New collection…", &weak, |this, window, cx| {
+                                menu.item(menu_item(t!("ws.new_collection_ellipsis"), &weak, |this, window, cx| {
                                     this.new_collection_dialog(window, cx)
                                 }))
-                                .item(menu_item("Open collection folder…", &weak, |this, window, cx| {
+                                .item(menu_item(t!("ws.open_collection_folder"), &weak, |this, window, cx| {
                                     this.open_folder(window, cx)
                                 }))
                                 .separator()
-                                .item(menu_item("New collection from Postman…", &weak, |this, window, cx| {
+                                .item(menu_item(t!("ws.new_collection_from_postman"), &weak, |this, window, cx| {
                                     this.import_postman_as_new(window, cx)
                                 }))
                             }),
@@ -975,6 +992,11 @@ impl Render for Workspace {
         let notification_layer = Root::render_notification_layer(window, cx);
 
         h_flex()
+            .key_context("Workspace")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &palette::OpenCommandPalette, window, cx| {
+                this.open_command_palette(window, cx)
+            }))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -993,6 +1015,14 @@ impl Render for Workspace {
                             .border_b_1()
                             .border_color(theme.border)
                             .child(div().text_sm().text_color(theme.muted_foreground).child(collection_name))
+                            .child(
+                                Button::new("open-command-palette")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Search)
+                                    .tooltip(t!("palette.open_tooltip").to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| this.open_command_palette(window, cx))),
+                            )
                             .child(div().w(px(200.)).child(Select::new(&self.environment).small()))
                             .when_some(active.map(|(_, root)| root), |this, root| {
                                 this.child(
@@ -1001,7 +1031,7 @@ impl Render for Workspace {
                                         .small()
                                         .icon(IconName::Settings)
                                         .selected(managing)
-                                        .tooltip("Manage environments")
+                                        .tooltip(t!("ws.manage_environments").to_string())
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             if this.main_view == MainView::Environments {
                                                 this.close_environments(window, cx);
@@ -1026,49 +1056,49 @@ impl Render for Workspace {
 // MARK: Helpers
 
 fn menu_item(
-    label: &'static str,
+    label: impl Into<SharedString>,
     weak: &WeakEntity<Workspace>,
     action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> PopupMenuItem {
     let weak = weak.clone();
-    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+    PopupMenuItem::new(label.into()).on_click(move |_, window, cx| {
         weak.update(cx, |this, cx| action(this, window, cx)).ok();
     })
 }
 
 fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -> PopupMenu {
     let r = |root: &Path| root.to_path_buf();
-    menu.item(menu_item("New request", weak, {
+    menu.item(menu_item(t!("ws.new_request"), weak, {
         let root = r(root);
         move |this, window, cx| this.new_request(root.clone(), window, cx)
     }))
-    .item(menu_item("Manage environments…", weak, {
+    .item(menu_item(t!("ws.manage_environments_ellipsis"), weak, {
         let root = r(root);
         move |this, window, cx| this.manage_environments(root.clone(), window, cx)
     }))
     .separator()
-    .item(menu_item("Import from curl…", weak, {
+    .item(menu_item(t!("ws.import_curl"), weak, {
         let root = r(root);
         move |this, window, cx| this.import_curl_dialog(root.clone(), window, cx)
     }))
-    .item(menu_item("Import Postman collection here…", weak, {
+    .item(menu_item(t!("ws.import_postman_here"), weak, {
         let root = r(root);
         move |this, window, cx| this.import_postman_into(root.clone(), window, cx)
     }))
-    .item(menu_item("Import Postman environment…", weak, {
+    .item(menu_item(t!("ws.import_postman_environment"), weak, {
         let root = r(root);
         move |this, window, cx| this.import_postman_environment(root.clone(), window, cx)
     }))
     .separator()
-    .item(menu_item("Show in file manager", weak, {
+    .item(menu_item(t!("ws.show_in_file_manager"), weak, {
         let root = r(root);
         move |_, _, cx| cx.reveal_path(&root)
     }))
-    .item(menu_item("Reload from disk", weak, {
+    .item(menu_item(t!("ws.reload_from_disk"), weak, {
         let root = r(root);
         move |this, window, cx| this.reload_collection(&root, window, cx)
     }))
-    .item(menu_item("Close collection", weak, {
+    .item(menu_item(t!("ws.close_collection"), weak, {
         let root = r(root);
         move |this, window, cx| this.close_collection(&root, window, cx)
     }))
@@ -1102,7 +1132,7 @@ fn notify_error(message: String, window: &mut Window, cx: &mut App) {
 
 fn notify_import(warnings: &[String], window: &mut Window, cx: &mut App) {
     let note = if warnings.is_empty() {
-        Notification::success("Postman collection imported")
+        Notification::success(t!("ws.postman_imported").to_string())
     } else {
         for warning in warnings {
             eprintln!("postman import: {warning}");
@@ -1111,9 +1141,10 @@ fn notify_import(warnings: &[String], window: &mut Window, cx: &mut App) {
         let more = warnings.len().saturating_sub(shown.len());
         let mut message = shown.join("\n");
         if more > 0 {
-            message.push_str(&format!("\n…and {more} more"));
+            message.push('\n');
+            message.push_str(&t!("ws.and_more", count = more));
         }
-        Notification::warning(message).title("Imported with warnings")
+        Notification::warning(message).title(t!("ws.imported_with_warnings").to_string())
     };
     window.push_notification(note, cx);
 }
@@ -1150,7 +1181,7 @@ fn init_collection_dir(dir: &Path) -> Result<()> {
         return Ok(());
     }
     if fs::read_dir(dir)?.next().is_some() {
-        bail!("{} is not a collection (no collection.yaml) and is not empty", dir.display());
+        bail!("{}", t!("ws.not_a_collection", path = dir.display()));
     }
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("Collection".into());
     storage::write_yaml(&dir.join(crate::model::COLLECTION_FILE), &CollectionFile::new(name))
@@ -1214,6 +1245,7 @@ mod tests {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
             environment_editor::init(cx);
+            cx.set_global(AppSettings::load(&paths));
         });
 
         let mut workspace = None;
@@ -1337,6 +1369,69 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+        };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::request_editor::init(cx);
+            environment_editor::init(cx);
+            palette::init(cx);
+            cx.set_global(AppSettings::load(&paths));
+        });
+        let mut workspace = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            let view = cx.new(|cx| Workspace::new(paths.clone(), window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let workspace = workspace.unwrap();
+        let window: AnyWindowHandle = handle.into();
+        let echo = paths.collections_dir().join("example/echo-post.yaml");
+
+        // Every label resolves to real text, not a missing translation key.
+        cx.update(|cx| {
+            for group in workspace.read(cx).palette_groups(cx) {
+                assert!(!group.label.contains('.'), "untranslated group {}", group.label);
+                for entry in group.entries {
+                    for prefix in ["ws.", "palette.", "settings."] {
+                        assert!(!entry.label.contains(prefix), "untranslated entry {}", entry.label);
+                    }
+                }
+            }
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-shift-p", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(window.has_active_dialog(cx), "palette opened");
+            window.render_frame(cx);
+            window.input("echo post", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx), "palette closed after confirming");
+            assert_eq!(workspace.read(cx).editor.read(cx).path(), Some(&echo));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     async fn secrets_never_reach_collection_files(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = AppPaths {
@@ -1348,6 +1443,7 @@ mod tests {
             gpui_kit::init(cx);
             crate::request_editor::init(cx);
             environment_editor::init(cx);
+            cx.set_global(AppSettings::load(&paths));
         });
         let mut workspace = None;
         let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {

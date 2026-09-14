@@ -1,0 +1,372 @@
+_version: 2
+# Request editor, environment manager, secrets and variable validation.
+
+# MARK: Request editor
+request.name_placeholder:
+  en: Request name
+  es: Nombre de la solicitud
+  de: Name der Anfrage
+  fr: Nom de la requête
+request.empty_state:
+  en: Select a request, or create one from a collection's menu
+  es: Selecciona una solicitud o crea una desde el menú de una colección
+  de: Wähle eine Anfrage aus oder erstelle eine über das Menü einer Sammlung
+  fr: Sélectionnez une requête ou créez-en une depuis le menu d'une collection
+request.unsaved:
+  en: Unsaved · Ctrl+S
+  es: Sin guardar · Ctrl+S
+  de: Nicht gespeichert · Strg+S
+  fr: Non enregistré · Ctrl+S
+request.saved:
+  en: Saved
+  es: Guardado
+  de: Gespeichert
+  fr: Enregistré
+request.send:
+  en: Send
+  es: Enviar
+  de: Senden
+  fr: Envoyer
+request.send_shortcut:
+  en: Ctrl+Enter
+  es: Ctrl+Intro
+  de: Strg+Eingabe
+  fr: Ctrl+Entrée
+request.headers_label:
+  en: "Headers (Name: value, # to disable)"
+  es: "Headers (Nombre: valor, # para desactivar)"
+  de: "Header (Name: Wert, # zum Deaktivieren)"
+  fr: "En-têtes (Nom : valeur, # pour désactiver)"
+request.body:
+  en: Body
+  es: Cuerpo
+  de: Body
+  fr: Corps
+request.headers_tab:
+  en: Headers
+  es: Headers
+  de: Header
+  fr: En-têtes
+request.headers_tab_count:
+  en: Headers (%{count})
+  es: Headers (%{count})
+  de: Header (%{count})
+  fr: En-têtes (%{count})
+request.status_sending:
+  en: Sending…
+  es: Enviando…
+  de: Wird gesendet…
+  fr: Envoi…
+request.status_none:
+  en: No response yet
+  es: Aún no hay respuesta
+  de: Noch keine Antwort
+  fr: Pas encore de réponse
+request.status_failed:
+  en: Request failed
+  es: La solicitud falló
+  de: Anfrage fehlgeschlagen
+  fr: Échec de la requête
+request.undefined:
+  en: "Undefined: %{names}"
+  es: "Sin definir: %{names}"
+  de: "Nicht definiert: %{names}"
+  fr: "Non défini : %{names}"
+request.secret_not_set:
+  en: "Secret not set on this machine: %{names}"
+  es: "Secreto sin valor en este equipo: %{names}"
+  de: "Secret auf diesem Rechner nicht gesetzt: %{names}"
+  fr: "Secret non défini sur cette machine : %{names}"
+request.literal_credential:
+  en: "Literal credential in headers, saved in plain text:"
+  es: "Credencial literal en los headers, guardada en texto plano:"
+  de: "Zugangsdaten direkt im Header, im Klartext gespeichert:"
+  fr: "Identifiant en clair dans les en-têtes, enregistré tel quel :"
+request.move_header_to_secret:
+  en: Move %{header} to a secret
+  es: Mover %{header} a un secreto
+  de: "%{header} in ein Secret verschieben"
+  fr: Déplacer %{header} vers un secret
+request.could_not_save:
+  en: "Could not save: %{error}"
+  es: "No se pudo guardar: %{error}"
+  de: "Speichern fehlgeschlagen: %{error}"
+  fr: "Impossible d'enregistrer : %{error}"
+request.could_not_read_secrets:
+  en: "Could not read secrets: %{error}"
+  es: "No se pudieron leer los secretos: %{error}"
+  de: "Secrets konnten nicht gelesen werden: %{error}"
+  fr: "Impossible de lire les secrets : %{error}"
+
+# MARK: Secret store
+secrets.store_unavailable:
+  en: The secret store isn't available yet
+  es: El almacén de secretos aún no está disponible
+  de: Der Secret-Speicher ist noch nicht verfügbar
+  fr: Le coffre de secrets n'est pas encore disponible
+secrets.store_unavailable_retry:
+  en: The secret store isn't available yet; try again in a moment
+  es: El almacén de secretos aún no está disponible; inténtalo de nuevo en un momento
+  de: Der Secret-Speicher ist noch nicht verfügbar; versuche es gleich noch einmal
+  fr: Le coffre de secrets n'est pas encore disponible ; réessayez dans un instant
+secrets.backend_keyring:
+  en: Values are stored in your desktop keyring, never in the collection files.
+  es: Los valores se guardan en el llavero del escritorio, nunca en los archivos de la colección.
+  de: Werte werden im Schlüsselbund des Desktops gespeichert, nie in den Sammlungsdateien.
+  fr: Les valeurs sont stockées dans le trousseau de clés du bureau, jamais dans les fichiers de la collection.
+secrets.backend_file:
+  en: No desktop keyring found. Values are stored in an encrypted file whose key is kept separately on this machine.
+  es: No se encontró un llavero del escritorio. Los valores se guardan en un archivo cifrado cuya clave se conserva por separado en este equipo.
+  de: Kein Schlüsselbund gefunden. Werte werden in einer verschlüsselten Datei gespeichert, deren Schlüssel getrennt auf diesem Rechner liegt.
+  fr: Aucun trousseau de clés trouvé. Les valeurs sont stockées dans un fichier chiffré dont la clé est conservée séparément sur cette machine.
+secrets.connecting:
+  en: Connecting to the secret store…
+  es: Conectando con el almacén de secretos…
+  de: Verbindung zum Secret-Speicher wird hergestellt…
+  fr: Connexion au coffre de secrets…
+secrets.title:
+  en: Secrets
+  es: Secretos
+  de: Secrets
+  fr: Secrets
+secrets.none_yet:
+  en: No secrets yet.
+  es: Aún no hay secretos.
+  de: Noch keine Secrets.
+  fr: Aucun secret pour l'instant.
+secrets.status_will_save:
+  en: will be saved
+  es: se guardará
+  de: wird gespeichert
+  fr: sera enregistré
+secrets.status_checking:
+  en: checking…
+  es: comprobando…
+  de: wird geprüft…
+  fr: vérification…
+secrets.status_set:
+  en: set
+  es: definido
+  de: gesetzt
+  fr: défini
+secrets.status_not_set:
+  en: not set on this machine
+  es: sin valor en este equipo
+  de: auf diesem Rechner nicht gesetzt
+  fr: non défini sur cette machine
+secrets.status_unavailable:
+  en: unavailable
+  es: no disponible
+  de: nicht verfügbar
+  fr: indisponible
+secrets.show_or_hide:
+  en: Show or hide
+  es: Mostrar u ocultar
+  de: Ein- oder ausblenden
+  fr: Afficher ou masquer
+secrets.remove:
+  en: Remove secret
+  es: Quitar secreto
+  de: Secret entfernen
+  fr: Supprimer le secret
+secrets.add:
+  en: Add secret
+  es: Añadir secreto
+  de: Secret hinzufügen
+  fr: Ajouter un secret
+secrets.new_name_placeholder:
+  en: new_secret_name
+  es: nombre_del_secreto
+  de: neuer_secret_name
+  fr: nom_du_secret
+secrets.looks_like_credentials:
+  en: "These variables look like credentials and are saved in plain text:"
+  es: "Estas variables parecen credenciales y se guardan en texto plano:"
+  de: "Diese Variablen sehen nach Zugangsdaten aus und werden im Klartext gespeichert:"
+  fr: "Ces variables ressemblent à des identifiants et sont enregistrées en clair :"
+secrets.move_variable:
+  en: Move %{name} to secrets
+  es: Mover %{name} a secretos
+  de: "%{name} zu Secrets verschieben"
+  fr: Déplacer %{name} vers les secrets
+secrets.could_not_store:
+  en: "Could not store secrets: %{error}"
+  es: "No se pudieron guardar los secretos: %{error}"
+  de: "Secrets konnten nicht gespeichert werden: %{error}"
+  fr: "Impossible de stocker les secrets : %{error}"
+secrets.could_not_copy:
+  en: "Could not copy secrets: %{error}"
+  es: "No se pudieron copiar los secretos: %{error}"
+  de: "Secrets konnten nicht kopiert werden: %{error}"
+  fr: "Impossible de copier les secrets : %{error}"
+secrets.could_not_read:
+  en: "Could not read secret: %{error}"
+  es: "No se pudo leer el secreto: %{error}"
+  de: "Secret konnte nicht gelesen werden: %{error}"
+  fr: "Impossible de lire le secret : %{error}"
+secrets.name_empty:
+  en: Secret name can't be empty
+  es: El nombre del secreto no puede estar vacío
+  de: Der Name des Secrets darf nicht leer sein
+  fr: Le nom du secret ne peut pas être vide
+secrets.name_invalid:
+  en: "`%{name}` can't contain spaces, colons or braces"
+  es: "`%{name}` no puede contener espacios, dos puntos ni llaves"
+  de: "`%{name}` darf keine Leerzeichen, Doppelpunkte oder geschweiften Klammern enthalten"
+  fr: "`%{name}` ne peut pas contenir d'espaces, de deux-points ni d'accolades"
+secrets.name_taken_secret:
+  en: "`%{name}` is already a secret"
+  es: "`%{name}` ya es un secreto"
+  de: "`%{name}` ist bereits ein Secret"
+  fr: "`%{name}` est déjà un secret"
+secrets.name_taken_variable:
+  en: "`%{name}` is already a variable; use “Move to secrets” instead"
+  es: "`%{name}` ya es una variable; usa «Mover a secretos»"
+  de: "`%{name}` ist bereits eine Variable; nutze stattdessen „Zu Secrets verschieben“"
+  fr: "`%{name}` est déjà une variable ; utilisez plutôt « Déplacer vers les secrets »"
+secrets.both_variable_and_secret:
+  en: "`%{name}` is both a variable and a secret"
+  es: "`%{name}` es a la vez variable y secreto"
+  de: "`%{name}` ist gleichzeitig Variable und Secret"
+  fr: "`%{name}` est à la fois une variable et un secret"
+
+# MARK: Environment manager
+env.name_placeholder:
+  en: Name
+  es: Nombre
+  de: Name
+  fr: Nom
+env.name_empty:
+  en: Name can't be empty
+  es: El nombre no puede estar vacío
+  de: Der Name darf nicht leer sein
+  fr: Le nom ne peut pas être vide
+env.collection_defaults:
+  en: Collection defaults
+  es: Valores por defecto de la colección
+  de: Standardwerte der Sammlung
+  fr: Valeurs par défaut de la collection
+env.environments:
+  en: Environments
+  es: Entornos
+  de: Umgebungen
+  fr: Environnements
+env.none_yet:
+  en: None yet
+  es: Ninguno todavía
+  de: Noch keine
+  fr: Aucun pour l'instant
+env.new:
+  en: New environment
+  es: Nuevo entorno
+  de: Neue Umgebung
+  fr: Nouvel environnement
+env.copy_name:
+  en: "%{name} copy"
+  es: "%{name} (copia)"
+  de: "%{name} (Kopie)"
+  fr: "%{name} (copie)"
+env.active:
+  en: active
+  es: activo
+  de: aktiv
+  fr: actif
+env.collection_name:
+  en: Collection name
+  es: Nombre de la colección
+  de: Name der Sammlung
+  fr: Nom de la collection
+env.duplicate:
+  en: Duplicate
+  es: Duplicar
+  de: Duplizieren
+  fr: Dupliquer
+env.delete:
+  en: Delete
+  es: Eliminar
+  de: Löschen
+  fr: Supprimer
+env.save:
+  en: Save
+  es: Guardar
+  de: Speichern
+  fr: Enregistrer
+env.save_shortcut:
+  en: Ctrl+S
+  es: Ctrl+S
+  de: Strg+S
+  fr: Ctrl+S
+env.done:
+  en: Done
+  es: Listo
+  de: Fertig
+  fr: Terminé
+env.variables_hint:
+  en: "Variables: one per line as name: value. Use them in requests as {{name}}."
+  es: "Variables: una por línea como nombre: valor. Úsalas en las solicitudes como {{name}}."
+  de: "Variablen: eine pro Zeile als Name: Wert. In Anfragen als {{name}} verwenden."
+  fr: "Variables : une par ligne sous la forme nom : valeur. Utilisez-les dans les requêtes avec {{name}}."
+env.hint_defaults:
+  en: Defaults apply to every environment. Environments override them by name.
+  es: Los valores por defecto se aplican a todos los entornos. Cada entorno los sobrescribe por nombre.
+  de: Standardwerte gelten für jede Umgebung. Umgebungen überschreiben sie anhand des Namens.
+  fr: Les valeurs par défaut s'appliquent à chaque environnement. Les environnements les remplacent par nom.
+env.hint_overrides:
+  en: Overrides the collection defaults by name.
+  es: Sobrescribe por nombre los valores por defecto de la colección.
+  de: Überschreibt die Standardwerte der Sammlung anhand des Namens.
+  fr: Remplace par nom les valeurs par défaut de la collection.
+env.hint_inherited:
+  en: "Inherited from collection defaults: %{names}"
+  es: "Heredadas de los valores por defecto de la colección: %{names}"
+  de: "Von den Standardwerten der Sammlung übernommen: %{names}"
+  fr: "Héritées des valeurs par défaut de la collection : %{names}"
+env.delete_title:
+  en: Delete “%{name}”?
+  es: ¿Eliminar «%{name}»?
+  de: „%{name}“ löschen?
+  fr: Supprimer « %{name} » ?
+env.delete_message:
+  en: This deletes %{path}.
+  es: Esto elimina %{path}.
+  de: Dadurch wird %{path} gelöscht.
+  fr: Cela supprime %{path}.
+env.delete_message_with_secrets:
+  en: This deletes %{path} and its %{count} stored secret(s).
+  es: Esto elimina %{path} y sus %{count} secreto(s) guardado(s).
+  de: Dadurch werden %{path} und %{count} gespeicherte(s) Secret(s) gelöscht.
+  fr: Cela supprime %{path} et ses %{count} secret(s) enregistré(s).
+
+# MARK: Variable validation
+vars.line_expected:
+  en: "Line %{line}: expected `name: value`"
+  es: "Línea %{line}: se esperaba `nombre: valor`"
+  de: "Zeile %{line}: `Name: Wert` erwartet"
+  fr: "Ligne %{line} : `nom : valeur` attendu"
+vars.line_name_empty:
+  en: "Line %{line}: variable name is empty"
+  es: "Línea %{line}: el nombre de la variable está vacío"
+  de: "Zeile %{line}: Variablenname ist leer"
+  fr: "Ligne %{line} : le nom de la variable est vide"
+vars.line_name_invalid:
+  en: "Line %{line}: `%{name}` can't contain spaces or braces"
+  es: "Línea %{line}: `%{name}` no puede contener espacios ni llaves"
+  de: "Zeile %{line}: `%{name}` darf keine Leerzeichen oder geschweiften Klammern enthalten"
+  fr: "Ligne %{line} : `%{name}` ne peut pas contenir d'espaces ni d'accolades"
+vars.line_duplicate:
+  en: "Line %{line}: `%{name}` is defined twice"
+  es: "Línea %{line}: `%{name}` está definida dos veces"
+  de: "Zeile %{line}: `%{name}` ist doppelt definiert"
+  fr: "Ligne %{line} : `%{name}` est défini deux fois"
+
+# MARK: HTTP
+http.invalid_request:
+  en: "Invalid request: %{error}"
+  es: "Solicitud no válida: %{error}"
+  de: "Ungültige Anfrage: %{error}"
+  fr: "Requête invalide : %{error}"
+http.failed_to_read_body:
+  en: "Failed to read body: %{error}"
+  es: "No se pudo leer el cuerpo: %{error}"
+  de: "Body konnte nicht gelesen werden: %{error}"
+  fr: "Impossible de lire le corps : %{error}"

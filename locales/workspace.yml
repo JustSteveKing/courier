@@ -1,0 +1,235 @@
+_version: 2
+# Workspace, sidebar, imports, command palette and settings.
+
+ws.collections:
+  en: Collections
+  es: Colecciones
+  de: Sammlungen
+  fr: Collections
+ws.new_or_import:
+  en: New or import
+  es: Nuevo o importar
+  de: Neu oder importieren
+  fr: Nouveau ou importer
+ws.no_environment:
+  en: No environment
+  es: Sin entorno
+  de: Keine Umgebung
+  fr: Aucun environnement
+ws.could_not_read:
+  en: "Could not read: %{files}"
+  es: "No se pudo leer: %{files}"
+  de: "Konnte nicht gelesen werden: %{files}"
+  fr: "Impossible de lire : %{files}"
+ws.new_request:
+  en: New request
+  es: Nueva solicitud
+  de: Neue Anfrage
+  fr: Nouvelle requête
+ws.new_collection:
+  en: New collection
+  es: Nueva colección
+  de: Neue Sammlung
+  fr: Nouvelle collection
+ws.new_collection_ellipsis:
+  en: New collection…
+  es: Nueva colección…
+  de: Neue Sammlung…
+  fr: Nouvelle collection…
+ws.collection_name_placeholder:
+  en: My API
+  es: Mi API
+  de: Meine API
+  fr: Mon API
+ws.open_collection:
+  en: Open collection
+  es: Abrir colección
+  de: Sammlung öffnen
+  fr: Ouvrir une collection
+ws.open_collection_folder:
+  en: Open collection folder…
+  es: Abrir carpeta de colección…
+  de: Sammlungsordner öffnen…
+  fr: Ouvrir un dossier de collection…
+ws.new_collection_from_postman:
+  en: New collection from Postman…
+  es: Nueva colección desde Postman…
+  de: Neue Sammlung aus Postman…
+  fr: Nouvelle collection depuis Postman…
+ws.import_curl:
+  en: Import from curl…
+  es: Importar desde curl…
+  de: Aus curl importieren…
+  fr: Importer depuis curl…
+ws.import_curl_title:
+  en: Import from curl
+  es: Importar desde curl
+  de: Aus curl importieren
+  fr: Importer depuis curl
+ws.curl_placeholder:
+  en: "curl https://api.example.com/users -H 'Accept: application/json'"
+  es: "curl https://api.example.com/users -H 'Accept: application/json'"
+  de: "curl https://api.example.com/users -H 'Accept: application/json'"
+  fr: "curl https://api.example.com/users -H 'Accept: application/json'"
+ws.import_postman_here:
+  en: Import Postman collection here…
+  es: Importar colección de Postman aquí…
+  de: Postman-Sammlung hierher importieren…
+  fr: Importer une collection Postman ici…
+ws.import_postman_environment:
+  en: Import Postman environment…
+  es: Importar entorno de Postman…
+  de: Postman-Umgebung importieren…
+  fr: Importer un environnement Postman…
+ws.import_postman_file:
+  en: Import Postman file
+  es: Importar archivo de Postman
+  de: Postman-Datei importieren
+  fr: Importer un fichier Postman
+ws.manage_environments:
+  en: Manage environments
+  es: Gestionar entornos
+  de: Umgebungen verwalten
+  fr: Gérer les environnements
+ws.manage_environments_ellipsis:
+  en: Manage environments…
+  es: Gestionar entornos…
+  de: Umgebungen verwalten…
+  fr: Gérer les environnements…
+ws.show_in_file_manager:
+  en: Show in file manager
+  es: Mostrar en el gestor de archivos
+  de: Im Dateimanager anzeigen
+  fr: Afficher dans le gestionnaire de fichiers
+ws.reload_from_disk:
+  en: Reload from disk
+  es: Recargar desde el disco
+  de: Vom Datenträger neu laden
+  fr: Recharger depuis le disque
+ws.close_collection:
+  en: Close collection
+  es: Cerrar colección
+  de: Sammlung schließen
+  fr: Fermer la collection
+ws.moved_to_defaults:
+  en: "Moved to secrets in collection defaults: %{names}"
+  es: "Movido a los secretos predeterminados de la colección: %{names}"
+  de: "In die Secrets der Sammlungsstandards verschoben: %{names}"
+  fr: "Déplacé vers les secrets par défaut de la collection : %{names}"
+ws.moved_to_secret:
+  en: "Moved to secret `%{name}` (%{scope})"
+  es: "Movido al secreto `%{name}` (%{scope})"
+  de: "In Secret `%{name}` verschoben (%{scope})"
+  fr: "Déplacé vers le secret `%{name}` (%{scope})"
+ws.defaults:
+  en: Defaults
+  es: Valores predeterminados
+  de: Standardwerte
+  fr: Valeurs par défaut
+ws.imported_environment:
+  en: "Imported environment %{name}"
+  es: "Entorno %{name} importado"
+  de: "Umgebung %{name} importiert"
+  fr: "Environnement %{name} importé"
+ws.postman_imported:
+  en: Postman collection imported
+  es: Colección de Postman importada
+  de: Postman-Sammlung importiert
+  fr: Collection Postman importée
+ws.imported_with_warnings:
+  en: Imported with warnings
+  es: Importado con advertencias
+  de: Mit Warnungen importiert
+  fr: Importé avec des avertissements
+ws.and_more:
+  en: "…and %{count} more"
+  es: "…y %{count} más"
+  de: "…und %{count} weitere"
+  fr: "…et %{count} de plus"
+ws.secrets_unavailable:
+  en: "Secrets are unavailable: %{error}"
+  es: "Los secretos no están disponibles: %{error}"
+  de: "Secrets sind nicht verfügbar: %{error}"
+  fr: "Les secrets sont indisponibles : %{error}"
+ws.store_unavailable_no_value:
+  en: "The secret store isn't available, so these secrets have no value yet: %{names}"
+  es: "El almacén de secretos no está disponible, así que estos secretos aún no tienen valor: %{names}"
+  de: "Der Secret-Speicher ist nicht verfügbar, daher haben diese Secrets noch keinen Wert: %{names}"
+  fr: "Le stockage des secrets est indisponible, ces secrets n'ont donc pas encore de valeur : %{names}"
+ws.could_not_store_secrets:
+  en: "Could not store secrets: %{error}"
+  es: "No se pudieron guardar los secretos: %{error}"
+  de: "Secrets konnten nicht gespeichert werden: %{error}"
+  fr: "Impossible d'enregistrer les secrets : %{error}"
+ws.not_in_open_collection:
+  en: The request is not in an open collection
+  es: La solicitud no pertenece a ninguna colección abierta
+  de: Die Anfrage gehört zu keiner geöffneten Sammlung
+  fr: La requête n'appartient à aucune collection ouverte
+ws.no_literal_credential:
+  en: That header contains no literal credential
+  es: Ese encabezado no contiene credenciales en texto plano
+  de: Dieser Header enthält keine Zugangsdaten im Klartext
+  fr: Cet en-tête ne contient aucun identifiant en clair
+ws.not_a_collection:
+  en: "%{path} is not a collection (no collection.yaml) and is not empty"
+  es: "%{path} no es una colección (no tiene collection.yaml) y no está vacía"
+  de: "%{path} ist keine Sammlung (keine collection.yaml) und nicht leer"
+  fr: "%{path} n'est pas une collection (pas de collection.yaml) et n'est pas vide"
+
+palette.open_tooltip:
+  en: Command palette (Ctrl+Shift+P)
+  es: Paleta de comandos (Ctrl+Mayús+P)
+  de: Befehlspalette (Strg+Umschalt+P)
+  fr: Palette de commandes (Ctrl+Maj+P)
+palette.placeholder:
+  en: Type a command or search requests…
+  es: Escribe un comando o busca solicitudes…
+  de: Befehl eingeben oder Anfragen suchen…
+  fr: Tapez une commande ou recherchez une requête…
+palette.group.requests:
+  en: Requests
+  es: Solicitudes
+  de: Anfragen
+  fr: Requêtes
+palette.group.actions:
+  en: Actions
+  es: Acciones
+  de: Aktionen
+  fr: Actions
+palette.group.environments:
+  en: Environments
+  es: Entornos
+  de: Umgebungen
+  fr: Environnements
+palette.group.settings:
+  en: Settings
+  es: Ajustes
+  de: Einstellungen
+  fr: Paramètres
+palette.use_environment:
+  en: "Use environment: %{name}"
+  es: "Usar entorno: %{name}"
+  de: "Umgebung verwenden: %{name}"
+  fr: "Utiliser l'environnement : %{name}"
+
+settings.language:
+  en: "Language: %{name}"
+  es: "Idioma: %{name}"
+  de: "Sprache: %{name}"
+  fr: "Langue : %{name}"
+settings.language_system:
+  en: "System default (%{name})"
+  es: "Predeterminado del sistema (%{name})"
+  de: "Systemstandard (%{name})"
+  fr: "Par défaut du système (%{name})"
+settings.follow_omarchy:
+  en: Follow Omarchy theme
+  es: Seguir el tema de Omarchy
+  de: Omarchy-Theme folgen
+  fr: Suivre le thème Omarchy
+settings.open_file:
+  en: Open settings file
+  es: Abrir archivo de ajustes
+  de: Einstellungsdatei öffnen
+  fr: Ouvrir le fichier de paramètres

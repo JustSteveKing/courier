@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use rust_i18n::t;
+
 use crate::model::{BodyKind, RequestFile, Variables, interpolate};
 
 /// A request with variables already substituted, ready to go on the wire.
@@ -99,14 +101,14 @@ pub fn send(request: &Request) -> Result<Response, String> {
     }
     let http_request = builder
         .body(request.body.clone())
-        .map_err(|e| format!("Invalid request: {e}"))?;
+        .map_err(|e| t!("http.invalid_request", error = e).to_string())?;
 
     let started = Instant::now();
     let mut response = agent.run(http_request).map_err(|e| e.to_string())?;
     let body = response
         .body_mut()
         .read_to_string()
-        .map_err(|e| format!("Failed to read body: {e}"))?;
+        .map_err(|e| t!("http.failed_to_read_body", error = e).to_string())?;
 
     Ok(Response {
         status: response.status().as_u16(),

@@ -13,6 +13,7 @@
 //! ```
 
 use indexmap::IndexMap;
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_FILE: &str = "collection.yaml";
@@ -220,17 +221,17 @@ pub fn variables_from_text(text: &str) -> Result<Variables, String> {
             continue;
         }
         let Some((name, value)) = line.split_once(':') else {
-            return Err(format!("Line {line_no}: expected `name: value`"));
+            return Err(t!("vars.line_expected", line = line_no).to_string());
         };
         let name = name.trim();
         if name.is_empty() {
-            return Err(format!("Line {line_no}: variable name is empty"));
+            return Err(t!("vars.line_name_empty", line = line_no).to_string());
         }
         if name.contains(['{', '}']) || name.chars().any(char::is_whitespace) {
-            return Err(format!("Line {line_no}: `{name}` can't contain spaces or braces"));
+            return Err(t!("vars.line_name_invalid", line = line_no, name = name).to_string());
         }
         if variables.insert(name.to_string(), value.trim().to_string()).is_some() {
-            return Err(format!("Line {line_no}: `{name}` is defined twice"));
+            return Err(t!("vars.line_duplicate", line = line_no, name = name).to_string());
         }
     }
     Ok(variables)
@@ -348,6 +349,23 @@ mod tests {
         assert_eq!(variables_from_text("a: 1\na: 2").unwrap_err(), "Line 2: `a` is defined twice");
         assert!(variables_from_text(": x").is_err());
         assert!(variables_from_text("base url: x").is_err());
+    }
+
+    /// Validation messages are translated, keeping the interpolated values intact. Uses an
+    /// explicit locale: the global one is process-wide and tests run in parallel.
+    #[test]
+    fn validation_messages_are_translated() {
+        let cases = [
+            ("en", "Line 2: `a` is defined twice"),
+            ("es", "Línea 2: `a` está definida dos veces"),
+            ("de", "Zeile 2: `a` ist doppelt definiert"),
+            ("fr", "Ligne 2 : `a` est défini deux fois"),
+        ];
+        for (locale, expected) in cases {
+            assert_eq!(t!("vars.line_duplicate", locale = locale, line = 2, name = "a"), expected);
+        }
+        assert_eq!(t!("request.send_shortcut", locale = "de"), "Strg+Eingabe");
+        assert_eq!(t!("env.copy_name", locale = "fr", name = "Prod"), "Prod (copie)");
     }
 
     #[test]

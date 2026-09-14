@@ -540,13 +540,26 @@ pub fn watch(theme_dir: &Path, font_config_dir: Option<&Path>) -> Result<(notify
     Ok((watcher, rx))
 }
 
+/// Applies the Omarchy theme, or the defaults when following it is turned off.
+pub fn set_following(follow: bool, cx: &mut App) {
+    if follow {
+        match apply(theme_dir().as_deref(), cx) {
+            Ok(name) => eprintln!("using Omarchy theme {name}"),
+            Err(reason) => eprintln!("using default theme: {reason}"),
+        }
+    } else {
+        restore_defaults(cx);
+    }
+}
+
+fn following(cx: &App) -> bool {
+    crate::settings::AppSettings::get(cx).follow_omarchy_theme
+}
+
 /// Applies the current theme and keeps following changes for the life of the app.
 pub fn init(cx: &mut App) {
     let dir = theme_dir();
-    match apply(dir.as_deref(), cx) {
-        Ok(name) => eprintln!("using Omarchy theme {name}"),
-        Err(reason) => eprintln!("using default theme: {reason}"),
-    }
+    set_following(following(cx), cx);
     let Some(dir) = dir else {
         return;
     };
@@ -570,9 +583,14 @@ pub fn init(cx: &mut App) {
                 while events.try_recv().is_ok() {}
             }
             let dir = dir.clone();
-            cx.update(|cx| match apply(Some(&dir), cx) {
-                Ok(name) => eprintln!("theme changed to {name}"),
-                Err(reason) => eprintln!("theme change not applied: {reason}"),
+            cx.update(|cx| {
+                if !following(cx) {
+                    return;
+                }
+                match apply(Some(&dir), cx) {
+                    Ok(name) => eprintln!("theme changed to {name}"),
+                    Err(reason) => eprintln!("theme change not applied: {reason}"),
+                }
             });
         }
     })

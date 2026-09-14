@@ -19,6 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use indexmap::IndexMap;
 use oo7::Secret;
+use rust_i18n::t;
 
 use crate::model::{CollectionFile, EnvironmentFile, Variables};
 use crate::paths::{APP_ID, AppPaths};
@@ -64,13 +65,10 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    pub fn describe(self) -> &'static str {
+    pub fn describe(self) -> String {
         match self {
-            Self::Keyring => "Values are stored in your desktop keyring, never in the collection files.",
-            Self::EncryptedFile => {
-                "No desktop keyring found. Values are stored in an encrypted file whose key is kept \
-                 separately on this machine."
-            }
+            Self::Keyring => t!("secrets.backend_keyring").to_string(),
+            Self::EncryptedFile => t!("secrets.backend_file").to_string(),
         }
     }
 }

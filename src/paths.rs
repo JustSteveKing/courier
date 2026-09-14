@@ -18,7 +18,6 @@ pub const APP_ID: &str = "dev.steve.gpui-playground";
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
-    #[expect(dead_code, reason = "no user settings yet")]
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,

@@ -1,12 +1,14 @@
 mod credentials;
 mod environment_editor;
 mod http;
+mod i18n;
 mod import;
 mod model;
 mod omarchy_theme;
 mod paths;
 mod request_editor;
 mod secret_store;
+mod settings;
 mod storage;
 mod workspace;
 
@@ -14,7 +16,10 @@ use gpui_kit::component::Root;
 use gpui_kit::*;
 
 use crate::paths::{APP_ID, AppPaths};
+use crate::settings::AppSettings;
 use crate::workspace::Workspace;
+
+rust_i18n::i18n!("locales", fallback = "en");
 
 fn main() {
     let paths = match AppPaths::from_env() {
@@ -29,8 +34,11 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_global(AppSettings::load(&paths));
+            i18n::apply(i18n::resolve(AppSettings::get(cx).language.as_deref()));
             omarchy_theme::init(cx);
             request_editor::init(cx);
+            workspace::palette::init(cx);
             environment_editor::init(cx);
 
             let options = WindowOptions {
