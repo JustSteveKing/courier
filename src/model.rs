@@ -81,7 +81,11 @@ pub struct EnvironmentFile {
 
 impl EnvironmentFile {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), variables: Variables::new(), secrets: Vec::new() }
+        Self {
+            name: name.into(),
+            variables: Variables::new(),
+            secrets: Vec::new(),
+        }
     }
 }
 
@@ -125,7 +129,11 @@ pub struct Header {
 impl Header {
     /// An enabled header.
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { name: name.into(), value: value.into(), enabled: true }
+        Self {
+            name: name.into(),
+            value: value.into(),
+            enabled: true,
+        }
     }
 }
 
@@ -306,10 +314,21 @@ mod tests {
             method: "POST".into(),
             url: "{{base_url}}/users".into(),
             headers: vec![
-                Header { name: "Accept".into(), value: "application/json".into(), enabled: true },
-                Header { name: "X-Debug".into(), value: "1".into(), enabled: false },
+                Header {
+                    name: "Accept".into(),
+                    value: "application/json".into(),
+                    enabled: true,
+                },
+                Header {
+                    name: "X-Debug".into(),
+                    value: "1".into(),
+                    enabled: false,
+                },
             ],
-            body: Some(Body { kind: BodyKind::Json, content: "{\n  \"name\": \"Ada\"\n}".into() }),
+            body: Some(Body {
+                kind: BodyKind::Json,
+                content: "{\n  \"name\": \"Ada\"\n}".into(),
+            }),
             order: Some(2),
         };
         let yaml = serde_norway::to_string(&request).unwrap();
@@ -331,7 +350,10 @@ mod tests {
         assert_eq!(headers.len(), 3);
         assert!(!headers[1].enabled);
         assert_eq!(headers[2].value, "abc:def");
-        assert_eq!(headers_to_text(&headers), "Accept: application/json\n# X-Debug: 1\nX-Token: abc:def");
+        assert_eq!(
+            headers_to_text(&headers),
+            "Accept: application/json\n# X-Debug: 1\nX-Token: abc:def"
+        );
     }
 
     #[test]
@@ -349,16 +371,33 @@ mod tests {
         assert_eq!(variables.keys().collect::<Vec<_>>(), ["zeta", "base_url", "token"]);
         assert_eq!(variables["base_url"], "https://api.test:8443/v1");
         assert_eq!(variables["token"], "");
-        assert_eq!(variables_to_text(&variables), "zeta: 1\nbase_url: https://api.test:8443/v1\ntoken: ");
+        assert_eq!(
+            variables_to_text(&variables),
+            "zeta: 1\nbase_url: https://api.test:8443/v1\ntoken: "
+        );
 
-        let yaml = serde_norway::to_string(&EnvironmentFile { name: "Dev".into(), variables, secrets: Vec::new() }).unwrap();
-        assert!(yaml.find("zeta").unwrap() < yaml.find("base_url").unwrap(), "order kept on disk:\n{yaml}");
+        let yaml = serde_norway::to_string(&EnvironmentFile {
+            name: "Dev".into(),
+            variables,
+            secrets: Vec::new(),
+        })
+        .unwrap();
+        assert!(
+            yaml.find("zeta").unwrap() < yaml.find("base_url").unwrap(),
+            "order kept on disk:\n{yaml}"
+        );
     }
 
     #[test]
     fn variables_text_reports_mistakes() {
-        assert_eq!(variables_from_text("a: 1\nnope").unwrap_err(), "Line 2: expected `name: value`");
-        assert_eq!(variables_from_text("a: 1\na: 2").unwrap_err(), "Line 2: `a` is defined twice");
+        assert_eq!(
+            variables_from_text("a: 1\nnope").unwrap_err(),
+            "Line 2: expected `name: value`"
+        );
+        assert_eq!(
+            variables_from_text("a: 1\na: 2").unwrap_err(),
+            "Line 2: `a` is defined twice"
+        );
         assert!(variables_from_text(": x").is_err());
         assert!(variables_from_text("base url: x").is_err());
     }
@@ -374,7 +413,10 @@ mod tests {
             ("fr", "Ligne 2 : `a` est défini deux fois"),
         ];
         for (locale, expected) in cases {
-            assert_eq!(t!("vars.line_duplicate", locale = locale, line = 2, name = "a"), expected);
+            assert_eq!(
+                t!("vars.line_duplicate", locale = locale, line = 2, name = "a"),
+                expected
+            );
         }
         assert_eq!(t!("request.send_shortcut", locale = "de"), "Strg+Eingabe");
         assert_eq!(t!("env.copy_name", locale = "fr", name = "Prod"), "Prod (copie)");

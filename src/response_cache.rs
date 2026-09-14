@@ -62,7 +62,10 @@ pub enum Outcome {
 }
 
 pub fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 impl StoredResponse {
@@ -80,14 +83,26 @@ impl StoredResponse {
                     truncated: false,
                 },
             },
-            Err(message) => Self { received_at, elapsed_ms: 0, outcome: Outcome::Error { message: message.clone() } },
+            Err(message) => Self {
+                received_at,
+                elapsed_ms: 0,
+                outcome: Outcome::Error {
+                    message: message.clone(),
+                },
+            },
         }
     }
 
     /// The copy that is safe to write to disk: sensitive headers masked, body capped.
     pub fn for_disk(&self) -> Self {
         let mut copy = self.clone();
-        if let Outcome::Response { headers, body, truncated, .. } = &mut copy.outcome {
+        if let Outcome::Response {
+            headers,
+            body,
+            truncated,
+            ..
+        } = &mut copy.outcome
+        {
             for (name, value) in headers.iter_mut() {
                 if is_sensitive_header(name) {
                     *value = MASK.to_string();
@@ -107,7 +122,14 @@ impl StoredResponse {
 }
 
 pub fn is_sensitive_header(name: &str) -> bool {
-    const NAMES: &[&str] = &["set-cookie", "cookie", "authorization", "proxy-authorization", "x-api-key", "api-key"];
+    const NAMES: &[&str] = &[
+        "set-cookie",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+    ];
     NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)) || looks_sensitive_name(name)
 }
 
@@ -145,7 +167,11 @@ pub fn cache_key(collection_id: Option<&str>, collection_root: &Path, request: &
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    CacheKey { key: format!("{hash:016x}"), collection_id, request }
+    CacheKey {
+        key: format!("{hash:016x}"),
+        collection_id,
+        request,
+    }
 }
 
 /// What currently exists, for [`ResponseCache::tidy`].
@@ -171,7 +197,9 @@ pub struct ResponseCache {
 
 impl ResponseCache {
     pub fn new(cache_dir: &Path) -> Self {
-        Self { dir: cache_dir.join("responses") }
+        Self {
+            dir: cache_dir.join("responses"),
+        }
     }
 
     fn file(&self, key: &str) -> PathBuf {
@@ -241,7 +269,10 @@ impl ResponseCache {
                 if age < TIDY_GRACE || live.keys.contains(key) {
                     false
                 } else {
-                    match fs::read(&path).ok().and_then(|b| serde_json::from_slice::<CacheFile>(&b).ok()) {
+                    match fs::read(&path)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<CacheFile>(&b).ok())
+                    {
                         None => true,
                         Some(file) => match &file.collection_id {
                             Some(id) if live.collection_ids.contains(id) => true,
@@ -312,13 +343,24 @@ mod tests {
 
         let file = tmp.path().join(format!("responses/{}.json", key.key));
         let on_disk = fs::read_to_string(&file).unwrap();
-        assert!(!on_disk.contains("SECRET_SESSION") && !on_disk.contains("SECRET_TOKEN"), "{on_disk}");
+        assert!(
+            !on_disk.contains("SECRET_SESSION") && !on_disk.contains("SECRET_TOKEN"),
+            "{on_disk}"
+        );
         assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(tmp.path().join("responses")).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::metadata(tmp.path().join("responses")).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
 
-        assert!(on_disk.contains("\"request\":\"users.yaml\""), "records what it belongs to: {on_disk}");
+        assert!(
+            on_disk.contains("\"request\":\"users.yaml\""),
+            "records what it belongs to: {on_disk}"
+        );
         let loaded = cache.load(&key).unwrap();
-        let Outcome::Response { headers, body, .. } = &loaded.outcome else { panic!() };
+        let Outcome::Response { headers, body, .. } = &loaded.outcome else {
+            panic!()
+        };
         assert_eq!(body, "{\"ok\":true}");
         assert_eq!(headers[1].1, MASK);
         assert_eq!(headers[3].1, "abc123", "ordinary headers are kept");
@@ -332,7 +374,15 @@ mod tests {
     fn truncates_huge_bodies_on_a_char_boundary() {
         let body = "é".repeat(MAX_SAVED_BODY); // 2 bytes each
         let stored = StoredResponse::from_result(&response(&body), 0).for_disk();
-        let Outcome::Response { body, body_size, truncated, .. } = stored.outcome else { panic!() };
+        let Outcome::Response {
+            body,
+            body_size,
+            truncated,
+            ..
+        } = stored.outcome
+        else {
+            panic!()
+        };
         assert!(truncated);
         assert!(body.len() <= MAX_SAVED_BODY);
         assert_eq!(body_size, MAX_SAVED_BODY * 2);
@@ -351,10 +401,17 @@ mod tests {
     #[test]
     fn keys_are_stable_and_follow_the_collection_not_its_folder() {
         let a = cache_key(Some("c1"), Path::new("/old/api"), Path::new("/old/api/users/list.yaml"));
-        let b = cache_key(Some("c1"), Path::new("/new/place"), Path::new("/new/place/users/list.yaml"));
+        let b = cache_key(
+            Some("c1"),
+            Path::new("/new/place"),
+            Path::new("/new/place/users/list.yaml"),
+        );
         assert_eq!(a.key, b.key);
         assert_eq!(a.request, "users/list.yaml");
-        assert_ne!(a.key, cache_key(Some("c2"), Path::new("/old/api"), Path::new("/old/api/users/list.yaml")).key);
+        assert_ne!(
+            a.key,
+            cache_key(Some("c2"), Path::new("/old/api"), Path::new("/old/api/users/list.yaml")).key
+        );
         assert_eq!(cache_key(None, Path::new("/x"), Path::new("/y/z.yaml")).key.len(), 16);
     }
 
@@ -367,7 +424,10 @@ mod tests {
         let key = |collection: &str, request: &str| cache_key(Some(collection), root, &root.join(request));
         let now = SystemTime::now();
         let age = |key: &CacheKey, ago: Duration| {
-            let file = fs::File::options().write(true).open(tmp.path().join(format!("responses/{}.json", key.key))).unwrap();
+            let file = fs::File::options()
+                .write(true)
+                .open(tmp.path().join(format!("responses/{}.json", key.key)))
+                .unwrap();
             file.set_modified(now - ago).unwrap();
         };
         let hour = Duration::from_secs(3600);
@@ -377,7 +437,13 @@ mod tests {
         let just_created = key("open", "brand-new.yaml");
         let closed_recent = key("closed", "a.yaml");
         let closed_old = key("closed", "b.yaml");
-        for k in [&live_request, &deleted_request, &just_created, &closed_recent, &closed_old] {
+        for k in [
+            &live_request,
+            &deleted_request,
+            &just_created,
+            &closed_recent,
+            &closed_old,
+        ] {
             cache.save(k, &stored).unwrap();
         }
         age(&live_request, TIDY_MAX_AGE * 2);
@@ -387,9 +453,19 @@ mod tests {
         // `just_created` stays within the grace period.
         let dir = tmp.path().join("responses");
         fs::write(dir.join("0000000000000000.json"), "not json").unwrap();
-        fs::File::options().write(true).open(dir.join("0000000000000000.json")).unwrap().set_modified(now - hour).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.join("0000000000000000.json"))
+            .unwrap()
+            .set_modified(now - hour)
+            .unwrap();
         fs::write(dir.join("stale.json.tmp"), "x").unwrap();
-        fs::File::options().write(true).open(dir.join("stale.json.tmp")).unwrap().set_modified(now - hour * 2).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.join("stale.json.tmp"))
+            .unwrap()
+            .set_modified(now - hour * 2)
+            .unwrap();
         fs::write(dir.join("README"), "not ours").unwrap();
 
         let live = Liveness {
@@ -398,10 +474,19 @@ mod tests {
         };
         let report = cache.tidy(&live, now).unwrap();
 
-        assert!(cache.load(&live_request).is_some(), "a live request keeps its response, however old");
-        assert!(cache.load(&deleted_request).is_none(), "orphan in an open collection is removed");
+        assert!(
+            cache.load(&live_request).is_some(),
+            "a live request keeps its response, however old"
+        );
+        assert!(
+            cache.load(&deleted_request).is_none(),
+            "orphan in an open collection is removed"
+        );
         assert!(cache.load(&just_created).is_some());
-        assert!(cache.load(&closed_recent).is_some(), "closed collections keep recent responses");
+        assert!(
+            cache.load(&closed_recent).is_some(),
+            "closed collections keep recent responses"
+        );
         assert!(cache.load(&closed_old).is_none(), "and lose them after the max age");
         assert!(!dir.join("0000000000000000.json").exists() && !dir.join("stale.json.tmp").exists());
         assert!(dir.join("README").exists(), "unrelated files are untouched");

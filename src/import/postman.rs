@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 
-use crate::encoding::{base64_encode, percent_encode};
 use crate::credentials::{hoist_credentials_with, looks_sensitive_name};
+use crate::encoding::{base64_encode, percent_encode};
 use crate::model::{
-    Body, BodyKind, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, Header, RequestFile,
-    Variables, headers_from_text, slugify,
+    Body, BodyKind, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, Header, RequestFile, Variables,
+    headers_from_text, slugify,
 };
 use crate::storage::{create_request, is_collection, unique_path};
 
@@ -70,7 +70,15 @@ pub fn parse_collection(json: &str) -> Result<PostmanImport> {
         }
         if let Some(key) = variable.get("key").and_then(Value::as_str) {
             let value = variable.get("value").map(value_to_string).unwrap_or_default();
-            sort_variable(key, value, variable, &mut collection.variables, &mut collection.secrets, &mut secrets, &mut warnings);
+            sort_variable(
+                key,
+                value,
+                variable,
+                &mut collection.variables,
+                &mut collection.secrets,
+                &mut secrets,
+                &mut warnings,
+            );
         }
     }
 
@@ -80,9 +88,18 @@ pub fn parse_collection(json: &str) -> Result<PostmanImport> {
 
     let variables = collection.variables.clone();
     let mut hoisted = Vec::new();
-    hoist_items(&mut items, &mut secrets, &|name| variables.contains_key(name), &mut hoisted);
+    hoist_items(
+        &mut items,
+        &mut secrets,
+        &|name| variables.contains_key(name),
+        &mut hoisted,
+    );
     if !hoisted.is_empty() {
-        warnings.push(format!("{} credentials moved to secrets: {}", hoisted.len(), hoisted.join(", ")));
+        warnings.push(format!(
+            "{} credentials moved to secrets: {}",
+            hoisted.len(),
+            hoisted.join(", ")
+        ));
     }
     for name in secrets.keys() {
         if !collection.secrets.contains(name) {
@@ -90,7 +107,12 @@ pub fn parse_collection(json: &str) -> Result<PostmanImport> {
         }
     }
 
-    Ok(PostmanImport { collection, items, secrets, warnings })
+    Ok(PostmanImport {
+        collection,
+        items,
+        secrets,
+        warnings,
+    })
 }
 
 /// Routes one Postman variable to plain variables or secrets. Secret-typed values and literal
@@ -148,10 +170,22 @@ pub fn parse_environment(json: &str) -> Result<EnvironmentImport> {
         }
         if let Some(key) = entry.get("key").and_then(Value::as_str) {
             let value = entry.get("value").map(value_to_string).unwrap_or_default();
-            sort_variable(key, value, entry, &mut file.variables, &mut file.secrets, &mut secrets, &mut warnings);
+            sort_variable(
+                key,
+                value,
+                entry,
+                &mut file.variables,
+                &mut file.secrets,
+                &mut secrets,
+                &mut warnings,
+            );
         }
     }
-    Ok(EnvironmentImport { file, secrets, warnings })
+    Ok(EnvironmentImport {
+        file,
+        secrets,
+        warnings,
+    })
 }
 
 /// Creates the `.courier` collection for `project` from an import; returns its root. Only
@@ -174,8 +208,7 @@ pub fn write_items(dir: &Path, items: &[ImportItem]) -> Result<()> {
                     name.clone()
                 };
                 let folder = unique_path(dir, &name, "");
-                fs::create_dir_all(&folder)
-                    .with_context(|| format!("creating {}", folder.display()))?;
+                fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
                 write_items(&folder, children)?;
             }
             ImportItem::Request(request) => {
@@ -203,18 +236,17 @@ impl<'a> Inherited<'a> {
     }
 }
 
-fn convert_items(
-    items: &[Value],
-    auth: Inherited,
-    parent_path: &str,
-    warnings: &mut Vec<String>,
-) -> Vec<ImportItem> {
+fn convert_items(items: &[Value], auth: Inherited, parent_path: &str, warnings: &mut Vec<String>) -> Vec<ImportItem> {
     items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
             let name = item.get("name").and_then(Value::as_str).unwrap_or("Untitled");
-            let path = if parent_path.is_empty() { name.to_string() } else { format!("{parent_path} / {name}") };
+            let path = if parent_path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{parent_path} / {name}")
+            };
             let item_auth = Inherited::from(item.get("auth"), Some(auth));
             warn_events(item, &format!("\"{path}\""), warnings);
 
@@ -354,7 +386,10 @@ fn convert_body(body: &Value, headers: &[Header], path: &str, warnings: &mut Vec
                 (None, None) if serde_json::from_str::<Value>(content).is_ok() => BodyKind::Json,
                 (None, None) => BodyKind::Text,
             };
-            Some(Body { kind, content: content.to_string() })
+            Some(Body {
+                kind,
+                content: content.to_string(),
+            })
         }
         "urlencoded" => {
             let pairs: Vec<String> = body
@@ -369,7 +404,10 @@ fn convert_body(body: &Value, headers: &[Header], path: &str, warnings: &mut Vec
                     Some(format!("{}={}", percent_encode(key), percent_encode(&value)))
                 })
                 .collect();
-            (!pairs.is_empty()).then(|| Body { kind: BodyKind::FormUrlencoded, content: pairs.join("&") })
+            (!pairs.is_empty()).then(|| Body {
+                kind: BodyKind::FormUrlencoded,
+                content: pairs.join("&"),
+            })
         }
         "graphql" => {
             let graphql = body.get("graphql")?;
@@ -403,7 +441,10 @@ fn apply_auth(file: &mut RequestFile, auth: &Value, path: &str, warnings: &mut V
     let param = |key: &str| auth_param(auth, kind, key);
 
     let header = match kind {
-        "bearer" => Some(("Authorization".to_string(), format!("Bearer {}", param("token").unwrap_or_default()))),
+        "bearer" => Some((
+            "Authorization".to_string(),
+            format!("Bearer {}", param("token").unwrap_or_default()),
+        )),
         "basic" => {
             let username = param("username").unwrap_or_default();
             let password = param("password").unwrap_or_default();
@@ -419,7 +460,9 @@ fn apply_auth(file: &mut RequestFile, auth: &Value, path: &str, warnings: &mut V
             let key = param("key").unwrap_or_else(|| "X-API-Key".into());
             let value = param("value").unwrap_or_default();
             if param("in").as_deref() == Some("query") {
-                warnings.push(format!("\"{path}\": API key in query string was not imported; add `{key}` to the URL"));
+                warnings.push(format!(
+                    "\"{path}\": API key in query string was not imported; add `{key}` to the URL"
+                ));
                 None
             } else {
                 Some((key, value))
@@ -432,7 +475,10 @@ fn apply_auth(file: &mut RequestFile, auth: &Value, path: &str, warnings: &mut V
     };
 
     if let Some((name, value)) = header
-        && !file.headers.iter().any(|h| h.enabled && h.name.eq_ignore_ascii_case(&name))
+        && !file
+            .headers
+            .iter()
+            .any(|h| h.enabled && h.name.eq_ignore_ascii_case(&name))
     {
         file.headers.push(Header::new(name, value));
     }
@@ -582,10 +628,21 @@ mod tests {
     fn converts_a_v21_collection() {
         let import = parse_collection(COLLECTION).unwrap();
         assert_eq!(import.collection.name, "Petstore");
-        assert_eq!(import.collection.variables.len(), 3, "{:?}", import.collection.variables);
+        assert_eq!(
+            import.collection.variables.len(),
+            3,
+            "{:?}",
+            import.collection.variables
+        );
         assert_eq!(import.collection.variables["retries"], "3");
-        assert_eq!(import.collection.variables["api_token"], "{{from_env}}", "templated values stay plain");
-        assert_eq!(import.collection.secrets, ["client_secret", "vault", "api_key", "basic_auth"]);
+        assert_eq!(
+            import.collection.variables["api_token"], "{{from_env}}",
+            "templated values stay plain"
+        );
+        assert_eq!(
+            import.collection.secrets,
+            ["client_secret", "vault", "api_key", "basic_auth"]
+        );
         assert_eq!(import.secrets["client_secret"], "cs-literal-777");
         assert_eq!(import.secrets["vault"], "typed-secret-555");
         assert_eq!(import.secrets["api_key"], "hdr-key-888");
@@ -608,7 +665,10 @@ mod tests {
         assert_eq!(header(create, "Authorization").unwrap().value, "Basic {{basic_auth}}");
 
         let body = login.body.as_ref().unwrap();
-        assert_eq!((body.kind, body.content.as_str()), (BodyKind::FormUrlencoded, "user=a%20b&pass={{password}}"));
+        assert_eq!(
+            (body.kind, body.content.as_str()),
+            (BodyKind::FormUrlencoded, "user=a%20b&pass={{password}}")
+        );
         assert!(header(login, "Authorization").is_none(), "noauth stops inheritance");
 
         assert!(upload.body.is_none());
@@ -618,9 +678,24 @@ mod tests {
 
         assert_eq!(import.warnings.len(), 5, "{:#?}", import.warnings);
         assert!(import.warnings.iter().any(|w| w == "moved `client_secret` to secrets"));
-        assert!(import.warnings.iter().any(|w| w == "2 credentials moved to secrets: api_key, basic_auth"));
-        assert!(import.warnings.iter().any(|w| w.contains("List pets") && w.contains("test script")));
-        assert!(import.warnings.iter().any(|w| w.contains("Admin / Upload") && w.contains("formdata")));
+        assert!(
+            import
+                .warnings
+                .iter()
+                .any(|w| w == "2 credentials moved to secrets: api_key, basic_auth")
+        );
+        assert!(
+            import
+                .warnings
+                .iter()
+                .any(|w| w.contains("List pets") && w.contains("test script"))
+        );
+        assert!(
+            import
+                .warnings
+                .iter()
+                .any(|w| w.contains("Admin / Upload") && w.contains("formdata"))
+        );
         assert!(import.warnings.iter().any(|w| w.contains("oauth2")));
     }
 
@@ -648,7 +723,12 @@ mod tests {
 
     #[test]
     fn rejects_non_collections() {
-        assert!(parse_collection("{}").unwrap_err().to_string().contains("Not a Postman collection"));
+        assert!(
+            parse_collection("{}")
+                .unwrap_err()
+                .to_string()
+                .contains("Not a Postman collection")
+        );
         assert!(parse_collection("nope").is_err());
     }
 
@@ -674,7 +754,10 @@ mod tests {
     fn writes_a_collection_that_loads_back() {
         let tmp = tempfile::tempdir().unwrap();
         let mut import = parse_collection(COLLECTION).unwrap();
-        import.items.push(ImportItem::Folder { name: "Environments".into(), children: vec![] });
+        import.items.push(ImportItem::Folder {
+            name: "Environments".into(),
+            children: vec![],
+        });
         let root = write_project_collection(tmp.path(), &import).unwrap();
         assert_eq!(root, tmp.path().join(".courier"));
 
@@ -688,7 +771,11 @@ mod tests {
         fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
             for entry in fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();
-                if path.is_dir() { walk(&path, files) } else { files.push(path) }
+                if path.is_dir() {
+                    walk(&path, files)
+                } else {
+                    files.push(path)
+                }
             }
         }
         let mut files = Vec::new();
@@ -697,7 +784,11 @@ mod tests {
         for file in &files {
             let text = fs::read_to_string(file).unwrap();
             for value in import.secrets.values() {
-                assert!(!text.contains(value.as_str()), "{} leaks a secret value:\n{text}", file.display());
+                assert!(
+                    !text.contains(value.as_str()),
+                    "{} leaks a secret value:\n{text}",
+                    file.display()
+                );
             }
         }
 
@@ -711,7 +802,9 @@ mod tests {
             .collect();
         assert_eq!(names, ["admin", "environments-folder", "List pets", "Search"]);
 
-        let Item::Folder { children, .. } = &loaded.items[0] else { panic!() };
+        let Item::Folder { children, .. } = &loaded.items[0] else {
+            panic!()
+        };
         let order: Vec<_> = children
             .iter()
             .map(|c| match c {

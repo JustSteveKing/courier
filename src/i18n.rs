@@ -9,7 +9,12 @@
 //! translated only into Chinese and Italian; `crate::ui` builds components with ours.
 
 /// Supported languages: code and native name, in the order shown to users.
-pub const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("es", "Español"), ("de", "Deutsch"), ("fr", "Français")];
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("es", "Español"),
+    ("de", "Deutsch"),
+    ("fr", "Français"),
+];
 
 /// The language to use for a settings value (None = follow the system).
 pub fn resolve(setting: Option<&str>) -> &'static str {
@@ -53,7 +58,11 @@ mod tests {
 
     #[test]
     fn resolves_locales() {
-        let env = |v: &[&str]| v.iter().map(|s| (!s.is_empty()).then(|| s.to_string())).collect::<Vec<_>>();
+        let env = |v: &[&str]| {
+            v.iter()
+                .map(|s| (!s.is_empty()).then(|| s.to_string()))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(language_from_env(&env(&["", "", "", "de_DE.UTF-8"])), "de");
         assert_eq!(language_from_env(&env(&["pt:fr:en", "", "", "en_US.UTF-8"])), "fr");
         assert_eq!(language_from_env(&env(&["", "C", "", "ja_JP.UTF-8"])), "en");
@@ -70,7 +79,10 @@ mod tests {
 
     fn locale_entries() -> Vec<(String, serde_norway::Mapping)> {
         let mut entries = Vec::new();
-        for file in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("locales")).unwrap().flatten() {
+        for file in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("locales"))
+            .unwrap()
+            .flatten()
+        {
             let text = fs::read_to_string(file.path()).unwrap();
             let map: serde_norway::Mapping = serde_norway::from_str(&text).unwrap();
             for (key, value) in map {
@@ -78,7 +90,10 @@ mod tests {
                 if key == "_version" {
                     continue;
                 }
-                let translations = value.as_mapping().cloned().unwrap_or_else(|| panic!("{key}: not a mapping"));
+                let translations = value
+                    .as_mapping()
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{key}: not a mapping"));
                 entries.push((key, translations));
             }
         }
@@ -93,14 +108,21 @@ mod tests {
         let mut seen = BTreeSet::new();
         for (key, translations) in &entries {
             assert!(seen.insert(key.clone()), "{key} is defined twice");
-            let english = translations.get("en").and_then(|v| v.as_str()).unwrap_or_else(|| panic!("{key}: no en"));
+            let english = translations
+                .get("en")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{key}: no en"));
             for (code, _) in LANGUAGES {
                 let text = translations
                     .get(*code)
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| panic!("{key}: missing {code}"));
                 assert!(!text.trim().is_empty(), "{key}: empty {code}");
-                assert_eq!(placeholders(text), placeholders(english), "{key}: {code} placeholders differ from en");
+                assert_eq!(
+                    placeholders(text),
+                    placeholders(english),
+                    "{key}: {code} placeholders differ from en"
+                );
             }
         }
     }
@@ -122,7 +144,11 @@ mod tests {
                 let text = fs::read_to_string(&path).unwrap();
                 for (i, _) in text.match_indices("t!(\"") {
                     // Skip `format!("`, `print!("` and the like.
-                    if text[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    if text[..i]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    {
                         continue;
                     }
                     let rest = &text[i + 4..];

@@ -30,8 +30,17 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    fn new(label: impl Into<SharedString>, run: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> Self {
-        Self { label: label.into(), keywords: Vec::new(), icon: None, checked: false, run: Rc::new(run) }
+    fn new(
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            keywords: Vec::new(),
+            icon: None,
+            checked: false,
+            run: Rc::new(run),
+        }
     }
 
     /// Also match the English wording, so muscle memory works in any language.
@@ -122,7 +131,12 @@ impl Workspace {
     }
 
     pub(super) fn palette_groups(&self, cx: &App) -> Vec<Group> {
-        let mut groups = vec![self.request_entries(), self.action_group(cx), self.environment_entries(cx), settings_entries(cx)];
+        let mut groups = vec![
+            self.request_entries(),
+            self.action_group(cx),
+            self.environment_entries(cx),
+            settings_entries(cx),
+        ];
         groups.retain(|g| !g.entries.is_empty());
         groups
     }
@@ -138,22 +152,31 @@ impl Workspace {
                     .join(" › ");
                 let path = entry.path.to_path_buf();
                 entries.push(
-                    Entry::new(label, move |this, window, cx| this.select_request(path.clone(), window, cx))
-                        .keywords([entry.request.method.clone(), entry.request.url.clone()]),
+                    Entry::new(label, move |this, window, cx| {
+                        this.select_request(path.clone(), window, cx)
+                    })
+                    .keywords([entry.request.method.clone(), entry.request.url.clone()]),
                 );
             }
         }
-        Group { label: t!("palette.group.requests").to_string().into(), entries }
+        Group {
+            label: t!("palette.group.requests").to_string().into(),
+            entries,
+        }
     }
 
     fn action_group(&self, cx: &App) -> Group {
         let mut entries = vec![
-            Entry::new(t!("ws.open_project_ellipsis"), |this, window, cx| this.open_project(window, cx))
-                .english("ws.open_project_ellipsis")
-                .keywords(["folder".into(), "collection".into()])
-                .icon(IconName::FolderOpen),
-            Entry::new(t!("ws.new_collection_from_postman"), |this, window, cx| this.import_postman_as_new(window, cx))
-                .english("ws.new_collection_from_postman"),
+            Entry::new(t!("ws.open_project_ellipsis"), |this, window, cx| {
+                this.open_project(window, cx)
+            })
+            .english("ws.open_project_ellipsis")
+            .keywords(["folder".into(), "collection".into()])
+            .icon(IconName::FolderOpen),
+            Entry::new(t!("ws.new_collection_from_postman"), |this, window, cx| {
+                this.import_postman_as_new(window, cx)
+            })
+            .english("ws.new_collection_from_postman"),
         ];
         if let Some(root) = self.active_collection(cx).map(|c| c.root.clone()) {
             let with_root = |key: &'static str, run: RootAction| {
@@ -166,12 +189,19 @@ impl Workspace {
                 with_root("ws.import_curl", Workspace::import_curl_dialog).icon(IconName::SquareTerminal),
                 with_root("ws.import_postman_here", Workspace::import_postman_into),
                 with_root("ws.import_postman_environment", Workspace::import_postman_environment),
-                with_root("ws.reload_from_disk", |this, root, window, cx| this.reload_collection(&root, window, cx)),
+                with_root("ws.reload_from_disk", |this, root, window, cx| {
+                    this.reload_collection(&root, window, cx)
+                }),
                 with_root("ws.show_in_file_manager", |_, root, _, cx| cx.reveal_path(&root)),
-                with_root("ws.close_collection", |this, root, window, cx| this.close_collection(&root, window, cx)),
+                with_root("ws.close_collection", |this, root, window, cx| {
+                    this.close_collection(&root, window, cx)
+                }),
             ]);
         }
-        Group { label: t!("palette.group.actions").to_string().into(), entries }
+        Group {
+            label: t!("palette.group.actions").to_string().into(),
+            entries,
+        }
     }
 
     fn environment_entries(&self, cx: &App) -> Group {
@@ -179,32 +209,44 @@ impl Workspace {
         if let Some(collection) = self.active_collection(cx) {
             let active = self.state.active_environments.get(&collection.root);
             entries.push(
-                Entry::new(t!("palette.use_environment", name = t!("ws.no_environment")), |this, window, cx| {
-                    this.choose_environment(Some(0), window, cx)
-                })
+                Entry::new(
+                    t!("palette.use_environment", name = t!("ws.no_environment")),
+                    |this, window, cx| this.choose_environment(Some(0), window, cx),
+                )
                 .checked(active.is_none()),
             );
             for (ix, env) in collection.environments.iter().enumerate() {
                 entries.push(
-                    Entry::new(t!("palette.use_environment", name = env.file.name), move |this, window, cx| {
-                        this.choose_environment(Some(ix + 1), window, cx)
-                    })
+                    Entry::new(
+                        t!("palette.use_environment", name = env.file.name),
+                        move |this, window, cx| this.choose_environment(Some(ix + 1), window, cx),
+                    )
                     .english("palette.use_environment")
                     .checked(active == Some(&env.path)),
                 );
             }
         }
-        Group { label: t!("palette.group.environments").to_string().into(), entries }
+        Group {
+            label: t!("palette.group.environments").to_string().into(),
+            entries,
+        }
     }
 }
 
 fn settings_entries(cx: &App) -> Group {
     let settings = AppSettings::get(cx);
     let system = i18n::system_language();
-    let system_name = LANGUAGES.iter().find(|(c, _)| *c == system).map(|(_, n)| *n).unwrap_or("English");
+    let system_name = LANGUAGES
+        .iter()
+        .find(|(c, _)| *c == system)
+        .map(|(_, n)| *n)
+        .unwrap_or("English");
     let mut entries = vec![
         Entry::new(
-            t!("settings.language", name = t!("settings.language_system", name = system_name)),
+            t!(
+                "settings.language",
+                name = t!("settings.language_system", name = system_name)
+            ),
             |this, window, cx| this.set_language(None, window, cx),
         )
         .english("settings.language")
@@ -230,9 +272,11 @@ fn settings_entries(cx: &App) -> Group {
         .checked(remember),
     );
     entries.push(
-        Entry::new(t!("settings.clear_responses"), |this, window, cx| this.clear_saved_responses(window, cx))
-            .english("settings.clear_responses")
-            .keywords(["cache".into()]),
+        Entry::new(t!("settings.clear_responses"), |this, window, cx| {
+            this.clear_saved_responses(window, cx)
+        })
+        .english("settings.clear_responses")
+        .keywords(["cache".into()]),
     );
     let follow = settings.follow_omarchy_theme;
     entries.push(
@@ -255,5 +299,8 @@ fn settings_entries(cx: &App) -> Group {
         .english("settings.open_file")
         .icon(IconName::Settings),
     );
-    Group { label: t!("palette.group.settings").to_string().into(), entries }
+    Group {
+        label: t!("palette.group.settings").to_string().into(),
+        entries,
+    }
 }

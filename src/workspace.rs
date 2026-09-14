@@ -14,8 +14,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, IndexPath, Root, Selectable as _, Sizable as _, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, IndexPath, Root, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,7 +22,6 @@ use rust_i18n::t;
 
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
-use crate::ui::{dialog_footer, textarea};
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
 use crate::model::{RequestFile, Variables, placeholder};
@@ -34,9 +32,9 @@ use crate::response_cache::{CacheKey, Liveness, ResponseCache};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
+use crate::ui::{dialog_footer, textarea};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
-
 
 /// A folder the app was started with (argument or working directory).
 pub struct Launch {
@@ -68,7 +66,12 @@ impl Workspace {
     pub fn new(paths: AppPaths, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor = cx.new(|cx| RequestEditor::new(ResponseCache::new(&paths.cache_dir), window, cx));
         let environment = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]), None, window, cx)
+            SelectState::new(
+                SearchableVec::new(vec![SharedString::from(t!("ws.no_environment").to_string())]),
+                None,
+                window,
+                cx,
+            )
         });
 
         cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
@@ -128,10 +131,18 @@ impl Workspace {
                 Err(e) => eprintln!("skipping project {}: {e:#}", project.display()),
             }
         }
-        self.state.open_projects = self.collections.iter().map(|c| project::project_dir(&c.root).to_path_buf()).collect();
+        self.state.open_projects = self
+            .collections
+            .iter()
+            .map(|c| project::project_dir(&c.root).to_path_buf())
+            .collect();
         self.save_state();
 
-        let last = self.state.last_request.clone().filter(|p| self.find_request(p).is_some());
+        let last = self
+            .state
+            .last_request
+            .clone()
+            .filter(|p| self.find_request(p).is_some());
         let first = || self.collections.iter().find_map(Collection::first_request);
         if let Some(path) = last.or_else(first) {
             self.select_request(path, window, cx);
@@ -146,7 +157,8 @@ impl Workspace {
                     let weak = cx.entity().downgrade();
                     // Dialogs need the window's root view, which exists once this view does.
                     window.defer(cx, move |window, cx| {
-                        weak.update(cx, |this, cx| this.offer_init_project(launch.dir, window, cx)).ok();
+                        weak.update(cx, |this, cx| this.offer_init_project(launch.dir, window, cx))
+                            .ok();
                     });
                 }
                 None => {}
@@ -186,7 +198,11 @@ impl Workspace {
         if let Some(ix) = self.collections.iter().position(|c| c.root == root) {
             // Already open: bring it into view, unless one of its requests is already showing.
             self.collapsed.remove(&root);
-            let showing = self.editor.read(cx).path().is_some_and(|p| self.collection_index_for(p) == Some(ix));
+            let showing = self
+                .editor
+                .read(cx)
+                .path()
+                .is_some_and(|p| self.collection_index_for(p) == Some(ix));
             if !showing && let Some(path) = self.collections[ix].first_request() {
                 self.select_request(path, window, cx);
             }
@@ -219,11 +235,16 @@ impl Workspace {
             Ok(collection) => {
                 if !collection.errors.is_empty() {
                     let files: Vec<_> = collection.errors.iter().map(|(p, _)| p.display().to_string()).collect();
-                    notify_error(t!("ws.could_not_read", files = files.join(", ")).to_string(), window, cx);
+                    notify_error(
+                        t!("ws.could_not_read", files = files.join(", ")).to_string(),
+                        window,
+                        cx,
+                    );
                 }
                 if self.environment_editor.read(cx).root() == Some(root) {
-                    self.environment_editor
-                        .update(cx, |editor, cx| editor.update_collection(collection.clone(), window, cx));
+                    self.environment_editor.update(cx, |editor, cx| {
+                        editor.update_collection(collection.clone(), window, cx)
+                    });
                 }
                 self.collections[ix] = collection;
             }
@@ -271,7 +292,9 @@ impl Workspace {
     fn load_in_editor(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(request) = self.find_request(path).cloned() {
             let key = self.response_key(path);
-            self.editor.update(cx, |editor, cx| editor.load(path.to_path_buf(), request, key, window, cx));
+            self.editor.update(cx, |editor, cx| {
+                editor.load(path.to_path_buf(), request, key, window, cx)
+            });
         }
     }
 
@@ -317,9 +340,19 @@ impl Workspace {
                 let names = std::iter::once(SharedString::from(t!("ws.no_environment").to_string()))
                     .chain(collection.environments.iter().map(|e| e.file.name.clone().into()))
                     .collect::<Vec<_>>();
-                (names, selected.unwrap_or(0), secret_store::layer(&collection.file, environment), active.cloned())
+                (
+                    names,
+                    selected.unwrap_or(0),
+                    secret_store::layer(&collection.file, environment),
+                    active.cloned(),
+                )
             }
-            None => (vec![t!("ws.no_environment").to_string().into()], 0, secret_store::Layered::default(), None),
+            None => (
+                vec![t!("ws.no_environment").to_string().into()],
+                0,
+                secret_store::Layered::default(),
+                None,
+            ),
         };
         self.environment.update(cx, |select, cx| {
             select.set_items(SearchableVec::new(names), window, cx);
@@ -327,7 +360,8 @@ impl Workspace {
         });
         self.editor
             .update(cx, |editor, _| editor.set_variables(layered.variables, layered.secrets));
-        self.environment_editor.update(cx, |editor, cx| editor.set_active(active, cx));
+        self.environment_editor
+            .update(cx, |editor, cx| editor.set_active(active, cx));
     }
 
     fn manage_environments(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -371,7 +405,8 @@ impl Workspace {
         // Strings built during render update on the next frame; placeholders set when inputs
         // were created need re-applying.
         self.editor.update(cx, |editor, cx| editor.relocalize(window, cx));
-        self.environment_editor.update(cx, |editor, cx| editor.relocalize(window, cx));
+        self.environment_editor
+            .update(cx, |editor, cx| editor.relocalize(window, cx));
         self.refresh_environments(window, cx);
         cx.refresh_windows();
     }
@@ -402,7 +437,10 @@ impl Workspace {
                     .await;
                 match result {
                     Ok(report) if report.removed > 0 => {
-                        eprintln!("tidied response cache: removed {}, kept {}", report.removed, report.kept)
+                        eprintln!(
+                            "tidied response cache: removed {}, kept {}",
+                            report.removed, report.kept
+                        )
                     }
                     Ok(_) => {}
                     Err(e) => eprintln!("could not tidy response cache: {e:#}"),
@@ -422,7 +460,10 @@ impl Workspace {
 
     fn clear_saved_responses(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let removed = self.editor.update(cx, |editor, cx| editor.clear_responses(window, cx));
-        window.push_notification(Notification::success(t!("ws.responses_cleared", count = removed).to_string()), cx);
+        window.push_notification(
+            Notification::success(t!("ws.responses_cleared", count = removed).to_string()),
+            cx,
+        );
     }
 
     fn choose_environment(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -430,7 +471,10 @@ impl Workspace {
             return;
         };
         let root = collection.root.clone();
-        match index.filter(|ix| *ix > 0).and_then(|ix| collection.environments.get(ix - 1)) {
+        match index
+            .filter(|ix| *ix > 0)
+            .and_then(|ix| collection.environments.get(ix - 1))
+        {
             Some(env) => {
                 let path = env.path.clone();
                 self.state.active_environments.insert(root, path);
@@ -492,10 +536,19 @@ impl Workspace {
     /// Confirms, then creates `.courier/` in a folder that has no collection yet.
     fn offer_init_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
-        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         window.open_dialog(cx, move |dialog, _, _| {
             let (weak, dir) = (weak.clone(), dir.clone());
-            let message = t!("ws.init_project_message", path = dir.display(), dir = project::DOT_DIR, name = name).to_string();
+            let message = t!(
+                "ws.init_project_message",
+                path = dir.display(),
+                dir = project::DOT_DIR,
+                name = name
+            )
+            .to_string();
             dialog
                 .title(t!("ws.init_project_title").to_string())
                 .w(px(480.))
@@ -576,14 +629,20 @@ impl Workspace {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<()> + 'static,
     ) {
-        self.pick_path(false, t!("ws.import_postman_file").to_string(), window, cx, |this, file, window, cx| {
-            let result = fs::read_to_string(&file)
-                .with_context(|| format!("reading {}", file.display()))
-                .and_then(|json| apply(this, json, window, cx));
-            if let Err(e) = result {
-                notify_error(format!("{e:#}"), window, cx);
-            }
-        });
+        self.pick_path(
+            false,
+            t!("ws.import_postman_file").to_string(),
+            window,
+            cx,
+            |this, file, window, cx| {
+                let result = fs::read_to_string(&file)
+                    .with_context(|| format!("reading {}", file.display()))
+                    .and_then(|json| apply(this, json, window, cx));
+                if let Err(e) = result {
+                    notify_error(format!("{e:#}"), window, cx);
+                }
+            },
+        );
     }
 
     /// Picks a project folder without a collection, then a Postman file to create it from.
@@ -591,17 +650,29 @@ impl Workspace {
         self.pick_project_folder(window, cx, |this, dir, window, cx| {
             if let Some(existing) = project::find(&dir) {
                 notify_error(
-                    t!("ws.project_has_collection", path = project::project_dir(&existing).display()).to_string(),
+                    t!(
+                        "ws.project_has_collection",
+                        path = project::project_dir(&existing).display()
+                    )
+                    .to_string(),
                     window,
                     cx,
                 );
                 return;
             }
-            this.pick_postman_file(window, cx, move |this, json, window, cx| this.create_project_from_postman(&dir, &json, window, cx));
+            this.pick_postman_file(window, cx, move |this, json, window, cx| {
+                this.create_project_from_postman(&dir, &json, window, cx)
+            });
         });
     }
 
-    fn create_project_from_postman(&mut self, dir: &Path, json: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+    fn create_project_from_postman(
+        &mut self,
+        dir: &Path,
+        json: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let import = postman::parse_collection(json)?;
         let root = postman::write_project_collection(dir, &import)?;
         let collection = storage::load_collection(&root)?;
@@ -641,7 +712,9 @@ impl Workspace {
                 storage::save_collection_file(&root, &collection.file)?;
                 let writes = renamed
                     .iter()
-                    .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
+                    .map(|(name, value)| {
+                        SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value)
+                    })
                     .collect();
                 this.store_secrets(writes, window, cx);
             }
@@ -702,12 +775,17 @@ impl Workspace {
                 .await;
             this.update_in(cx, |this, window, cx| match store {
                 Ok(store) => {
-                    this.editor.update(cx, |editor, _| editor.set_secret_store(store.clone()));
+                    this.editor
+                        .update(cx, |editor, _| editor.set_secret_store(store.clone()));
                     this.environment_editor
                         .update(cx, |editor, cx| editor.set_store(store.clone(), window, cx));
                     this.secret_store = Some(store);
                 }
-                Err(e) => notify_error(t!("ws.secrets_unavailable", error = format!("{e:#}")).to_string(), window, cx),
+                Err(e) => notify_error(
+                    t!("ws.secrets_unavailable", error = format!("{e:#}")).to_string(),
+                    window,
+                    cx,
+                ),
             })
             .ok();
         })
@@ -720,15 +798,30 @@ impl Workspace {
             return;
         }
         let Some(store) = self.secret_store.clone() else {
-            let names = writes.iter().map(|w| w.secret.name.as_str()).collect::<Vec<_>>().join(", ");
-            notify_error(t!("ws.store_unavailable_no_value", names = names).to_string(), window, cx);
+            let names = writes
+                .iter()
+                .map(|w| w.secret.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            notify_error(
+                t!("ws.store_unavailable_no_value", names = names).to_string(),
+                window,
+                cx,
+            );
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { store.apply(&writes, &[]).await }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { store.apply(&writes, &[]).await })
+                .await;
             this.update_in(cx, |_, window, cx| {
                 if let Err(e) = result {
-                    notify_error(t!("ws.could_not_store_secrets", error = format!("{e:#}")).to_string(), window, cx);
+                    notify_error(
+                        t!("ws.could_not_store_secrets", error = format!("{e:#}")).to_string(),
+                        window,
+                        cx,
+                    );
                 }
             })
             .ok();
@@ -763,7 +856,9 @@ impl Workspace {
     /// the collection defaults when no environment is active.
     fn move_header_to_secret(&mut self, path: PathBuf, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let result = (|| -> Result<(PathBuf, String, SecretWrite)> {
-            let ix = self.collection_index_for(&path).context(t!("ws.not_in_open_collection").to_string())?;
+            let ix = self
+                .collection_index_for(&path)
+                .context(t!("ws.not_in_open_collection").to_string())?;
             let root = self.collections[ix].root.clone();
             let mut request: RequestFile = storage::read_yaml(&path)?;
             let mut file = self.collections[ix].file.clone();
@@ -779,7 +874,8 @@ impl Workspace {
                 None => (file.secrets.clone(), file.variables.clone()),
             };
             let mut secrets = reserved_names(scope_names.into_iter().chain(scope_vars.into_keys()));
-            let name = hoist_header(&mut request, index, &mut secrets).context(t!("ws.no_literal_credential").to_string())?;
+            let name =
+                hoist_header(&mut request, index, &mut secrets).context(t!("ws.no_literal_credential").to_string())?;
             let value = secrets[&name].clone();
 
             let assigned = file.ensure_id().1;
@@ -800,7 +896,11 @@ impl Workspace {
             };
             storage::write_yaml(&path, &request)?;
             let write = SecretWrite::new(&file, &scope, &scope_label, &name, value);
-            Ok((root, t!("ws.moved_to_secret", name = name, scope = scope_label).to_string(), write))
+            Ok((
+                root,
+                t!("ws.moved_to_secret", name = name, scope = scope_label).to_string(),
+                write,
+            ))
         })();
 
         match result {
@@ -839,7 +939,12 @@ impl Workspace {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme.sidebar_border)
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("ws.projects").to_string()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t!("ws.projects").to_string()),
+                    )
                     .child(
                         Button::new("sidebar-add")
                             .ghost()
@@ -851,9 +956,11 @@ impl Workspace {
                                     this.open_project(window, cx)
                                 }))
                                 .separator()
-                                .item(menu_item(t!("ws.new_collection_from_postman"), &weak, |this, window, cx| {
-                                    this.import_postman_as_new(window, cx)
-                                }))
+                                .item(menu_item(
+                                    t!("ws.new_collection_from_postman"),
+                                    &weak,
+                                    |this, window, cx| this.import_postman_as_new(window, cx),
+                                ))
                             }),
                     ),
             )
@@ -931,11 +1038,7 @@ impl Workspace {
                         .child(collection.file.name.clone()),
                 )
                 .when(!collection.errors.is_empty(), |this| {
-                    this.child(
-                        Icon::new(IconName::TriangleAlert)
-                            .xsmall()
-                            .text_color(theme.warning),
-                    )
+                    this.child(Icon::new(IconName::TriangleAlert).xsmall().text_color(theme.warning))
                 })
                 .child({
                     let root = root.clone();
@@ -986,9 +1089,13 @@ impl Workspace {
                             .hover(|s| s.bg(theme.sidebar_accent))
                             .child(chevron(collapsed))
                             .child(
-                                Icon::new(if collapsed { IconName::Folder } else { IconName::FolderOpen })
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
+                                Icon::new(if collapsed {
+                                    IconName::Folder
+                                } else {
+                                    IconName::FolderOpen
+                                })
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
                             )
                             .child(div().min_w_0().truncate().child(name.clone()))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1030,9 +1137,9 @@ impl Workspace {
                                     .child(short_method(&request.method)),
                             )
                             .child(div().min_w_0().truncate().child(request.name.clone()))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_request(path.clone(), window, cx)
-                            }))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
+                            )
                             .into_any_element(),
                     );
                 }
@@ -1044,7 +1151,9 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let active = self.active_collection(cx).map(|c| (c.file.name.clone(), c.root.clone()));
+        let active = self
+            .active_collection(cx)
+            .map(|c| (c.file.name.clone(), c.root.clone()));
         let collection_name = active.as_ref().map(|(name, _)| name.clone()).unwrap_or_default();
         let managing = self.main_view == MainView::Environments;
         let dialog_layer = Root::render_dialog_layer(window, cx);
@@ -1053,9 +1162,9 @@ impl Render for Workspace {
         h_flex()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &palette::OpenCommandPalette, window, cx| {
-                this.open_command_palette(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &palette::OpenCommandPalette, window, cx| this.open_command_palette(window, cx)),
+            )
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -1073,7 +1182,12 @@ impl Render for Workspace {
                             .justify_end()
                             .border_b_1()
                             .border_color(theme.border)
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(collection_name))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(collection_name),
+                            )
                             .child(
                                 Button::new("open-command-palette")
                                     .ghost()
@@ -1133,22 +1247,36 @@ pub(super) type RootAction = fn(&mut Workspace, PathBuf, &mut Window, &mut Conte
 fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -> PopupMenu {
     let item = |key: &str, action: RootAction| {
         let root = root.to_path_buf();
-        menu_item(t!(key), weak, move |this, window, cx| action(this, root.clone(), window, cx))
+        menu_item(t!(key), weak, move |this, window, cx| {
+            action(this, root.clone(), window, cx)
+        })
     };
     menu.item(item("ws.new_request", Workspace::new_request))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .separator()
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
         .item(item("ws.import_postman_here", Workspace::import_postman_into))
-        .item(item("ws.import_postman_environment", Workspace::import_postman_environment))
+        .item(item(
+            "ws.import_postman_environment",
+            Workspace::import_postman_environment,
+        ))
         .separator()
         .item(item("ws.show_in_file_manager", |_, root, _, cx| cx.reveal_path(&root)))
-        .item(item("ws.reload_from_disk", |this, root, window, cx| this.reload_collection(&root, window, cx)))
-        .item(item("ws.close_collection", |this, root, window, cx| this.close_collection(&root, window, cx)))
+        .item(item("ws.reload_from_disk", |this, root, window, cx| {
+            this.reload_collection(&root, window, cx)
+        }))
+        .item(item("ws.close_collection", |this, root, window, cx| {
+            this.close_collection(&root, window, cx)
+        }))
 }
 
 fn chevron(collapsed: bool) -> Icon {
-    Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall()
+    Icon::new(if collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    })
+    .xsmall()
 }
 
 fn short_method(method: &str) -> String {
@@ -1213,7 +1341,12 @@ fn liveness_from_disk(roots: &[PathBuf]) -> Liveness {
     let mut live = Liveness::default();
     for collection in roots.iter().filter_map(|root| storage::load_collection(root).ok()) {
         live.collection_ids.extend(collection.file.id.clone());
-        live.keys.extend(collection.requests().iter().map(|entry| collection.response_key(entry.path).key));
+        live.keys.extend(
+            collection
+                .requests()
+                .iter()
+                .map(|entry| collection.response_key(entry.path).key),
+        );
     }
     live
 }
@@ -1276,7 +1409,11 @@ mod tests {
         paths
     }
 
-    fn open_workspace(cx: &mut TestAppContext, paths: &AppPaths, launch: Option<Launch>) -> (Entity<Workspace>, AnyWindowHandle) {
+    fn open_workspace(
+        cx: &mut TestAppContext,
+        paths: &AppPaths,
+        launch: Option<Launch>,
+    ) -> (Entity<Workspace>, AnyWindowHandle) {
         let mut workspace = None;
         let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
             let view = cx.new(|cx| Workspace::new(paths.clone(), launch, window, cx));
@@ -1287,7 +1424,10 @@ mod tests {
     }
 
     fn launch(root: &Path) -> Option<Launch> {
-        Some(Launch { dir: project::project_dir(root).to_path_buf(), explicit: true })
+        Some(Launch {
+            dir: project::project_dir(root).to_path_buf(),
+            explicit: true,
+        })
     }
 
     fn read(path: &Path) -> String {
@@ -1423,7 +1563,9 @@ mod tests {
 
     fn stored_secret(cx: &mut TestAppContext, workspace: &Entity<Workspace>, secret: &SecretRef) -> Option<String> {
         cx.run_until_parked();
-        let store = cx.update(|cx| workspace.read(cx).secret_store.clone()).expect("store connected");
+        let store = cx
+            .update(|cx| workspace.read(cx).secret_store.clone())
+            .expect("store connected");
         futures_lite::future::block_on(store.get(secret)).unwrap()
     }
 
@@ -1437,19 +1579,36 @@ mod tests {
         fs::create_dir_all(&einvoicing).unwrap();
 
         // Started from a folder that isn't a project (e.g. $HOME): empty state, no dialog.
-        let (workspace, window) = open_workspace(cx, &paths, Some(Launch { dir: plain.clone(), explicit: false }));
+        let (workspace, window) = open_workspace(
+            cx,
+            &paths,
+            Some(Launch {
+                dir: plain.clone(),
+                explicit: false,
+            }),
+        );
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(!window.has_active_dialog(cx));
             assert!(workspace.read(cx).collections.is_empty());
             window.render_frame(cx);
-            assert!(window.try_find("empty-open-project").is_some(), "empty state offers Open project");
+            assert!(
+                window.try_find("empty-open-project").is_some(),
+                "empty state offers Open project"
+            );
         })
         .unwrap();
         assert!(!plain.join(".courier").exists());
 
         // `courier ~/Work/einvoicing` offers to create the collection; Create makes and opens it.
-        let (workspace, window) = open_workspace(cx, &paths, Some(Launch { dir: einvoicing.clone(), explicit: true }));
+        let (workspace, window) = open_workspace(
+            cx,
+            &paths,
+            Some(Launch {
+                dir: einvoicing.clone(),
+                explicit: true,
+            }),
+        );
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx), "offers to create .courier");
@@ -1463,7 +1622,11 @@ mod tests {
         cx.update(|cx| {
             let ws = workspace.read(cx);
             assert_eq!(ws.collections.len(), 1);
-            assert_eq!(ws.state.open_projects, vec![einvoicing.clone()], "remembered as a project");
+            assert_eq!(
+                ws.state.open_projects,
+                vec![einvoicing.clone()],
+                "remembered as a project"
+            );
         });
         let state = read(&paths.state_dir.join("state.yaml"));
         assert!(state.contains("einvoicing"), "{state}");
@@ -1582,9 +1745,17 @@ mod tests {
         cx.update(|cx| {
             let editor = workspace.read(cx).editor.read(cx);
             assert_eq!(editor.path(), Some(&echo));
-            assert!(editor.shown_response().is_none(), "the response must not land on Echo POST");
-            let Some(response) = editor.response_for(&get_json) else { panic!("response lost") };
-            assert!(matches!(response.outcome, crate::response_cache::Outcome::Response { status: 200, .. }));
+            assert!(
+                editor.shown_response().is_none(),
+                "the response must not land on Echo POST"
+            );
+            let Some(response) = editor.response_for(&get_json) else {
+                panic!("response lost")
+            };
+            assert!(matches!(
+                response.outcome,
+                crate::response_cache::Outcome::Response { status: 200, .. }
+            ));
         });
 
         // Switching back shows it again.
@@ -1609,8 +1780,14 @@ mod tests {
             let editor = restarted.read(cx).editor.read(cx);
             let (response, restored) = editor.shown_response().expect("restored from cache");
             assert!(restored);
-            let crate::response_cache::Outcome::Response { headers, .. } = &response.outcome else { panic!() };
-            assert!(headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("set-cookie") && v == crate::response_cache::MASK));
+            let crate::response_cache::Outcome::Response { headers, .. } = &response.outcome else {
+                panic!()
+            };
+            assert!(
+                headers
+                    .iter()
+                    .any(|(n, v)| n.eq_ignore_ascii_case("set-cookie") && v == crate::response_cache::MASK)
+            );
         })
         .unwrap();
 
@@ -1618,7 +1795,12 @@ mod tests {
         // background tidy removes; other requests keep theirs.
         let cache = ResponseCache::new(&paths.cache_dir);
         let echo_key = cx.update(|cx| restarted.read(cx).response_key(&echo).unwrap());
-        cache.save(&echo_key, &crate::response_cache::StoredResponse::from_result(&Err("x".into()), 0)).unwrap();
+        cache
+            .save(
+                &echo_key,
+                &crate::response_cache::StoredResponse::from_result(&Err("x".into()), 0),
+            )
+            .unwrap();
         fs::remove_file(&get_json).unwrap();
         let roots: Vec<_> = cx.update(|cx| restarted.read(cx).collections.iter().map(|c| c.root.clone()).collect());
         let live = liveness_from_disk(&roots);
@@ -1671,13 +1853,20 @@ mod tests {
 
         let collection_yaml = read(&root.join("collection.yaml"));
         assert!(collection_yaml.contains("secrets:\n- api_token"), "{collection_yaml}");
-        let id = storage::load_collection(&root).unwrap().file.id.expect("collection got an id");
+        let id = storage::load_collection(&root)
+            .unwrap()
+            .file
+            .id
+            .expect("collection got an id");
         let secret = SecretRef::new(&id, DEFAULTS_SCOPE, "api_token");
         assert_eq!(stored_secret(cx, &workspace, &secret).as_deref(), Some(value));
         assert_not_on_disk(tmp.path(), value);
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert!(ws.editor.read(cx).secret_names().contains(&"api_token".to_string()), "requests can use it");
+            assert!(
+                ws.editor.read(cx).secret_names().contains(&"api_token".to_string()),
+                "requests can use it"
+            );
         });
 
         // 2. A literal bearer token typed into a request header moves to a secret with one click.
@@ -1719,7 +1908,9 @@ mod tests {
                 this.reload_collection(&root, window, cx);
                 let request = this.find_request(&request_path).cloned().unwrap();
                 let key = this.response_key(&request_path);
-                this.editor.update(cx, |editor, cx| editor.load(request_path.clone(), request, key, window, cx));
+                this.editor.update(cx, |editor, cx| {
+                    editor.load(request_path.clone(), request, key, window, cx)
+                });
             });
             headers.focus_handle(cx).focus(window, cx);
             window.render_frame(cx);
@@ -1737,7 +1928,8 @@ mod tests {
         }
         let wire = wire.expect("request reached the local server");
         assert!(
-            wire.lines().any(|l| l.eq_ignore_ascii_case(&format!("authorization: Bearer {token}"))),
+            wire.lines()
+                .any(|l| l.eq_ignore_ascii_case(&format!("authorization: Bearer {token}"))),
             "real token sent:\n{wire}"
         );
     }

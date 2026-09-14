@@ -40,7 +40,9 @@ impl Request {
 
         if let Some(kind) = file.body.as_ref().map(|b| b.kind)
             && !body.is_empty()
-            && !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
         {
             let content_type = match kind {
                 BodyKind::Json => "application/json",
@@ -105,11 +107,7 @@ pub fn send(request: &Request) -> Result<Response, String> {
 
     Ok(Response {
         status: response.status().as_u16(),
-        reason: response
-            .status()
-            .canonical_reason()
-            .unwrap_or_default()
-            .to_string(),
+        reason: response.status().canonical_reason().unwrap_or_default().to_string(),
         headers: response
             .headers()
             .iter()
@@ -131,10 +129,21 @@ mod tests {
         file.method = "POST".into();
         file.url = " {{base}}/users ".into();
         file.headers = vec![
-            Header { name: "Authorization".into(), value: "Bearer {{token}}".into(), enabled: true },
-            Header { name: "X-Off".into(), value: "1".into(), enabled: false },
+            Header {
+                name: "Authorization".into(),
+                value: "Bearer {{token}}".into(),
+                enabled: true,
+            },
+            Header {
+                name: "X-Off".into(),
+                value: "1".into(),
+                enabled: false,
+            },
         ];
-        file.body = Some(Body { kind: BodyKind::Json, content: "{\"id\": \"{{id}}\"}".into() });
+        file.body = Some(Body {
+            kind: BodyKind::Json,
+            content: "{\"id\": \"{{id}}\"}".into(),
+        });
         let vars = Variables::from([
             ("base".to_string(), "https://api.test".to_string()),
             ("id".to_string(), "42".to_string()),

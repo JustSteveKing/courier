@@ -52,13 +52,29 @@ pub fn looks_sensitive_name(name: &str) -> bool {
     let parts = word_parts(name);
     let has = |word: &str| parts.iter().any(|p| p == word);
     const WORDS: &[&str] = &[
-        "token", "secret", "password", "passwd", "pwd", "passphrase", "auth", "authorization",
-        "bearer", "cookie", "session", "apikey", "credential", "credentials", "privatekey",
-        "accesskey", "signature",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "auth",
+        "authorization",
+        "bearer",
+        "cookie",
+        "session",
+        "apikey",
+        "credential",
+        "credentials",
+        "privatekey",
+        "accesskey",
+        "signature",
     ];
     const SUFFIXES: &[&str] = &["token", "secret", "password", "passwd", "apikey"];
     WORDS.iter().any(|w| has(w))
-        || parts.iter().any(|p| SUFFIXES.iter().any(|s| p.len() > s.len() && p.ends_with(s)))
+        || parts
+            .iter()
+            .any(|p| SUFFIXES.iter().any(|s| p.len() > s.len() && p.ends_with(s)))
         || (has("key") && (has("api") || has("private") || has("access") || has("secret")))
 }
 
@@ -95,12 +111,24 @@ fn plan_header(header: &Header) -> Option<HeaderPlan> {
                         }
                         _ => other,
                     };
-                    Some(HeaderPlan { prefix: format!("{scheme} "), value: rest.into(), base_name: base_name.into() })
+                    Some(HeaderPlan {
+                        prefix: format!("{scheme} "),
+                        value: rest.into(),
+                        base_name: base_name.into(),
+                    })
                 }
-                _ => Some(HeaderPlan { prefix: String::new(), value: value.into(), base_name: other.into() }),
+                _ => Some(HeaderPlan {
+                    prefix: String::new(),
+                    value: value.into(),
+                    base_name: other.into(),
+                }),
             }
         }
-        "cookie" => Some(HeaderPlan { prefix: String::new(), value: value.into(), base_name: "cookie".into() }),
+        "cookie" => Some(HeaderPlan {
+            prefix: String::new(),
+            value: value.into(),
+            base_name: "cookie".into(),
+        }),
         _ if is_sensitive_header(&header.name) => Some(HeaderPlan {
             prefix: String::new(),
             value: value.into(),
@@ -141,8 +169,17 @@ fn hoist_header_inner(
     Some((name, is_new))
 }
 
-const SENSITIVE_QUERY_PARAMS: &[&str] =
-    &["api_key", "apikey", "api-key", "key", "access_token", "token", "client_secret", "signature", "sig"];
+const SENSITIVE_QUERY_PARAMS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "api-key",
+    "key",
+    "access_token",
+    "token",
+    "client_secret",
+    "signature",
+    "sig",
+];
 
 fn hoist_query(request: &mut RequestFile, secrets: &mut Variables, is_reserved: &dyn Fn(&str) -> bool) -> Vec<String> {
     let url = request.url.clone();
@@ -255,19 +292,49 @@ mod tests {
     }
 
     fn value<'a>(request: &'a RequestFile, name: &str) -> &'a str {
-        &request.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).unwrap().value
+        &request
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .unwrap()
+            .value
     }
 
     #[test]
     fn sensitive_names() {
         for name in [
-            "token", "api_token", "apiKey", "api-key", "API_KEY", "apikey", "client_secret", "password",
-            "db_passwd", "auth", "AuthToken", "bearer", "session_id", "cookie", "private_key", "accessKey",
-            "refreshtoken", "X-Auth-Token",
+            "token",
+            "api_token",
+            "apiKey",
+            "api-key",
+            "API_KEY",
+            "apikey",
+            "client_secret",
+            "password",
+            "db_passwd",
+            "auth",
+            "AuthToken",
+            "bearer",
+            "session_id",
+            "cookie",
+            "private_key",
+            "accessKey",
+            "refreshtoken",
+            "X-Auth-Token",
         ] {
             assert!(looks_sensitive_name(name), "{name} should be sensitive");
         }
-        for name in ["base_url", "author_id", "Content-Type", "Accept", "User-Agent", "sort_key", "keyword", "tokenizer_mode", "page"] {
+        for name in [
+            "base_url",
+            "author_id",
+            "Content-Type",
+            "Accept",
+            "User-Agent",
+            "sort_key",
+            "keyword",
+            "tokenizer_mode",
+            "page",
+        ] {
             assert!(!looks_sensitive_name(name), "{name} should not be sensitive");
         }
     }
@@ -290,7 +357,10 @@ mod tests {
         assert_eq!(value(&request, "authorization"), "Bearer {{bearer_token}}");
         assert_eq!(value(&request, "Cookie"), "{{cookie}}");
         assert_eq!(value(&request, "x-api-key"), "{{api_key}}");
-        assert_eq!(request.url, "https://api.example.com/v1/users?page=2&api_key={{api_key_2}}");
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/users?page=2&api_key={{api_key_2}}"
+        );
         assert_eq!(value(&request, "accept"), "application/json, text/plain, */*");
         assert_eq!(value(&request, "content-type"), "application/json");
         assert_eq!(value(&request, "user-agent"), "Mozilla/5.0 (X11; Linux x86_64)");
@@ -307,7 +377,10 @@ mod tests {
         let mut b = request_with(vec![header("Authorization", "Bearer same")], "");
         let mut c = request_with(vec![header("Authorization", "Bearer other")], "");
         assert_eq!(hoist_credentials(&mut a, &mut secrets), ["bearer_token"]);
-        assert!(hoist_credentials(&mut b, &mut secrets).is_empty(), "identical value reuses the name");
+        assert!(
+            hoist_credentials(&mut b, &mut secrets).is_empty(),
+            "identical value reuses the name"
+        );
         assert_eq!(value(&b, "Authorization"), "Bearer {{bearer_token}}");
         assert_eq!(hoist_credentials(&mut c, &mut secrets), ["bearer_token_2"]);
         assert_eq!(secrets.len(), 2);
@@ -329,7 +402,10 @@ mod tests {
         assert_eq!(request.headers[0].value, "Basic {{basic_auth}}");
         assert_eq!(request.headers[1].value, "Token {{proxy_authorization}}");
         assert_eq!(request.headers[2].value, "{{authorization}}");
-        assert_eq!(request.headers[3].value, "Basic e3t1c2VyfX06e3twYXNzfX0=", "templated basic auth left alone");
+        assert_eq!(
+            request.headers[3].value, "Basic e3t1c2VyfX06e3twYXNzfX0=",
+            "templated basic auth left alone"
+        );
         assert_eq!(secrets["basic_auth"], "YWRtaW46c2VjcmV0");
     }
 
@@ -361,7 +437,10 @@ mod tests {
         let mut request = request_with(vec![], "https://x.test/p?a=1&Access_Token=a%2Fb&z=2#frag");
         let mut secrets = Variables::new();
         assert_eq!(hoist_credentials(&mut request, &mut secrets), ["access_token"]);
-        assert_eq!(request.url, "https://x.test/p?a=1&Access_Token={{access_token}}&z=2#frag");
+        assert_eq!(
+            request.url,
+            "https://x.test/p?a=1&Access_Token={{access_token}}&z=2#frag"
+        );
         assert_eq!(secrets["access_token"], "a%2Fb");
     }
 

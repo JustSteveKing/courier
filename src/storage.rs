@@ -7,10 +7,8 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::model::{COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, RequestFile, slugify};
 use crate::response_cache::{CacheKey, cache_key};
-use crate::model::{
-    COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, RequestFile, slugify,
-};
 
 #[derive(Clone, Debug)]
 pub struct Collection {
@@ -24,8 +22,15 @@ pub struct Collection {
 
 #[derive(Clone, Debug)]
 pub enum Item {
-    Folder { name: String, path: PathBuf, children: Vec<Item> },
-    Request { path: PathBuf, request: RequestFile },
+    Folder {
+        name: String,
+        path: PathBuf,
+        children: Vec<Item>,
+    },
+    Request {
+        path: PathBuf,
+        request: RequestFile,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -52,9 +57,11 @@ impl Collection {
                         walk(children, folders, out);
                         folders.pop();
                     }
-                    Item::Request { path, request } => {
-                        out.push(RequestEntry { folders: folders.clone(), path, request })
-                    }
+                    Item::Request { path, request } => out.push(RequestEntry {
+                        folders: folders.clone(),
+                        path,
+                        request,
+                    }),
                 }
             }
         }
@@ -64,7 +71,10 @@ impl Collection {
     }
 
     pub fn find_request(&self, path: &Path) -> Option<&RequestFile> {
-        self.requests().into_iter().find(|entry| entry.path == path).map(|entry| entry.request)
+        self.requests()
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.request)
     }
 
     pub fn first_request(&self) -> Option<PathBuf> {
@@ -116,7 +126,13 @@ pub fn load_collection(root: &Path) -> Result<Collection> {
     environments.sort_by_key(|e| e.file.name.to_lowercase());
 
     let items = load_items(root, true, &mut errors);
-    Ok(Collection { root: root.to_path_buf(), file, items, environments, errors })
+    Ok(Collection {
+        root: root.to_path_buf(),
+        file,
+        items,
+        environments,
+        errors,
+    })
 }
 
 fn load_items(dir: &Path, is_root: bool, errors: &mut Vec<(PathBuf, String)>) -> Vec<Item> {
@@ -136,7 +152,11 @@ fn load_items(dir: &Path, is_root: bool, errors: &mut Vec<(PathBuf, String)>) ->
                 continue;
             }
             let children = load_items(&path, false, errors);
-            folders.push(Item::Folder { name: file_name, path, children });
+            folders.push(Item::Folder {
+                name: file_name,
+                path,
+                children,
+            });
         } else if is_yaml(&path) && !(is_root && file_name == COLLECTION_FILE) {
             match read_yaml::<RequestFile>(&path) {
                 Ok(request) => requests.push(Item::Request { path, request }),
@@ -167,7 +187,11 @@ fn yaml_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_yaml(p)).collect()
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_yaml(p))
+        .collect()
 }
 
 /// Returns `dir/<slug>.yaml`, or `dir/<slug>-2.yaml` and so on if taken.

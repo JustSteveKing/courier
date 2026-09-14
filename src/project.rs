@@ -39,7 +39,10 @@ pub fn find(start: &Path) -> Option<PathBuf> {
     if start.file_name().is_some_and(|n| n == DOT_DIR) && storage::is_collection(start) {
         return Some(start.to_path_buf());
     }
-    start.ancestors().map(collection_dir).find(|dir| storage::is_collection(dir))
+    start
+        .ancestors()
+        .map(collection_dir)
+        .find(|dir| storage::is_collection(dir))
 }
 
 /// Creates `project/.courier/collection.yaml`, named after the project folder.
@@ -83,11 +86,19 @@ mod tests {
         assert_eq!(find(&project), None);
         let root = init(&project).unwrap();
         assert_eq!(root, project.join(".courier"));
-        assert!(fs::read_to_string(root.join("collection.yaml")).unwrap().contains("name: einvoicing"));
+        assert!(
+            fs::read_to_string(root.join("collection.yaml"))
+                .unwrap()
+                .contains("name: einvoicing")
+        );
 
         assert_eq!(find(&project).as_deref(), Some(root.as_path()));
         assert_eq!(find(&nested).as_deref(), Some(root.as_path()), "found from a subfolder");
-        assert_eq!(find(&root).as_deref(), Some(root.as_path()), "or from the dot directory itself");
+        assert_eq!(
+            find(&root).as_deref(),
+            Some(root.as_path()),
+            "or from the dot directory itself"
+        );
         assert_eq!(project_dir(&root), project);
         assert!(init(&project).is_err(), "never overwrites an existing collection");
         assert!(init(&tmp.path().join("missing")).is_err());

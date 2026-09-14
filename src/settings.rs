@@ -25,7 +25,11 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { language: None, follow_omarchy_theme: true, remember_responses: true }
+        Self {
+            language: None,
+            follow_omarchy_theme: true,
+            remember_responses: true,
+        }
     }
 }
 

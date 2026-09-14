@@ -82,14 +82,19 @@ impl Parsed {
         match flag {
             Short('X') | Long("request") => self.method = Some(value.to_uppercase()),
             Short('H') | Long("header") => self.add_header_line(&value),
-            Short('d') | Long("data" | "data-raw" | "data-binary" | "data-ascii") => {
-                self.data.push(value)
-            }
+            Short('d') | Long("data" | "data-raw" | "data-binary" | "data-ascii") => self.data.push(value),
             Long("data-urlencode") => self.data.push(urlencode_data(&value)),
             Long("json") => self.json.get_or_insert_with(String::new).push_str(&value),
             Short('u') | Long("user") => {
-                let credentials = if value.contains(':') { value } else { format!("{value}:") };
-                self.set_header("Authorization", format!("Basic {}", base64_encode(credentials.as_bytes())));
+                let credentials = if value.contains(':') {
+                    value
+                } else {
+                    format!("{value}:")
+                };
+                self.set_header(
+                    "Authorization",
+                    format!("Basic {}", base64_encode(credentials.as_bytes())),
+                );
             }
             Long("oauth2-bearer") => self.set_header("Authorization", format!("Bearer {value}")),
             Short('A') | Long("user-agent") => self.set_header("User-Agent", value),
@@ -204,24 +209,96 @@ fn header(name: &str, value: &str) -> Header {
 fn short_takes_value(c: char) -> bool {
     matches!(
         c,
-        'X' | 'H' | 'd' | 'u' | 'A' | 'e' | 'b' | 'o' | 'F' | 'T' | 'w' | 'm' | 'x' | 'E' | 'r'
-            | 'z' | 'K' | 'c' | 'D' | 'C' | 'y' | 'Y' | 'U' | 'Q' | 't'
+        'X' | 'H'
+            | 'd'
+            | 'u'
+            | 'A'
+            | 'e'
+            | 'b'
+            | 'o'
+            | 'F'
+            | 'T'
+            | 'w'
+            | 'm'
+            | 'x'
+            | 'E'
+            | 'r'
+            | 'z'
+            | 'K'
+            | 'c'
+            | 'D'
+            | 'C'
+            | 'y'
+            | 'Y'
+            | 'U'
+            | 'Q'
+            | 't'
     )
 }
 
 fn long_takes_value(name: &str) -> bool {
     matches!(
         name,
-        "request" | "header" | "data" | "data-raw" | "data-binary" | "data-ascii"
-            | "data-urlencode" | "json" | "user" | "user-agent" | "referer" | "cookie" | "url"
-            | "oauth2-bearer" | "output" | "form" | "form-string" | "upload-file" | "write-out"
-            | "max-time" | "connect-timeout" | "proxy" | "proxy-user" | "cert" | "key" | "cacert"
-            | "capath" | "range" | "cookie-jar" | "dump-header" | "config" | "retry"
-            | "retry-delay" | "retry-max-time" | "resolve" | "connect-to" | "interface"
-            | "limit-rate" | "time-cond" | "max-redirs" | "max-filesize" | "quote" | "telnet-option"
-            | "cert-type" | "key-type" | "pass" | "ciphers" | "aws-sigv4" | "variable" | "expand-url"
-            | "unix-socket" | "abstract-unix-socket" | "local-port" | "dns-servers" | "noproxy"
-            | "request-target" | "header-file" | "trace" | "trace-ascii" | "stderr"
+        "request"
+            | "header"
+            | "data"
+            | "data-raw"
+            | "data-binary"
+            | "data-ascii"
+            | "data-urlencode"
+            | "json"
+            | "user"
+            | "user-agent"
+            | "referer"
+            | "cookie"
+            | "url"
+            | "oauth2-bearer"
+            | "output"
+            | "form"
+            | "form-string"
+            | "upload-file"
+            | "write-out"
+            | "max-time"
+            | "connect-timeout"
+            | "proxy"
+            | "proxy-user"
+            | "cert"
+            | "key"
+            | "cacert"
+            | "capath"
+            | "range"
+            | "cookie-jar"
+            | "dump-header"
+            | "config"
+            | "retry"
+            | "retry-delay"
+            | "retry-max-time"
+            | "resolve"
+            | "connect-to"
+            | "interface"
+            | "limit-rate"
+            | "time-cond"
+            | "max-redirs"
+            | "max-filesize"
+            | "quote"
+            | "telnet-option"
+            | "cert-type"
+            | "key-type"
+            | "pass"
+            | "ciphers"
+            | "aws-sigv4"
+            | "variable"
+            | "expand-url"
+            | "unix-socket"
+            | "abstract-unix-socket"
+            | "local-port"
+            | "dns-servers"
+            | "noproxy"
+            | "request-target"
+            | "header-file"
+            | "trace"
+            | "trace-ascii"
+            | "stderr"
     )
 }
 
@@ -254,9 +331,8 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
     let mut in_token = false;
     let mut i = 0;
 
-    let is_newline_at = |i: usize| {
-        chars.get(i) == Some(&'\n') || (chars.get(i) == Some(&'\r') && chars.get(i + 1) == Some(&'\n'))
-    };
+    let is_newline_at =
+        |i: usize| chars.get(i) == Some(&'\n') || (chars.get(i) == Some(&'\r') && chars.get(i + 1) == Some(&'\n'));
     let newline_len = |i: usize| if chars.get(i) == Some(&'\r') { 2 } else { 1 };
 
     while i < chars.len() {
@@ -341,8 +417,16 @@ fn ansi_c_quoted(chars: &[char], mut i: usize, out: &mut String) -> Result<usize
                     'e' | 'E' => out.push('\u{1b}'),
                     '0' => out.push('\0'),
                     'x' | 'u' | 'U' => {
-                        let max = match escape { 'x' => 2, 'u' => 4, _ => 8 };
-                        let len = chars[i..].iter().take(max).take_while(|c| c.is_ascii_hexdigit()).count();
+                        let max = match escape {
+                            'x' => 2,
+                            'u' => 4,
+                            _ => 8,
+                        };
+                        let len = chars[i..]
+                            .iter()
+                            .take(max)
+                            .take_while(|c| c.is_ascii_hexdigit())
+                            .count();
                         match hex(&chars[i..i + len]).and_then(char::from_u32) {
                             Some(c) if len > 0 => out.push(c),
                             _ => {
@@ -372,7 +456,11 @@ mod tests {
     use super::*;
 
     fn header_value<'a>(request: &'a RequestFile, name: &str) -> Option<&'a str> {
-        request.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
+        request
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .map(|h| h.value.as_str())
     }
 
     #[test]
@@ -393,7 +481,10 @@ mod tests {
         assert_eq!(request.url, "https://api.example.com/v1/users?page=2");
         assert_eq!(request.name, "POST /v1/users");
         assert_eq!(header_value(&request, "Cookie"), Some("session=abc123; theme=dark"));
-        assert_eq!(header_value(&request, "sec-ch-ua"), Some(r#""Chromium";v="128", "Not;A=Brand";v="24""#));
+        assert_eq!(
+            header_value(&request, "sec-ch-ua"),
+            Some(r#""Chromium";v="128", "Not;A=Brand";v="24""#)
+        );
         assert_eq!(request.headers.len(), 8);
         let body = request.body.unwrap();
         assert_eq!(body.kind, BodyKind::Json);
@@ -450,8 +541,18 @@ mod tests {
 
     #[test]
     fn rejects_non_curl_and_missing_url() {
-        assert!(parse("wget https://x.test").unwrap_err().to_string().contains("Not a curl command"));
-        assert!(parse("curl -H 'Accept: */*'").unwrap_err().to_string().contains("no URL"));
+        assert!(
+            parse("wget https://x.test")
+                .unwrap_err()
+                .to_string()
+                .contains("Not a curl command")
+        );
+        assert!(
+            parse("curl -H 'Accept: */*'")
+                .unwrap_err()
+                .to_string()
+                .contains("no URL")
+        );
         assert!(parse("curl 'https://x.test").is_err());
     }
 

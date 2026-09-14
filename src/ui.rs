@@ -29,7 +29,9 @@ pub fn code_editor(state: &Entity<EditorState>) -> Editor {
 
 /// A read-only code editor, e.g. for responses.
 pub fn readonly_editor(state: &Entity<EditorState>) -> Editor {
-    Editor::new(state).readonly(true).context_menu(edit_menu(EditMenu::ReadOnly))
+    Editor::new(state)
+        .readonly(true)
+        .context_menu(edit_menu(EditMenu::ReadOnly))
 }
 
 pub fn textarea(state: &Entity<TextareaState>) -> Textarea {
@@ -78,7 +80,6 @@ fn edit_menu(kind: EditMenu) -> impl Fn(NativeMenu, &mut Window, &mut App) -> Na
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -111,6 +112,10 @@ mod tests {
                 }
             }
         }
-        assert!(offenders.is_empty(), "use crate::ui constructors:\n{}", offenders.join("\n"));
+        assert!(
+            offenders.is_empty(),
+            "use crate::ui constructors:\n{}",
+            offenders.join("\n")
+        );
     }
 }

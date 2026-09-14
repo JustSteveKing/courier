@@ -40,12 +40,18 @@ pub struct SecretRef {
 
 impl SecretRef {
     pub fn new(collection_id: impl Into<String>, scope: impl Into<String>, name: impl Into<String>) -> Self {
-        Self { collection_id: collection_id.into(), scope: scope.into(), name: name.into() }
+        Self {
+            collection_id: collection_id.into(),
+            scope: scope.into(),
+            name: name.into(),
+        }
     }
 
     /// Scope for an environment file: its file stem, which stays fixed when renamed.
     pub fn environment_scope(path: &Path) -> String {
-        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     fn attributes(&self) -> [(&'static str, &str); 4] {
@@ -156,7 +162,11 @@ impl SecretStore {
         self.ensure_unlocked().await?;
         let attributes = secret.attributes();
         match &*self.0 {
-            Backend::Keyring(keyring) => keyring.create_item(label, &attributes, Secret::text(value), true).await?,
+            Backend::Keyring(keyring) => {
+                keyring
+                    .create_item(label, &attributes, Secret::text(value), true)
+                    .await?
+            }
             Backend::File(file) => {
                 file.create_item(label, &attributes, Secret::text(value), true).await?;
             }
@@ -219,7 +229,13 @@ pub struct SecretWrite {
 
 impl SecretWrite {
     /// A write for `name` in a scope of `collection`, whose id must already be assigned.
-    pub fn new(collection: &CollectionFile, scope: &str, scope_label: &str, name: &str, value: impl Into<String>) -> Self {
+    pub fn new(
+        collection: &CollectionFile,
+        scope: &str,
+        scope_label: &str,
+        name: &str,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             secret: SecretRef::new(collection.id.clone().unwrap_or_default(), scope, name),
             label: label(&collection.name, scope_label, name),
@@ -260,7 +276,9 @@ pub fn layer(collection: &CollectionFile, environment: Option<(&Path, &Environme
         }
         for name in &env.secrets {
             layered.variables.shift_remove(name);
-            layered.secrets.insert(name.clone(), SecretRef::new(&collection_id, &scope, name));
+            layered
+                .secrets
+                .insert(name.clone(), SecretRef::new(&collection_id, &scope, name));
         }
     }
     layered
@@ -269,7 +287,10 @@ pub fn layer(collection: &CollectionFile, environment: Option<(&Path, &Environme
 fn load_or_create_key(path: &Path) -> Result<Vec<u8>> {
     match fs::read(path) {
         Ok(key) if key.len() == KEY_LEN => return Ok(key),
-        Ok(_) => bail!("{} is not a valid secret store key; refusing to overwrite it", path.display()),
+        Ok(_) => bail!(
+            "{} is not a valid secret store key; refusing to overwrite it",
+            path.display()
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -317,7 +338,10 @@ mod tests {
             assert_eq!(reopened.get(&other_scope).await.unwrap(), None);
 
             let keyring = fs::read(paths.data_dir.join("secrets.keyring")).unwrap();
-            assert!(!keyring.windows(15).any(|w| w == b"sk_live_rotated"), "value must be encrypted");
+            assert!(
+                !keyring.windows(15).any(|w| w == b"sk_live_rotated"),
+                "value must be encrypted"
+            );
             let key_path = paths.state_dir.join("secret-store.key");
             assert_eq!(fs::metadata(&key_path).unwrap().permissions().mode() & 0o777, 0o600);
 
@@ -332,7 +356,12 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let paths = AppPaths::under(tmp.path());
             let token = SecretRef::new("c1", DEFAULTS_SCOPE, "token");
-            SecretStore::open_file(&paths).await.unwrap().set(&token, "label", "abc").await.unwrap();
+            SecretStore::open_file(&paths)
+                .await
+                .unwrap()
+                .set(&token, "label", "abc")
+                .await
+                .unwrap();
 
             // Copying the secrets file to a machine with a different key must not reveal it.
             fs::remove_file(paths.state_dir.join("secret-store.key")).unwrap();
@@ -360,10 +389,19 @@ mod tests {
 
         let layered = layer(&collection, Some((path, &env)));
         assert_eq!(layered.variables["base_url"], "http://localhost");
-        assert_eq!(layered.variables["api_key"], "local-dev-key", "env variable replaces default secret");
-        assert!(!layered.variables.contains_key("token"), "env secret replaces default variable");
+        assert_eq!(
+            layered.variables["api_key"], "local-dev-key",
+            "env variable replaces default secret"
+        );
+        assert!(
+            !layered.variables.contains_key("token"),
+            "env secret replaces default variable"
+        );
         assert_eq!(layered.secrets["token"], SecretRef::new("c1", "local", "token"));
-        assert_eq!(layered.secrets["client_secret"], SecretRef::new("c1", DEFAULTS_SCOPE, "client_secret"));
+        assert_eq!(
+            layered.secrets["client_secret"],
+            SecretRef::new("c1", DEFAULTS_SCOPE, "client_secret")
+        );
         assert!(!layered.secrets.contains_key("api_key"));
 
         let defaults_only = layer(&collection, None);
@@ -379,7 +417,10 @@ mod tests {
             let store = SecretStore::open(&AppPaths::under(tmp.path())).await.unwrap();
             assert_eq!(store.kind(), BackendKind::Keyring);
             let secret = SecretRef::new("test-collection", DEFAULTS_SCOPE, "round_trip");
-            store.set(&secret, &label("Test", "Defaults", "round_trip"), "hello").await.unwrap();
+            store
+                .set(&secret, &label("Test", "Defaults", "round_trip"), "hello")
+                .await
+                .unwrap();
             assert_eq!(store.get(&secret).await.unwrap().as_deref(), Some("hello"));
             store.delete(&secret).await.unwrap();
             assert_eq!(store.get(&secret).await.unwrap(), None);

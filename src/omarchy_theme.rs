@@ -64,7 +64,11 @@ impl Rgb {
     pub fn luminance(self) -> f32 {
         let linear = |c: u8| {
             let c = c as f32 / 255.0;
-            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * linear(self.0) + 0.7152 * linear(self.1) + 0.0722 * linear(self.2)
     }
@@ -186,7 +190,12 @@ impl Palette {
             dark_foreground: c(&raw.dark_foreground)?,
             light_foreground: c(&raw.light_foreground)?,
             bright_foreground: c(&raw.bright_foreground)?,
-            orange: raw.orange.as_deref().map(Rgb::parse).transpose()?.unwrap_or_else(|| red.mix(yellow, 0.5)),
+            orange: raw
+                .orange
+                .as_deref()
+                .map(Rgb::parse)
+                .transpose()?
+                .unwrap_or_else(|| red.mix(yellow, 0.5)),
             bright_red: bright(&raw.bright_red, red)?,
             bright_yellow: bright(&raw.bright_yellow, yellow)?,
             bright_green: bright(&raw.bright_green, green)?,
@@ -222,7 +231,15 @@ impl Palette {
 
     /// Text on a filled `fill` colour (buttons, badges).
     fn text_on(&self, fill: Rgb) -> Rgb {
-        most_legible(fill, &[self.darker_background, self.bright_foreground, Rgb(0, 0, 0), Rgb(255, 255, 255)])
+        most_legible(
+            fill,
+            &[
+                self.darker_background,
+                self.bright_foreground,
+                Rgb(0, 0, 0),
+                Rgb(255, 255, 255),
+            ],
+        )
     }
 
     /// Hover and pressed shades of a fill, moving toward the foreground.
@@ -260,7 +277,10 @@ impl Palette {
             ("window.border", border.hex()),
             ("ring", p.accent.hex()),
             ("caret", p.accent.hex()),
-            ("selection.background", p.selection.alpha(if p.dark { 0.85 } else { 0.6 })),
+            (
+                "selection.background",
+                p.selection.alpha(if p.dark { 0.85 } else { 0.6 }),
+            ),
             ("link", p.accent.hex()),
             ("link.hover", p.accent.mix(p.foreground, 0.2).hex()),
             ("link.active", p.accent.mix(p.foreground, 0.3).hex()),
@@ -269,7 +289,10 @@ impl Palette {
             ("accent.foreground", p.bright_foreground.hex()),
             ("muted.background", raised.hex()),
             ("muted.foreground", secondary_text.hex()),
-            ("popover.background", if p.dark { p.dark_background } else { p.background }.hex()),
+            (
+                "popover.background",
+                if p.dark { p.dark_background } else { p.background }.hex(),
+            ),
             ("popover.foreground", p.foreground.hex()),
             ("overlay", p.darker_background.alpha(0.6)),
             ("secondary.background", raised.hex()),
@@ -406,7 +429,10 @@ impl Palette {
         let mut highlight: serde_json::Map<String, Value> = [
             ("editor.background", p.background.hex()),
             ("editor.foreground", p.foreground.hex()),
-            ("editor.active_line.background", raised.alpha(if p.dark { 0.55 } else { 0.7 })),
+            (
+                "editor.active_line.background",
+                raised.alpha(if p.dark { 0.55 } else { 0.7 }),
+            ),
             ("editor.line_number", p.muted.hex()),
             ("editor.active_line_number", p.foreground.hex()),
             ("editor.invisible", p.muted.alpha(0.45)),
@@ -414,7 +440,13 @@ impl Palette {
         .into_iter()
         .map(|(k, v)| (k.to_string(), json!(v)))
         .collect();
-        for (status, color) in [("error", p.red), ("warning", p.yellow), ("info", p.blue), ("success", p.green), ("hint", p.magenta)] {
+        for (status, color) in [
+            ("error", p.red),
+            ("warning", p.yellow),
+            ("info", p.blue),
+            ("success", p.green),
+            ("hint", p.magenta),
+        ] {
             highlight.insert(status.into(), json!(color.hex()));
             highlight.insert(format!("{status}.background"), json!(color.alpha(0.15)));
             highlight.insert(format!("{status}.border"), json!(color.hex()));
@@ -461,7 +493,10 @@ pub fn theme_dir() -> Option<PathBuf> {
 
 /// The desktop monospace font, resolved the way `omarchy font current` does.
 pub fn desktop_font() -> Option<String> {
-    let output = Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output().ok()?;
+    let output = Command::new("fc-match")
+        .args(["monospace", "-f", "%{family}"])
+        .output()
+        .ok()?;
     let family = String::from_utf8(output.stdout).ok()?;
     let family = family.lines().next()?.split(',').next()?.trim().to_string();
     (!family.is_empty()).then_some(family)
@@ -508,7 +543,10 @@ pub fn apply(dir: Option<&Path>, cx: &mut App) -> Result<String, String> {
 
 fn restore_defaults(cx: &mut App) {
     let registry = ThemeRegistry::global(cx);
-    let (light, dark) = (registry.default_light_theme().clone(), registry.default_dark_theme().clone());
+    let (light, dark) = (
+        registry.default_light_theme().clone(),
+        registry.default_dark_theme().clone(),
+    );
     let theme = Theme::global_mut(cx);
     theme.light_theme = light;
     theme.dark_theme = dark;
@@ -524,7 +562,10 @@ fn restore_defaults(cx: &mut App) {
 
 /// Watches the directories whose changes mean the theme or font changed. Events arrive on
 /// the returned channel; the watcher stops when it is dropped.
-pub fn watch(theme_dir: &Path, font_config_dir: Option<&Path>) -> Result<(notify::RecommendedWatcher, async_channel::Receiver<()>)> {
+pub fn watch(
+    theme_dir: &Path,
+    font_config_dir: Option<&Path>,
+) -> Result<(notify::RecommendedWatcher, async_channel::Receiver<()>)> {
     let (tx, rx) = async_channel::unbounded();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if event.is_ok_and(|e| !matches!(e.kind, notify::EventKind::Access(_))) {
@@ -668,9 +709,17 @@ bright_red = "#ef8168"
     #[test]
     fn installed_omarchy_themes_map_cleanly() {
         let mut dirs = Vec::new();
-        for root in ["/usr/share/omarchy/themes".into(), std::env::var("HOME").unwrap_or_default() + "/.config/omarchy/themes"] {
+        for root in [
+            "/usr/share/omarchy/themes".into(),
+            std::env::var("HOME").unwrap_or_default() + "/.config/omarchy/themes",
+        ] {
             if let Ok(entries) = fs::read_dir(&root) {
-                dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.join("colors.toml").is_file()));
+                dirs.extend(
+                    entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.join("colors.toml").is_file()),
+                );
             }
         }
         if dirs.is_empty() {
@@ -682,13 +731,36 @@ bright_red = "#ef8168"
             let palette = Palette::load(&dir).unwrap_or_else(|e| panic!("{name}: {e:#}"));
             let value = palette.theme_config(None);
             let colors = &value["colors"];
-            let get = |key: &str| colors[key].as_str().unwrap_or_else(|| panic!("{name}: missing {key}")).to_string();
+            let get = |key: &str| {
+                colors[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name}: missing {key}"))
+                    .to_string()
+            };
             serde_json::from_value::<ThemeConfig>(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
 
-            assert_legible(&name, "primary button text", &get("primary.foreground"), &get("primary.background"), 3.0);
-            assert_legible(&name, "secondary text", &get("muted.foreground"), &get("background"), 3.0);
+            assert_legible(
+                &name,
+                "primary button text",
+                &get("primary.foreground"),
+                &get("primary.background"),
+                3.0,
+            );
+            assert_legible(
+                &name,
+                "secondary text",
+                &get("muted.foreground"),
+                &get("background"),
+                3.0,
+            );
             for status in ["danger", "warning", "success", "info"] {
-                assert_legible(&name, status, &get(&format!("{status}.background")), &get("background"), 3.0);
+                assert_legible(
+                    &name,
+                    status,
+                    &get(&format!("{status}.background")),
+                    &get("background"),
+                    3.0,
+                );
             }
         }
     }
@@ -706,13 +778,22 @@ bright_red = "#ef8168"
             assert_eq!(apply(Some(&theme), cx).as_deref(), Ok("gatepunk"));
             let applied = Theme::global(cx);
             assert!(applied.is_dark());
-            assert_eq!(applied.background, gpui_kit::component::try_parse_color("#0c1c18").unwrap());
-            assert_eq!(applied.sidebar, gpui_kit::component::try_parse_color("#081310").unwrap());
+            assert_eq!(
+                applied.background,
+                gpui_kit::component::try_parse_color("#0c1c18").unwrap()
+            );
+            assert_eq!(
+                applied.sidebar,
+                gpui_kit::component::try_parse_color("#081310").unwrap()
+            );
 
             // A broken theme falls back to the defaults instead of half-applying.
             fs::write(theme.join("colors.toml"), "mode = 'dark'").unwrap();
             assert!(apply(Some(&theme), cx).is_err());
-            assert_ne!(Theme::global(cx).sidebar, gpui_kit::component::try_parse_color("#081310").unwrap());
+            assert_ne!(
+                Theme::global(cx).sidebar,
+                gpui_kit::component::try_parse_color("#081310").unwrap()
+            );
         });
     }
 

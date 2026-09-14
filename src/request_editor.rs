@@ -14,13 +14,13 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::credentials::is_literal_credential;
-use crate::ui::{code_editor, readonly_editor, text_input};
 use crate::http::{self, Request};
 use crate::model::{Body, BodyKind, RequestFile, Variables, headers_from_text, headers_to_text};
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
 use crate::settings::AppSettings;
 use crate::storage::write_yaml;
+use crate::ui::{code_editor, readonly_editor, text_input};
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 const CONTEXT: &str = "RequestEditor";
@@ -41,7 +41,10 @@ pub enum RequestEditorEvent {
     Saved(PathBuf),
     /// The user asked to move the literal credential in header `index` into a secret.
     /// The request has already been saved.
-    MoveHeaderToSecret { path: PathBuf, index: usize },
+    MoveHeaderToSecret {
+        path: PathBuf,
+        index: usize,
+    },
     Error(String),
 }
 
@@ -117,7 +120,12 @@ impl RequestEditor {
     pub fn new(response_cache: ResponseCache, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.name_placeholder").to_string()));
         let method = cx.new(|cx| {
-            SelectState::new(SearchableVec::new(METHODS.to_vec()), Some(IndexPath::default()), window, cx)
+            SelectState::new(
+                SearchableVec::new(METHODS.to_vec()),
+                Some(IndexPath::default()),
+                window,
+                cx,
+            )
         });
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("{{base_url}}/path"));
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
@@ -188,8 +196,9 @@ impl RequestEditor {
     /// Re-applies strings set at construction after the interface language changes. Strings
     /// built during render update on their own.
     pub fn relocalize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.name
-            .update(cx, |s, cx| s.set_placeholder(t!("request.name_placeholder").to_string(), window, cx));
+        self.name.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.name_placeholder").to_string(), window, cx)
+        });
         cx.notify();
     }
 
@@ -230,13 +239,18 @@ impl RequestEditor {
         let (body, headers) = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, body, .. }) => (
                 http::pretty_body(body),
-                headers.iter().map(|(n, v)| format!("{n}: {v}")).collect::<Vec<_>>().join("\n"),
+                headers
+                    .iter()
+                    .map(|(n, v)| format!("{n}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             ),
             Some(Outcome::Error { message }) => (message.clone(), String::new()),
             None => (String::new(), String::new()),
         };
         self.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
-        self.response_headers.update(cx, |s, cx| s.set_value(headers, window, cx));
+        self.response_headers
+            .update(cx, |s, cx| s.set_value(headers, window, cx));
         cx.notify();
     }
 
@@ -264,10 +278,13 @@ impl RequestEditor {
             .iter()
             .position(|m| m.eq_ignore_ascii_case(&request.method))
             .unwrap_or(0);
-        self.name.update(cx, |s, cx| s.set_value(request.name.clone(), window, cx));
-        self.method
-            .update(cx, |s, cx| s.set_selected_index(Some(IndexPath::new(method_index)), window, cx));
-        self.url.update(cx, |s, cx| s.set_value(request.url.clone(), window, cx));
+        self.name
+            .update(cx, |s, cx| s.set_value(request.name.clone(), window, cx));
+        self.method.update(cx, |s, cx| {
+            s.set_selected_index(Some(IndexPath::new(method_index)), window, cx)
+        });
+        self.url
+            .update(cx, |s, cx| s.set_value(request.url.clone(), window, cx));
         self.headers
             .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
@@ -320,7 +337,13 @@ impl RequestEditor {
         };
         RequestFile {
             name: self.name.read(cx).value().trim().to_string(),
-            method: self.method.read(cx).selected_value().copied().unwrap_or("GET").to_string(),
+            method: self
+                .method
+                .read(cx)
+                .selected_value()
+                .copied()
+                .unwrap_or("GET")
+                .to_string(),
             url: self.url.read(cx).value().to_string(),
             headers,
             body,
@@ -356,7 +379,9 @@ impl RequestEditor {
                 self.dirty = false;
                 cx.emit(RequestEditorEvent::Saved(path));
             }
-            Err(e) => cx.emit(RequestEditorEvent::Error(t!("request.could_not_save", error = format!("{e:#}")).to_string())),
+            Err(e) => cx.emit(RequestEditorEvent::Error(
+                t!("request.could_not_save", error = format!("{e:#}")).to_string(),
+            )),
         }
         cx.notify();
     }
@@ -388,7 +413,10 @@ impl RequestEditor {
                                 Ok(found) => variables.extend(found),
                                 Err(e) => {
                                     let error = format!("{e:#}");
-                                    return (Err(t!("request.could_not_read_secrets", error = error).to_string()), Vec::new());
+                                    return (
+                                        Err(t!("request.could_not_read_secrets", error = error).to_string()),
+                                        Vec::new(),
+                                    );
                                 }
                             },
                             None => return (Err(t!("secrets.store_unavailable").to_string()), Vec::new()),
@@ -424,8 +452,10 @@ impl RequestEditor {
     }
 
     fn describe_missing(&self, missing: &[String]) -> String {
-        let (secrets, plain): (Vec<_>, Vec<_>) =
-            missing.iter().cloned().partition(|name| self.secrets.contains_key(name));
+        let (secrets, plain): (Vec<_>, Vec<_>) = missing
+            .iter()
+            .cloned()
+            .partition(|name| self.secrets.contains_key(name));
         let mut parts = Vec::new();
         if !plain.is_empty() {
             parts.push(t!("request.undefined", names = plain.join(", ")).to_string());
@@ -479,13 +509,28 @@ impl RequestEditor {
             _ if sending => (t!("request.status_sending").to_string(), theme.muted_foreground),
             None => (t!("request.status_none").to_string(), theme.muted_foreground),
             Some((_, Outcome::Error { .. })) => (t!("request.status_failed").to_string(), theme.danger),
-            Some((r, Outcome::Response { status, reason, body_size, .. })) => (
-                format!("{status} {reason}  ·  {}  ·  {}", format_duration(r.elapsed_ms), format_size(*body_size)),
+            Some((
+                r,
+                Outcome::Response {
+                    status,
+                    reason,
+                    body_size,
+                    ..
+                },
+            )) => (
+                format!(
+                    "{status} {reason}  ·  {}  ·  {}",
+                    format_duration(r.elapsed_ms),
+                    format_size(*body_size)
+                ),
                 if *status < 400 { theme.success } else { theme.danger },
             ),
         };
         let restored = state.filter(|s| s.restored && !sending).and(response);
-        let truncated = matches!(response.map(|r| &r.outcome), Some(Outcome::Response { truncated: true, .. }));
+        let truncated = matches!(
+            response.map(|r| &r.outcome),
+            Some(Outcome::Response { truncated: true, .. })
+        );
         let missing = state.map(|s| s.missing_variables.clone()).unwrap_or_default();
         h_flex()
             .flex_1()
@@ -502,7 +547,11 @@ impl RequestEditor {
                 )
             })
             .when(truncated, |this| {
-                this.child(div().text_color(theme.warning).child(t!("request.truncated").to_string()))
+                this.child(
+                    div()
+                        .text_color(theme.warning)
+                        .child(t!("request.truncated").to_string()),
+                )
             })
             .when(!missing.is_empty(), |this| {
                 this.child(div().text_color(theme.warning).child(self.describe_missing(&missing)))
@@ -532,7 +581,9 @@ impl Render for RequestEditor {
         let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         let response_tab = self.response_tab;
         let header_count = match self.state().and_then(ResponseState::outcome) {
-            Some(Outcome::Response { headers, .. }) => t!("request.headers_tab_count", count = headers.len()).to_string(),
+            Some(Outcome::Response { headers, .. }) => {
+                t!("request.headers_tab_count", count = headers.len()).to_string()
+            }
             _ => t!("request.headers_tab").to_string(),
         };
         let sending = self.state().is_some_and(|s| s.sending);
@@ -550,10 +601,14 @@ impl Render for RequestEditor {
                     .gap_2()
                     .child(div().flex_1().child(text_input(&self.name)))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(if self.dirty { t!("request.unsaved") } else { t!("request.saved") }.to_string()),
+                        div().text_xs().text_color(theme.muted_foreground).child(
+                            if self.dirty {
+                                t!("request.unsaved")
+                            } else {
+                                t!("request.saved")
+                            }
+                            .to_string(),
+                        ),
                     ),
             )
             .child(
@@ -593,11 +648,9 @@ impl Render for RequestEditor {
                             .min_w_0()
                             .gap_1()
                             .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(self.render_status(cx))
-                                    .child(
-                                        div().flex_none().child(TabBar::new("response-tabs")
+                                h_flex().gap_2().child(self.render_status(cx)).child(
+                                    div().flex_none().child(
+                                        TabBar::new("response-tabs")
                                             .segmented()
                                             .small()
                                             .selected_index(response_tab)
@@ -606,8 +659,9 @@ impl Render for RequestEditor {
                                             .on_click(cx.listener(|this, index: &usize, _, cx| {
                                                 this.response_tab = *index;
                                                 cx.notify();
-                                            }))),
+                                            })),
                                     ),
+                                ),
                             )
                             .child(
                                 readonly_editor(if response_tab == 0 {

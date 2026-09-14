@@ -8,18 +8,16 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{EditorState, InputEvent, InputState};
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::credentials::looks_sensitive_name;
-use crate::ui::{code_editor, secret_input, text_input};
 use crate::model::{CollectionFile, EnvironmentFile, Variables, variables_from_text, variables_to_text};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::storage::{self, Collection};
+use crate::ui::{code_editor, secret_input, text_input};
 
 const CONTEXT: &str = "EnvironmentEditor";
 
@@ -39,7 +37,10 @@ pub enum Target {
 pub enum EnvironmentEditorEvent {
     /// Files under this collection root changed; reload it.
     Changed(PathBuf),
-    Deleted { root: PathBuf, path: PathBuf },
+    Deleted {
+        root: PathBuf,
+        path: PathBuf,
+    },
     Error(String),
     Close,
 }
@@ -102,7 +103,8 @@ impl EnvironmentEditor {
                 .language("yaml")
                 .placeholder("base_url: https://api.example.com")
         });
-        let new_secret = cx.new(|cx| InputState::new(window, cx).placeholder(t!("secrets.new_name_placeholder").to_string()));
+        let new_secret =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("secrets.new_name_placeholder").to_string()));
         cx.subscribe(&name, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 this.update_dirty(cx);
@@ -172,10 +174,12 @@ impl EnvironmentEditor {
     /// Re-applies strings set at construction after the interface language changes. Strings
     /// built during render update on their own.
     pub fn relocalize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.name
-            .update(cx, |s, cx| s.set_placeholder(t!("env.name_placeholder").to_string(), window, cx));
-        self.new_secret
-            .update(cx, |s, cx| s.set_placeholder(t!("secrets.new_name_placeholder").to_string(), window, cx));
+        self.name.update(cx, |s, cx| {
+            s.set_placeholder(t!("env.name_placeholder").to_string(), window, cx)
+        });
+        self.new_secret.update(cx, |s, cx| {
+            s.set_placeholder(t!("secrets.new_name_placeholder").to_string(), window, cx)
+        });
         cx.notify();
     }
 
@@ -231,7 +235,11 @@ impl EnvironmentEditor {
             },
             Target::Environment(path) => {
                 let env = self.environment(path)?;
-                Saved { name: env.name.clone(), variables: env.variables.clone(), secrets: env.secrets.clone() }
+                Saved {
+                    name: env.name.clone(),
+                    variables: env.variables.clone(),
+                    secrets: env.secrets.clone(),
+                }
             }
         })
     }
@@ -244,19 +252,31 @@ impl EnvironmentEditor {
     }
 
     fn secret_ref(&self, target: &Target, name: &str) -> SecretRef {
-        let id = self.collection.as_ref().and_then(|c| c.file.id.clone()).unwrap_or_default();
+        let id = self
+            .collection
+            .as_ref()
+            .and_then(|c| c.file.id.clone())
+            .unwrap_or_default();
         SecretRef::new(id, Self::scope_for(target), name)
     }
 
     fn secret_label(&self, scope_name: &str, name: &str) -> String {
-        let collection = self.collection.as_ref().map(|c| c.file.name.as_str()).unwrap_or_default();
+        let collection = self
+            .collection
+            .as_ref()
+            .map(|c| c.file.name.as_str())
+            .unwrap_or_default();
         secret_store::label(collection, scope_name, name)
     }
 
     fn load_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.target = target;
         self.generation += 1;
-        let saved = self.saved().unwrap_or(Saved { name: String::new(), variables: Variables::new(), secrets: vec![] });
+        let saved = self.saved().unwrap_or(Saved {
+            name: String::new(),
+            variables: Variables::new(),
+            secrets: vec![],
+        });
         self.name.update(cx, |s, cx| s.set_value(saved.name, window, cx));
         self.variables
             .update(cx, |s, cx| s.set_value(variables_to_text(&saved.variables), window, cx));
@@ -370,7 +390,10 @@ impl EnvironmentEditor {
         name != saved.name
             || variables_changed
             || names != saved.secrets
-            || self.secret_rows.iter().any(|row| Self::pending_value(row, cx).is_some())
+            || self
+                .secret_rows
+                .iter()
+                .any(|row| Self::pending_value(row, cx).is_some())
     }
 
     fn update_dirty(&mut self, cx: &mut Context<Self>) {
@@ -428,8 +451,16 @@ impl EnvironmentEditor {
         }
 
         // The collection may have just been given an id; build refs from the updated file.
-        let scope_label = if target == Target::Defaults { DEFAULTS_LABEL.to_string() } else { name };
-        let file = self.collection.as_ref().map(|c| c.file.clone()).unwrap_or_else(|| CollectionFile::new(""));
+        let scope_label = if target == Target::Defaults {
+            DEFAULTS_LABEL.to_string()
+        } else {
+            name
+        };
+        let file = self
+            .collection
+            .as_ref()
+            .map(|c| c.file.clone())
+            .unwrap_or_else(|| CollectionFile::new(""));
         let scope = Self::scope_for(&target);
         let sets: Vec<_> = pending
             .into_iter()
@@ -461,7 +492,9 @@ impl EnvironmentEditor {
                 .await;
             if let Err(e) = result {
                 this.update(cx, |_, cx| {
-                    cx.emit(EnvironmentEditorEvent::Error(t!("secrets.could_not_store", error = format!("{e:#}")).to_string()))
+                    cx.emit(EnvironmentEditorEvent::Error(
+                        t!("secrets.could_not_store", error = format!("{e:#}")).to_string(),
+                    ))
                 })
                 .ok();
             }
@@ -471,7 +504,13 @@ impl EnvironmentEditor {
     }
 
     /// Writes the YAML for the current target (and the collection file, if it needed an id).
-    fn write_files(&mut self, mut collection: Collection, name: String, variables: Variables, cx: &mut Context<Self>) -> bool {
+    fn write_files(
+        &mut self,
+        mut collection: Collection,
+        name: String,
+        variables: Variables,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let secrets: Vec<String> = self.secret_rows.iter().map(|r| r.name.clone()).collect();
         let root = collection.root.clone();
         let assigned_id = !secrets.is_empty() && collection.file.ensure_id().1;
@@ -483,7 +522,11 @@ impl EnvironmentEditor {
                 storage::save_collection_file(&root, &collection.file)
             }
             Target::Environment(path) => {
-                let env = EnvironmentFile { name, variables, secrets };
+                let env = EnvironmentFile {
+                    name,
+                    variables,
+                    secrets,
+                };
                 let id_saved = if assigned_id {
                     storage::save_collection_file(&root, &collection.file)
                 } else {
@@ -505,7 +548,9 @@ impl EnvironmentEditor {
                 true
             }
             Err(e) => {
-                cx.emit(EnvironmentEditorEvent::Error(t!("request.could_not_save", error = format!("{e:#}")).to_string()));
+                cx.emit(EnvironmentEditorEvent::Error(
+                    t!("request.could_not_save", error = format!("{e:#}")).to_string(),
+                ));
                 false
             }
         }
@@ -517,7 +562,13 @@ impl EnvironmentEditor {
         }
     }
 
-    fn create(&mut self, file: EnvironmentFile, copy_from: Option<Target>, window: &mut Window, cx: &mut Context<Self>) {
+    fn create(
+        &mut self,
+        file: EnvironmentFile,
+        copy_from: Option<Target>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.save(window, cx) {
             return;
         }
@@ -532,7 +583,11 @@ impl EnvironmentEditor {
                         .secrets
                         .iter()
                         .map(|var| {
-                            (self.secret_ref(&from, var), self.secret_ref(&target, var), self.secret_label(&file.name, var))
+                            (
+                                self.secret_ref(&from, var),
+                                self.secret_ref(&target, var),
+                                self.secret_label(&file.name, var),
+                            )
                         })
                         .collect();
                     cx.spawn_in(window, async move |this, cx| {
@@ -591,7 +646,11 @@ impl EnvironmentEditor {
         let Some(saved) = self.saved() else {
             return;
         };
-        let secret_refs: Vec<_> = saved.secrets.iter().map(|var| self.secret_ref(&self.target, var)).collect();
+        let secret_refs: Vec<_> = saved
+            .secrets
+            .iter()
+            .map(|var| self.secret_ref(&self.target, var))
+            .collect();
         let name = saved.name;
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -599,13 +658,21 @@ impl EnvironmentEditor {
             let message = if secret_refs.is_empty() {
                 t!("env.delete_message", path = path.display()).to_string()
             } else {
-                t!("env.delete_message_with_secrets", path = path.display(), count = secret_refs.len()).to_string()
+                t!(
+                    "env.delete_message_with_secrets",
+                    path = path.display(),
+                    count = secret_refs.len()
+                )
+                .to_string()
             };
             dialog
                 .title(t!("env.delete_title", name = name).to_string())
                 .w(px(420.))
                 .content(move |content, _, _| content.child(message.clone()))
-                .footer(crate::ui::dialog_footer(Some(t!("env.delete").to_string()), ButtonVariant::Danger))
+                .footer(crate::ui::dialog_footer(
+                    Some(t!("env.delete").to_string()),
+                    ButtonVariant::Danger,
+                ))
                 .on_ok(move |_, window, cx| {
                     let result = storage::delete_file(&path);
                     let secret_refs = secret_refs.clone();
@@ -622,7 +689,10 @@ impl EnvironmentEditor {
                                     })
                                     .detach();
                             }
-                            cx.emit(EnvironmentEditorEvent::Deleted { root: root.clone(), path: path.clone() });
+                            cx.emit(EnvironmentEditorEvent::Deleted {
+                                root: root.clone(),
+                                path: path.clone(),
+                            });
                             this.load_target(Target::Defaults, window, cx);
                         }
                         Err(e) => cx.emit(EnvironmentEditorEvent::Error(format!("{e:#}"))),
@@ -711,7 +781,10 @@ impl EnvironmentEditor {
         let secret = self.secret_ref(&self.target, &name);
         let generation = self.generation;
         cx.spawn_in(window, async move |this, cx| {
-            let value = cx.background_executor().spawn(async move { store.get(&secret).await }).await;
+            let value = cx
+                .background_executor()
+                .spawn(async move { store.get(&secret).await })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 if this.generation != generation {
                     return;
@@ -753,10 +826,19 @@ impl EnvironmentEditor {
                 .rounded_md()
                 .cursor_pointer()
                 .text_sm()
-                .when(selected, |s| s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground))
+                .when(selected, |s| {
+                    s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground)
+                })
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .child(div().flex_1().min_w_0().truncate().child(label))
-                .when(active, |s| s.child(div().text_xs().text_color(theme.success).child(t!("env.active").to_string())))
+                .when(active, |s| {
+                    s.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.success)
+                            .child(t!("env.active").to_string()),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| this.select(target.clone(), window, cx)))
         };
 
@@ -772,14 +854,40 @@ impl EnvironmentEditor {
                     .text_color(theme.muted_foreground)
                     .child(collection.file.name.clone()),
             )
-            .child(row(0, t!("env.collection_defaults").to_string(), Target::Defaults, false, cx))
-            .child(div().px_2().pt_2().pb_1().text_xs().text_color(theme.muted_foreground).child(t!("env.environments").to_string()));
+            .child(row(
+                0,
+                t!("env.collection_defaults").to_string(),
+                Target::Defaults,
+                false,
+                cx,
+            ))
+            .child(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t!("env.environments").to_string()),
+            );
         for (ix, env) in collection.environments.iter().enumerate() {
             let active = self.active.as_ref() == Some(&env.path);
-            list = list.child(row(ix + 1, env.file.name.clone(), Target::Environment(env.path.clone()), active, cx));
+            list = list.child(row(
+                ix + 1,
+                env.file.name.clone(),
+                Target::Environment(env.path.clone()),
+                active,
+                cx,
+            ));
         }
         if collection.environments.is_empty() {
-            list = list.child(div().px_2().text_sm().text_color(theme.muted_foreground).child(t!("env.none_yet").to_string()));
+            list = list.child(
+                div()
+                    .px_2()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(t!("env.none_yet").to_string()),
+            );
         }
         list.child(
             h_flex().child(
@@ -823,9 +931,24 @@ impl EnvironmentEditor {
             rows = rows.child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(180.)).flex_none().truncate().text_sm().font_family("monospace").child(row.name.clone()))
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .flex_none()
+                            .truncate()
+                            .text_sm()
+                            .font_family("monospace")
+                            .child(row.name.clone()),
+                    )
                     .child(div().flex_1().min_w_0().child(secret_input(&row.input).small()))
-                    .child(div().w(px(150.)).flex_none().text_xs().text_color(color).child(status.to_string()))
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(color)
+                            .child(status.to_string()),
+                    )
                     .child(
                         Button::new(("reveal-secret", ix))
                             .ghost()
@@ -854,7 +977,12 @@ impl EnvironmentEditor {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(t!("secrets.title").to_string()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t!("secrets.title").to_string()),
+                    )
                     .child(div().text_xs().text_color(theme.muted_foreground).child(description)),
             )
             .when(!sensitive.is_empty(), |this| {
@@ -877,13 +1005,23 @@ impl EnvironmentEditor {
                 )
             })
             .when(self.secret_rows.is_empty(), |this| {
-                this.child(div().text_xs().text_color(theme.muted_foreground).child(t!("secrets.none_yet").to_string()))
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(t!("secrets.none_yet").to_string()),
+                )
             })
             .child(rows)
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(180.)).flex_none().child(text_input(&self.new_secret).small()))
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .flex_none()
+                            .child(text_input(&self.new_secret).small()),
+                    )
                     .child(
                         Button::new("add-secret")
                             .small()
@@ -950,20 +1088,15 @@ impl Render for EnvironmentEditor {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(text_input(&self.name))
-                                    .when(is_defaults, |s| {
-                                        s.child(
-                                            div()
-                                                .pt_1()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(t!("env.collection_name").to_string()),
-                                        )
-                                    }),
-                            )
+                            .child(div().flex_1().child(text_input(&self.name)).when(is_defaults, |s| {
+                                s.child(
+                                    div()
+                                        .pt_1()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(t!("env.collection_name").to_string()),
+                                )
+                            }))
                             .when(!is_defaults, |s| {
                                 s.child(
                                     Button::new("duplicate-environment")
