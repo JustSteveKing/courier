@@ -4,6 +4,7 @@ mod highlight;
 mod json_filter;
 mod schema;
 mod sse;
+mod template_completion;
 mod ws;
 
 use std::collections::HashMap;
@@ -227,6 +228,8 @@ pub struct RequestEditor {
     cookies: Option<Cookies>,
     /// The collection the open request belongs to, for finding requests it chains to.
     collection_root: Option<PathBuf>,
+    /// The collection's requests as (name, path), for completing `{{ response("…") }}`.
+    collection_requests: Vec<(String, PathBuf)>,
 
     name: Entity<InputState>,
     method: Entity<SelectState<SearchableVec<&'static str>>>,
@@ -428,6 +431,16 @@ impl RequestEditor {
             })
             .detach();
         }
+        // `{{ }}` completions for every editor that takes templates (the GraphQL query has its
+        // schema completions instead).
+        let completion = std::rc::Rc::new(template_completion::TemplateCompletion {
+            editor: cx.weak_entity(),
+        });
+        for editor in [&url, &params, &headers, &body, &graphql_variables] {
+            editor.update(cx, |state, _| {
+                state.lsp_mut().completion_provider = Some(completion.clone())
+            });
+        }
         let highlighted = [&url, &params, &headers, &body, &graphql_query, &graphql_variables]
             .into_iter()
             .map(|editor| {
@@ -454,6 +467,7 @@ impl RequestEditor {
             secret_store: None,
             cookies: None,
             collection_root: None,
+            collection_requests: Vec::new(),
             name,
             method,
             url,

@@ -371,11 +371,31 @@ impl Workspace {
                     });
                 }
                 self.collections[ix] = collection;
+                if let Some(open) = self.editor.read(cx).path().cloned()
+                    && open.starts_with(root)
+                {
+                    let requests = self.request_index(&open);
+                    self.editor
+                        .update(cx, |editor, _| editor.set_collection_requests(requests));
+                }
             }
             Err(e) => notify_error(format!("{e:#}"), window, cx),
         }
         self.refresh_environments(window, cx);
         cx.notify();
+    }
+
+    /// (name, path) of every request in the collection holding `path`.
+    fn request_index(&self, path: &Path) -> Vec<(String, PathBuf)> {
+        self.collection_index_for(path)
+            .map(|ix| {
+                self.collections[ix]
+                    .requests()
+                    .into_iter()
+                    .map(|entry| (entry.request.name.clone(), entry.path.to_path_buf()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn reload_containing(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
@@ -426,9 +446,11 @@ impl Workspace {
             let root = self
                 .collection_index_for(path)
                 .map(|ix| self.collections[ix].root.clone());
+            let requests = self.request_index(path);
             self.editor.update(cx, |editor, cx| {
                 editor.set_cookies(jar);
                 editor.set_collection_root(root);
+                editor.set_collection_requests(requests);
                 editor.load(path.to_path_buf(), request, key, window, cx)
             });
             self.refresh_inherited_auth(cx);
@@ -3857,6 +3879,70 @@ components:
         .unwrap();
         let copied = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
         assert_eq!(copied, "{{ response(\"Login\", \"$\") }}");
+    }
+
+    #[gpui_kit::test]
+    async fn template_calls_autocomplete_from_the_collection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (port, _received) = http_server("{\"token\":\"abc\",\"user\":{\"id\":7}}");
+        let mut login = RequestFile::new("Login");
+        login.method = "POST".into();
+        login.url = format!("http://127.0.0.1:{port}/login");
+        let login_path = storage::create_request(&root, &login).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(login_path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.select_request(root.join("get-json.yaml"), window, cx)
+            });
+        })
+        .unwrap();
+
+        let suggest = |cx: &mut TestAppContext, text: &str| -> Vec<String> {
+            cx.update(|cx| {
+                editor
+                    .read(cx)
+                    .template_suggestions(text, text.len(), cx)
+                    .map(|(_, suggestions)| suggestions.into_iter().map(|s| s.insert).collect())
+                    .unwrap_or_default()
+            })
+        };
+        assert_eq!(suggest(cx, "{{ base"), ["base_url"]);
+        assert!(suggest(cx, "{{ ").contains(&"response(\"".to_string()));
+        assert_eq!(suggest(cx, "{{ response(\"Lo"), ["Login"]);
+        assert_eq!(suggest(cx, "{{ response(\"Login\", \"$"), ["$.token", "$.user"]);
+        assert_eq!(suggest(cx, "{{ response(\"Login\", \"$.user."), ["$.user.id"]);
+        assert_eq!(
+            suggest(cx, "{{ response_header(\"Login\", \"Content-T"),
+            ["content-type"]
+        );
+        assert_eq!(suggest(cx, "{{ response(\"Login\", \"$.token\", \"al"), ["always"]);
+        assert!(suggest(cx, "no template here").is_empty());
+
+        // The editors that take templates offer these completions.
+        cx.update(|cx| {
+            let url = editor.read(cx).url_for_test();
+            assert!(url.read(cx).lsp().completion_provider.is_some());
+        });
     }
 
     #[gpui_kit::test]
