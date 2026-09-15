@@ -423,8 +423,12 @@ impl Workspace {
         if let Some(request) = fresh.or_else(|| self.find_request(path).cloned()) {
             let key = self.response_key(path);
             let jar = self.cookies_for(path, cx);
+            let root = self
+                .collection_index_for(path)
+                .map(|ix| self.collections[ix].root.clone());
             self.editor.update(cx, |editor, cx| {
                 editor.set_cookies(jar);
+                editor.set_collection_root(root);
                 editor.load(path.to_path_buf(), request, key, window, cx)
             });
             self.refresh_inherited_auth(cx);
@@ -556,6 +560,43 @@ impl Workspace {
             self.load_in_editor(&new, window, cx);
         }
         cx.notify();
+    }
+
+    /// Copies `{{ response("Name", "$.path") }}` for using this request's response in another,
+    /// with the JSONPath filter set on its response (or `$`).
+    fn copy_response_reference(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.collection_index_for(&path) else {
+            return;
+        };
+        let collection = &self.collections[ix];
+        let Some(request) = collection.find_request(&path) else {
+            return;
+        };
+        // A name shared by several requests can't identify this one; use its path instead.
+        let shared = collection
+            .requests()
+            .iter()
+            .filter(|entry| entry.request.name.eq_ignore_ascii_case(&request.name))
+            .count()
+            > 1;
+        let target = if shared {
+            path.strip_prefix(&collection.root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            request.name.clone()
+        };
+        let json_path = self
+            .editor
+            .read(cx)
+            .filter_for(&path)
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| "$".into());
+        cx.write_to_clipboard(ClipboardItem::new_string(crate::chain::reference(&target, &json_path)));
+        window.push_notification(
+            Notification::success(t!("ws.copied_response_reference").to_string()),
+            cx,
+        );
     }
 
     /// Opens `path` if it isn't open, then copies it as a curl command.
@@ -2337,6 +2378,7 @@ fn request_menu(
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.duplicate", Workspace::duplicate_request))
         .separator()
+        .item(item("ws.copy_response_reference", Workspace::copy_response_reference))
         .item(item("ws.copy_as_curl", |this, path, window, cx| {
             this.copy_as_curl(path, false, window, cx)
         }))
@@ -3721,6 +3763,100 @@ components:
         .unwrap();
         let editor = cx.update(|cx| restarted.read(cx).editor.clone());
         assert_eq!(cx.update(|cx| editor.read(cx).history_len()), 1);
+    }
+
+    #[gpui_kit::test]
+    async fn requests_chain_on_other_responses(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+
+        let (login_port, login_received) = http_server("{\"token\":\"abc\",\"user\":{\"id\":7}}");
+        let mut login = RequestFile::new("Login");
+        login.method = "POST".into();
+        login.url = format!("http://127.0.0.1:{login_port}/login");
+        let login_path = storage::create_request(&root, &login).unwrap();
+
+        let (me_port, me_received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        let mut me = RequestFile::new("Me");
+        me.url = format!("http://127.0.0.1:{me_port}/users/{{{{ response(\"Login\", \"$.user.id\") }}}}");
+        me.auth = Auth::Bearer {
+            token: "{{response(\"Login\", \"$.token\")}}".into(),
+        };
+        let me_path = storage::create_request(&root, &me).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let send = |cx: &mut TestAppContext, path: &Path| {
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(path.to_path_buf(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            for _ in 0..500 {
+                cx.run_until_parked();
+                if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        // Login has never been sent, so sending Me sends it first and uses its response.
+        send(cx, &me_path);
+        let (login_head, _) = login_received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(login_head.starts_with("POST /login "));
+        let head = me_received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(head.starts_with("get /users/7 "), "{head}");
+        assert!(head.contains("authorization: bearer abc"), "{head}");
+        cx.update(|cx| {
+            let editor = editor.read(cx);
+            assert!(editor.response_for(&login_path).is_some(), "Login's response is kept");
+            let (response, _) = editor.shown_response().unwrap();
+            assert!(matches!(
+                response.outcome,
+                crate::response_cache::Outcome::Response { status: 204, .. }
+            ));
+        });
+
+        // The next send reuses Login's latest response instead of sending it again (its
+        // one-shot server is gone, so a resend would fail).
+        let (me_port, me_received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        let mut me: RequestFile = storage::read_yaml(&me_path).unwrap();
+        me.url = format!("http://127.0.0.1:{me_port}/again/{{{{ response(\"Login\", \"$.user.id\") }}}}");
+        storage::write_yaml(&me_path, &me).unwrap();
+        send(cx, &me_path);
+        let head = me_received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("GET /again/7 "), "{head}");
+
+        // A reference to a request that doesn't exist fails the send with a reason.
+        me.url = "http://127.0.0.1:1/{{ response(\"Nope\", \"$\") }}".into();
+        storage::write_yaml(&me_path, &me).unwrap();
+        send(cx, &me_path);
+        cx.update(|cx| {
+            let (response, _) = editor.read(cx).shown_response().unwrap();
+            let crate::response_cache::Outcome::Error { message } = &response.outcome else {
+                panic!("{:?}", response.outcome)
+            };
+            assert!(message.contains("no request named \"Nope\""), "{message}");
+        });
+
+        // References are copied from the request menu.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.copy_response_reference(login_path.clone(), window, cx)
+            });
+        })
+        .unwrap();
+        let copied = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert_eq!(copied, "{{ response(\"Login\", \"$\") }}");
     }
 
     #[gpui_kit::test]

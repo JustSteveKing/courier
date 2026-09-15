@@ -22,6 +22,7 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
+use crate::chain;
 use crate::cookies::Cookies;
 use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
@@ -100,7 +101,9 @@ struct ResponseState {
 }
 
 /// A request ready to send, the variables it lacked, and the variables (with secrets) used.
-type Resolved = (Request, Vec<String>, Variables);
+/// A request ready to send, the variables it lacked, the variables (with secrets) used, and
+/// responses of other requests sent to evaluate its `response()` calls.
+type Resolved = (Request, Vec<String>, Variables, chain::Sent);
 
 /// Status code, reason phrase and headers of a response.
 type Head = (u16, String, Vec<(String, String)>);
@@ -222,6 +225,8 @@ pub struct RequestEditor {
     secret_store: Option<SecretStore>,
     /// The request's collection's cookie jar.
     cookies: Option<Cookies>,
+    /// The collection the open request belongs to, for finding requests it chains to.
+    collection_root: Option<PathBuf>,
 
     name: Entity<InputState>,
     method: Entity<SelectState<SearchableVec<&'static str>>>,
@@ -448,6 +453,7 @@ impl RequestEditor {
             secrets: IndexMap::new(),
             secret_store: None,
             cookies: None,
+            collection_root: None,
             name,
             method,
             url,
@@ -778,6 +784,15 @@ impl RequestEditor {
         self.cookies = cookies;
     }
 
+    pub fn set_collection_root(&mut self, root: Option<PathBuf>) {
+        self.collection_root = root;
+    }
+
+    /// The JSONPath filter set on a request's response, if any.
+    pub fn filter_for(&self, path: &Path) -> Option<String> {
+        self.response_filters.get(path).cloned()
+    }
+
     /// Copies the open request as a curl command. Without `include_secrets`, secret
     /// placeholders such as `{{token}}` are left in, so the command is safe to share.
     pub fn copy_as_curl(&mut self, include_secrets: bool, cx: &mut Context<Self>) {
@@ -810,7 +825,7 @@ impl RequestEditor {
         }
         let resolving = self.resolve_in_background(file, cx);
         cx.spawn(async move |this, cx| {
-            let result = resolving.await.map(|(request, missing, _)| (request, missing));
+            let result = resolving.await.map(|(request, missing, _, _)| (request, missing));
             this.update(cx, |_, cx| copied(result, cx)).ok();
         })
         .detach();
@@ -1034,6 +1049,24 @@ impl RequestEditor {
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
         let store = self.secret_store.clone();
+        // Only requests that call functions need the chaining context (and its copies of the
+        // latest responses).
+        let chaining = (!chain::calls_in(&file).is_empty()).then(|| chain::Context {
+            root: self.collection_root.clone().unwrap_or_default(),
+            variables: Variables::new(),
+            latest: self
+                .responses
+                .iter()
+                .filter_map(|(path, state)| Some((path.clone(), state.response.clone()?)))
+                .collect(),
+            cache: self.cache(cx).cloned(),
+            collection_id: self
+                .state()
+                .and_then(|s| s.cache_key.as_ref())
+                .and_then(|k| k.collection_id.clone()),
+            timeout: self.timeout(cx),
+            client: self.cookies.as_ref().map(|jar| jar.client().clone()),
+        });
         cx.background_executor().spawn(async move {
             if !secrets.is_empty() {
                 let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
@@ -1043,13 +1076,47 @@ impl RequestEditor {
                     .map_err(|e| t!("request.could_not_read_secrets", error = format!("{e:#}")).to_string())?;
                 variables.extend(found);
             }
+            let mut sent = chain::Sent::new();
+            if let Some(mut context) = chaining {
+                context.variables = variables.clone();
+                let (values, chained) = chain::evaluate(&file, &context).await?;
+                variables.extend(values);
+                sent = chained;
+            }
             let (request, missing) = Request::resolve(&file, &variables)?;
-            Ok((request, missing, variables))
+            Ok((request, missing, variables, sent))
         })
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.send_with(false, window, cx);
+    }
+
+    /// Keeps responses sent while chaining as those requests' latest, saving them like any
+    /// other response.
+    fn take_chained(&mut self, sent: chain::Sent, cx: &mut Context<Self>) {
+        let (Some(root), cache) = (self.collection_root.clone(), self.cache(cx).cloned()) else {
+            return;
+        };
+        let collection_id = self
+            .state()
+            .and_then(|s| s.cache_key.as_ref())
+            .and_then(|k| k.collection_id.clone());
+        for (path, response) in sent {
+            let key = response_cache::cache_key(collection_id.as_deref(), &root, &path);
+            let state = self.responses.entry(path).or_default();
+            state.cache_key.get_or_insert(key.clone());
+            state.finish(response.clone());
+            if let Some(cache) = cache.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = cache.save(&key, &response) {
+                            eprintln!("could not cache response: {e:#}");
+                        }
+                    })
+                    .detach();
+            }
+        }
     }
 
     /// Sends the request. `resume` reconnects an ended event stream, keeping its log and
@@ -1093,9 +1160,12 @@ impl RequestEditor {
             let resolved = resolving.await;
             let jar = cookies.clone();
             let events = this.update(cx, |this, cx| {
+                if let Ok((_, _, _, sent)) = &resolved {
+                    this.take_chained(sent.clone(), cx);
+                }
                 let state = this.responses.entry(path.clone()).or_default();
                 let (request, missing, variables) = match resolved {
-                    Ok(resolved) => resolved,
+                    Ok((request, missing, variables, _)) => (request, missing, variables),
                     Err(message) => {
                         if state.live(id).is_some() {
                             state.finish(StoredResponse::failed(response_cache::now(), message));

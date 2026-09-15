@@ -168,7 +168,7 @@ impl RequestEditor {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = async {
-                let (request, _, _) = resolving.await?;
+                let (request, _, _, _) = resolving.await?;
                 let events = this
                     .update(cx, |this, _| {
                         let (handle, events) = transport::start_http(request, timeout, None, client);

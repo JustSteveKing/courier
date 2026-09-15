@@ -639,3 +639,13 @@ ws.copy_as_curl_with_secrets:
   es: Copiar como curl (con secretos)
   de: Als curl kopieren (mit Secrets)
   fr: Copier en curl (avec les secrets)
+ws.copy_response_reference:
+  en: Copy response reference
+  es: Copiar referencia a la respuesta
+  de: Antwort-Referenz kopieren
+  fr: Copier la référence à la réponse
+ws.copied_response_reference:
+  en: Copied. Paste it into another request to use this request's response there.
+  es: Copiado. Pégalo en otra solicitud para usar allí la respuesta de esta.
+  de: Kopiert. Füge es in eine andere Anfrage ein, um dort diese Antwort zu verwenden.
+  fr: Copié. Collez-le dans une autre requête pour y utiliser la réponse de celle-ci.

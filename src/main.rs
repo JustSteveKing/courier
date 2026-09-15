@@ -1,4 +1,5 @@
 mod auth_form;
+mod chain;
 mod cookies;
 mod credentials;
 mod encoding;

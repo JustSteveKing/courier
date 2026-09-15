@@ -20,6 +20,8 @@ pub(super) enum Span {
     Undefined,
     /// A query parameter name in a URL.
     QueryName,
+    /// A `{{ function() }}` call, such as `response("Login", "$.token")`.
+    Function,
 }
 
 /// `{{name}}` placeholders in `text`: the byte range of each (braces included) and its name.
@@ -62,6 +64,9 @@ pub(super) fn query_names(url: &str) -> Vec<Range<usize>> {
 
 impl RequestEditor {
     fn span_kind(&self, name: &str) -> Span {
+        if let Some(call) = crate::chain::parse_call(name) {
+            return if call.is_ok() { Span::Function } else { Span::Undefined };
+        }
         if self.secrets.contains_key(name) {
             Span::Secret
         } else if self.variables.contains_key(name) {
@@ -123,6 +128,11 @@ impl RequestEditor {
                     },
                     Span::QueryName => HighlightStyle {
                         color: Some(theme.cyan),
+                        ..Default::default()
+                    },
+                    Span::Function => HighlightStyle {
+                        color: Some(theme.green),
+                        font_style: Some(FontStyle::Italic),
                         ..Default::default()
                     },
                 };
