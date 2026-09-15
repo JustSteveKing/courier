@@ -27,6 +27,11 @@ pub fn code_editor(state: &Entity<EditorState>) -> Editor {
     Editor::new(state).context_menu(edit_menu(EditMenu::Editable))
 }
 
+/// A one-line editor for text that gets highlighting, such as a URL with `{{variables}}`.
+pub fn single_line_editor(state: &Entity<EditorState>) -> Editor {
+    Editor::new(state).context_menu(edit_menu(EditMenu::Editable))
+}
+
 /// A read-only code editor, e.g. for responses.
 pub fn readonly_editor(state: &Entity<EditorState>) -> Editor {
     Editor::new(state)

@@ -1,5 +1,6 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
+mod highlight;
 mod schema;
 mod sse;
 mod ws;
@@ -27,7 +28,7 @@ use crate::secret_store::{SecretRef, SecretStore};
 use crate::settings::AppSettings;
 use crate::storage::write_yaml;
 use crate::transport;
-use crate::ui::{code_editor, readonly_editor, text_input};
+use crate::ui::{code_editor, readonly_editor, single_line_editor, text_input};
 
 pub const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 /// The last entry in the method menu: a POST whose body is a GraphQL query and variables.
@@ -189,7 +190,8 @@ pub struct RequestEditor {
 
     name: Entity<InputState>,
     method: Entity<SelectState<SearchableVec<&'static str>>>,
-    url: Entity<InputState>,
+    /// A one-line code editor rather than a plain input, so `{{variables}}` can be coloured.
+    url: Entity<EditorState>,
     headers: Entity<EditorState>,
     body: Entity<EditorState>,
     graphql_query: Entity<EditorState>,
@@ -210,6 +212,13 @@ pub struct RequestEditor {
     /// Types opened in the Schema tab, most recent last.
     schema_nav: Vec<String>,
     schema_filter: Entity<InputState>,
+    /// Editors whose `{{variables}}` are coloured, with their decorations and whether they
+    /// hold a URL.
+    highlighted: Vec<(
+        Entity<EditorState>,
+        gpui_kit::base::input::TextDecorationCollection,
+        bool,
+    )>,
     next_send_id: u64,
 }
 
@@ -229,7 +238,16 @@ impl RequestEditor {
                 cx,
             )
         });
-        let url = cx.new(|cx| InputState::new(window, cx).placeholder("{{base_url}}/path"));
+        let url = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("text")
+                .line_number(false)
+                .folding(false)
+                .soft_wrap(false)
+                .scroll_beyond_last_line(None)
+                .submit_on_enter(true)
+                .placeholder("{{base_url}}/path")
+        });
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let schema_slot = schema::SchemaSlot::default();
@@ -261,11 +279,18 @@ impl RequestEditor {
         }
         let stream_detail = cx.new(|cx| EditorState::new(window, cx).language("json"));
 
-        cx.subscribe_in(&url, window, |this, _, event: &InputEvent, window, cx| match event {
+        cx.subscribe_in(&url, window, |this, url, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
             InputEvent::Change => {
+                // A URL is one line: Shift+Enter or a pasted line break shouldn't split it.
+                let value = url.read(cx).value();
+                if value.contains(['\n', '\r']) {
+                    let joined = value.replace(['\n', '\r'], "");
+                    url.update(cx, |s, cx| s.replace_all(joined, window, cx));
+                }
                 this.update_dirty(cx);
                 this.sync_schema(cx);
+                this.rehighlight(url, cx);
             }
             _ => {}
         })
@@ -285,13 +310,24 @@ impl RequestEditor {
         })
         .detach();
         for editor in [&headers, &body, &graphql_query, &graphql_variables] {
-            cx.subscribe(editor, |this, _, event: &InputEvent, cx| {
+            cx.subscribe(editor, |this, editor, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
                     this.update_dirty(cx);
+                    this.rehighlight(&editor, cx);
                 }
             })
             .detach();
         }
+        let highlighted = [&url, &headers, &body, &graphql_query, &graphql_variables]
+            .into_iter()
+            .map(|editor| {
+                let decorations = editor.update(cx, |state, cx| state.create_decorations_collection(Vec::new(), cx));
+                (editor.clone(), decorations, editor == &url)
+            })
+            .collect();
+        // Colours come from the theme, which follows Omarchy theme switches.
+        cx.observe_global::<gpui_kit::component::Theme>(|this, cx| this.rehighlight_all(cx))
+            .detach();
         cx.subscribe(&method, |this, _, _: &SelectEvent<SearchableVec<&'static str>>, cx| {
             this.update_dirty(cx);
             this.sync_schema(cx);
@@ -326,6 +362,7 @@ impl RequestEditor {
             schema_slot,
             schema_nav: Vec::new(),
             schema_filter,
+            highlighted,
             next_send_id: 0,
         }
     }
@@ -437,6 +474,32 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn url_for_test(&self) -> Entity<EditorState> {
+        self.url.clone()
+    }
+
+    /// Coloured spans in the URL and headers, as (text, kind) pairs.
+    #[cfg(test)]
+    pub fn highlights_for_test(&self, cx: &App) -> Vec<(String, String)> {
+        self.highlighted
+            .iter()
+            .take(2)
+            .flat_map(|(editor, decorations, _)| {
+                let text = editor.read(cx).value().to_string();
+                let spans = self.spans(&text, editor == &self.url);
+                assert_eq!(
+                    decorations.get_ranges(cx),
+                    spans.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(),
+                    "decorations match the text"
+                );
+                spans
+                    .into_iter()
+                    .map(move |(range, kind)| (text[range].to_string(), format!("{kind:?}")))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub fn graphql_query_for_test(&self) -> Entity<EditorState> {
         self.graphql_query.clone()
     }
@@ -507,9 +570,22 @@ impl RequestEditor {
     }
 
     /// Variables and secret references in effect for the active environment.
-    pub fn set_variables(&mut self, variables: Variables, secrets: IndexMap<String, SecretRef>) {
+    pub fn set_variables(&mut self, variables: Variables, secrets: IndexMap<String, SecretRef>, cx: &mut App) {
         self.variables = variables;
         self.secrets = secrets;
+        self.rehighlight_all(cx);
+    }
+
+    fn rehighlight(&self, editor: &Entity<EditorState>, cx: &mut App) {
+        if let Some((editor, decorations, url)) = self.highlighted.iter().find(|(e, _, _)| e == editor) {
+            self.highlight(editor, decorations, *url, cx);
+        }
+    }
+
+    fn rehighlight_all(&self, cx: &mut App) {
+        for (editor, decorations, url) in &self.highlighted {
+            self.highlight(editor, decorations, *url, cx);
+        }
     }
 
     /// Shows `request`. `cache_key` identifies it in the response cache (see
@@ -562,6 +638,7 @@ impl RequestEditor {
         self.schema_nav.clear();
         self.sync_schema(cx);
         self.check_query(cx);
+        self.rehighlight_all(cx);
         self.show_response(window, cx);
     }
 
@@ -570,10 +647,11 @@ impl RequestEditor {
         self.path = None;
         self.saved = None;
         self.dirty = false;
-        for input in [&self.name, &self.url, &self.operation_name] {
+        for input in [&self.name, &self.operation_name] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
         for editor in [
+            &self.url,
             &self.headers,
             &self.body,
             &self.graphql_query,
@@ -1180,7 +1258,7 @@ impl Render for RequestEditor {
                     .when(!websocket, |row| {
                         row.child(div().w_32().child(Select::new(&self.method)))
                     })
-                    .child(div().flex_1().child(text_input(&self.url)))
+                    .child(div().flex_1().min_w_0().child(single_line_editor(&self.url)))
                     .child(
                         Button::new("send")
                             .when(!sending, |button| {

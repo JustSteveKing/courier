@@ -399,8 +399,9 @@ impl Workspace {
             select.set_items(SearchableVec::new(names), window, cx);
             select.set_selected_index(Some(IndexPath::new(selected)), window, cx);
         });
-        self.editor
-            .update(cx, |editor, _| editor.set_variables(layered.variables, layered.secrets));
+        self.editor.update(cx, |editor, cx| {
+            editor.set_variables(layered.variables, layered.secrets, cx)
+        });
         self.environment_editor
             .update(cx, |editor, cx| editor.set_active(active, cx));
     }
@@ -2055,6 +2056,88 @@ components:
         .unwrap();
         cx.run_until_parked();
         assert_eq!(sidebar_width(cx), None, "double-click resets");
+    }
+
+    #[gpui_kit::test]
+    async fn variables_are_coloured_and_the_url_stays_one_line(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = "{{base_url}}/json?page=2&key={{api_key}}".into();
+        request.headers = crate::model::headers_from_text("X-Token: {{token}}");
+        storage::write_yaml(&get_json, &request).unwrap();
+        let mut file: crate::model::CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        file.secrets.push("token".into());
+        storage::save_collection_file(&root, &file).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let pairs = |items: &[(&str, &str)]| {
+            items
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).highlights_for_test(cx)),
+            pairs(&[
+                ("{{base_url}}", "Variable"),
+                ("page", "QueryName"),
+                ("key", "QueryName"),
+                ("{{api_key}}", "Undefined"),
+                ("{{token}}", "Secret"),
+            ])
+        );
+
+        // Edits recolour straight away, and a pasted line break doesn't split the URL.
+        let url = cx.update(|cx| editor.read(cx).url_for_test());
+        cx.update_window(window, |_, window, cx| {
+            url.update(cx, |s, cx| s.replace_all("{{base_url}}/a\n?b={{nope}}", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| url.read(cx).value().to_string()),
+            "{{base_url}}/a?b={{nope}}"
+        );
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).highlights_for_test(cx)),
+            pairs(&[
+                ("{{base_url}}", "Variable"),
+                ("b", "QueryName"),
+                ("{{nope}}", "Undefined"),
+                ("{{token}}", "Secret"),
+            ])
+        );
+
+        // Enter in the URL sends the request rather than adding a line.
+        let (port, received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        cx.update_window(window, |_, window, cx| {
+            url.update(cx, |s, cx| {
+                s.replace_all(format!("http://127.0.0.1:{port}/entered"), window, cx);
+                s.focus(window, cx);
+            });
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let head = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(head.starts_with("GET /entered "), "{head}");
+        assert!(!cx.update(|cx| url.read(cx).value().contains('\n')));
     }
 
     #[gpui_kit::test]
