@@ -509,3 +509,73 @@ ws.in_scratchpad:
   es: "%{action} en el borrador"
   de: "%{action} im Notizblock"
   fr: "%{action} dans le brouillon"
+colors.menu:
+  en: "Colour for %{kind}"
+  es: "Color de %{kind}"
+  de: "Farbe für %{kind}"
+  fr: "Couleur des %{kind}"
+colors.palette:
+  en: "Colour for %{kind}: %{color}"
+  es: "Color de %{kind}: %{color}"
+  de: "Farbe für %{kind}: %{color}"
+  fr: "Couleur des %{kind} : %{color}"
+colors.kind_http:
+  en: HTTP requests
+  es: solicitudes HTTP
+  de: HTTP-Anfragen
+  fr: requêtes HTTP
+colors.kind_graphql:
+  en: GraphQL requests
+  es: solicitudes GraphQL
+  de: GraphQL-Anfragen
+  fr: requêtes GraphQL
+colors.kind_websocket:
+  en: WebSockets
+  es: WebSockets
+  de: WebSockets
+  fr: WebSockets
+colors.kind_sse:
+  en: event streams
+  es: flujos de eventos
+  de: Event-Streams
+  fr: flux d’événements
+colors.by_method:
+  en: By method
+  es: Según el método
+  de: Nach Methode
+  fr: Selon la méthode
+colors.red:
+  en: Red
+  es: Rojo
+  de: Rot
+  fr: Rouge
+colors.yellow:
+  en: Yellow
+  es: Amarillo
+  de: Gelb
+  fr: Jaune
+colors.green:
+  en: Green
+  es: Verde
+  de: Grün
+  fr: Vert
+colors.cyan:
+  en: Cyan
+  es: Cian
+  de: Cyan
+  fr: Cyan
+colors.blue:
+  en: Blue
+  es: Azul
+  de: Blau
+  fr: Bleu
+colors.magenta:
+  en: Magenta
+  es: Magenta
+  de: Magenta
+  fr: Magenta
+colors.grey:
+  en: Grey
+  es: Gris
+  de: Grau
+  fr: Gris

@@ -150,6 +150,24 @@ pub enum RequestKind {
 impl RequestKind {
     pub const ALL: [RequestKind; 4] = [Self::Http, Self::Graphql, Self::WebSocket, Self::EventStream];
 
+    /// What kind of request `request` is: GraphQL, a WebSocket URL, an event stream (asks
+    /// for `text/event-stream`) or plain HTTP.
+    pub fn of(request: &RequestFile) -> Self {
+        if request.graphql.is_some() {
+            Self::Graphql
+        } else if is_websocket_url(&request.url) {
+            Self::WebSocket
+        } else if request.headers.iter().any(|h| {
+            h.enabled
+                && h.name.eq_ignore_ascii_case("accept")
+                && h.value.to_ascii_lowercase().contains("text/event-stream")
+        }) {
+            Self::EventStream
+        } else {
+            Self::Http
+        }
+    }
+
     /// A new, empty request of this kind called `name`.
     pub fn template(self, name: impl Into<String>) -> RequestFile {
         let mut request = RequestFile::new(name);

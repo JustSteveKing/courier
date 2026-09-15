@@ -33,7 +33,7 @@ use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
 use crate::response_cache::{CacheKey, Liveness, ResponseCache};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
-use crate::settings::AppSettings;
+use crate::settings::{AppSettings, LabelColor};
 use crate::storage::{self, Collection, Item};
 use crate::ui::{dialog_footer, focus_in_dialog, text_input, textarea};
 
@@ -255,6 +255,11 @@ impl Workspace {
         } else {
             collection.file.name.clone()
         }
+    }
+
+    fn set_request_color(&mut self, kind: RequestKind, color: LabelColor, cx: &mut Context<Self>) {
+        AppSettings::update(cx, |settings| settings.request_colors.set(kind, color));
+        cx.notify();
     }
 
     fn new_scratch_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1736,6 +1741,7 @@ impl Workspace {
                     let is_selected = selected.as_ref() == Some(path);
                     let path = path.clone();
                     let menu_path = path.clone();
+                    let kind = RequestKind::of(request);
                     let weak = cx.entity().downgrade();
                     rows.push(
                         h_flex()
@@ -1757,7 +1763,7 @@ impl Workspace {
                                     .flex_none()
                                     .text_xs()
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(method_color(&request_label(request), &theme))
+                                    .text_color(request_color(request, &theme, cx))
                                     .child(short_method(&request_label(request))),
                             )
                             .child(div().min_w_0().truncate().child(request.name.clone()))
@@ -1766,7 +1772,9 @@ impl Workspace {
                             )
                             .context_menu({
                                 let destinations = destinations.clone();
-                                move |menu, window, cx| request_menu(menu, &weak, &menu_path, &destinations, window, cx)
+                                move |menu, window, cx| {
+                                    request_menu(menu, &weak, &menu_path, kind, &destinations, window, cx)
+                                }
                             })
                             .into_any_element(),
                     );
@@ -1940,6 +1948,7 @@ fn request_menu(
     menu: PopupMenu,
     weak: &WeakEntity<Workspace>,
     request: &Path,
+    kind: RequestKind,
     collections: &[(String, PathBuf)],
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
@@ -1980,6 +1989,20 @@ fn request_menu(
                 }
                 menu
             })
+        })
+        .submenu(t!("colors.menu", kind = kind_name(kind)).to_string(), window, cx, {
+            let weak = weak.clone();
+            move |menu, _, cx| {
+                let current = AppSettings::get(cx).request_colors.get(kind);
+                color_choices(kind).into_iter().fold(menu, |menu, color| {
+                    menu.item(
+                        menu_item(color_name(color), &weak, move |this, _, cx| {
+                            this.set_request_color(kind, color, cx)
+                        })
+                        .checked(color == current),
+                    )
+                })
+            }
         })
         .separator()
         .item(item("ws.delete_ellipsis", Workspace::delete_item))
@@ -2029,14 +2052,69 @@ fn chevron(collapsed: bool) -> Icon {
 }
 
 /// The sidebar label: the HTTP method, or WS / GQL for WebSocket and GraphQL requests.
+/// The sidebar label: the HTTP method, or WS / GQL / SSE for the other kinds.
 fn request_label(request: &RequestFile) -> String {
-    if request.graphql.is_some() {
-        "GQL".into()
-    } else if crate::model::is_websocket_url(&request.url) {
-        "WS".into()
-    } else {
-        request.method.clone()
+    match RequestKind::of(request) {
+        RequestKind::Graphql => "GQL".into(),
+        RequestKind::WebSocket => "WS".into(),
+        RequestKind::EventStream => "SSE".into(),
+        RequestKind::Http => request.method.clone(),
     }
+}
+
+/// The label colour for `request`, from the settings and the active theme.
+fn request_color(request: &RequestFile, theme: &gpui_kit::component::theme::Theme, cx: &App) -> Hsla {
+    let kind = RequestKind::of(request);
+    match AppSettings::get(cx).request_colors.get(kind) {
+        LabelColor::Method => method_color(&request.method, theme),
+        color => label_color(color, theme),
+    }
+}
+
+pub(super) fn label_color(color: LabelColor, theme: &gpui_kit::component::theme::Theme) -> Hsla {
+    match color {
+        LabelColor::Method => theme.foreground,
+        LabelColor::Red => theme.red,
+        LabelColor::Yellow => theme.yellow,
+        LabelColor::Green => theme.green,
+        LabelColor::Cyan => theme.cyan,
+        LabelColor::Blue => theme.blue,
+        LabelColor::Magenta => theme.magenta,
+        LabelColor::Grey => theme.muted_foreground,
+    }
+}
+
+pub(super) fn color_name(color: LabelColor) -> String {
+    match color {
+        LabelColor::Method => t!("colors.by_method"),
+        LabelColor::Red => t!("colors.red"),
+        LabelColor::Yellow => t!("colors.yellow"),
+        LabelColor::Green => t!("colors.green"),
+        LabelColor::Cyan => t!("colors.cyan"),
+        LabelColor::Blue => t!("colors.blue"),
+        LabelColor::Magenta => t!("colors.magenta"),
+        LabelColor::Grey => t!("colors.grey"),
+    }
+    .to_string()
+}
+
+pub(super) fn kind_name(kind: RequestKind) -> String {
+    match kind {
+        RequestKind::Http => t!("colors.kind_http"),
+        RequestKind::Graphql => t!("colors.kind_graphql"),
+        RequestKind::WebSocket => t!("colors.kind_websocket"),
+        RequestKind::EventStream => t!("colors.kind_sse"),
+    }
+    .to_string()
+}
+
+/// The colours a kind of request can use: HTTP can also colour by method.
+pub(super) fn color_choices(kind: RequestKind) -> Vec<LabelColor> {
+    let mut choices = LabelColor::CHOICES.to_vec();
+    if kind == RequestKind::Http {
+        choices.insert(0, LabelColor::Method);
+    }
+    choices
 }
 
 fn short_method(method: &str) -> String {
@@ -2049,7 +2127,6 @@ fn short_method(method: &str) -> String {
 
 fn method_color(method: &str, theme: &gpui_kit::component::theme::Theme) -> Hsla {
     match method.to_ascii_uppercase().as_str() {
-        "WS" | "GQL" => theme.magenta,
         "GET" => theme.success,
         "POST" => theme.warning,
         "PUT" | "PATCH" => theme.info,
@@ -2885,6 +2962,30 @@ components:
         assert_eq!(request_label(&websocket), "WS");
         let stream = read("new-event-stream-sse.yaml");
         assert_eq!(stream.headers[0].value, "text/event-stream");
+        assert_eq!(request_label(&stream), "SSE");
+
+        // Each kind has its own label colour, which can be changed and is saved.
+        cx.update(|cx| {
+            let theme = cx.theme().clone();
+            assert_eq!(
+                request_color(&http, &theme, cx),
+                theme.success,
+                "HTTP colours by method"
+            );
+            assert_eq!(request_color(&stream, &theme, cx), theme.blue);
+            assert_eq!(request_color(&websocket, &theme, cx), theme.cyan);
+        });
+        cx.update(|cx| {
+            workspace.update(cx, |this, cx| {
+                this.set_request_color(RequestKind::EventStream, LabelColor::Yellow, cx);
+                this.set_request_color(RequestKind::Http, LabelColor::Grey, cx);
+            });
+            let theme = cx.theme().clone();
+            assert_eq!(request_color(&stream, &theme, cx), theme.yellow);
+            assert_eq!(request_color(&http, &theme, cx), theme.muted_foreground);
+        });
+        let saved = fs::read_to_string(paths.config_dir.join("settings.yaml")).unwrap();
+        assert!(saved.contains("sse: yellow") && saved.contains("http: grey"), "{saved}");
         cx.update(|cx| {
             let ws = workspace.read(cx);
             let path = ws.editor.read(cx).path().cloned().unwrap();

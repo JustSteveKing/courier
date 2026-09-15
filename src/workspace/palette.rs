@@ -329,6 +329,24 @@ fn settings_entries(cx: &App) -> Group {
         .keywords(["theme".into()])
         .checked(follow),
     );
+    for kind in RequestKind::ALL {
+        let current = settings.request_colors.get(kind);
+        for color in super::color_choices(kind) {
+            entries.push(
+                Entry::new(
+                    t!(
+                        "colors.palette",
+                        kind = super::kind_name(kind),
+                        color = super::color_name(color)
+                    ),
+                    move |this, _, cx| this.set_request_color(kind, color, cx),
+                )
+                .english("colors.palette")
+                .keywords(["colour".into(), "color".into(), "label".into()])
+                .checked(color == current),
+            );
+        }
+    }
     entries.push(
         Entry::new(t!("settings.open_file"), |_, _, cx| {
             let path = AppSettings::path(cx);
