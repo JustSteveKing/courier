@@ -83,7 +83,7 @@ enum Backend {
     Keyring(oo7::Keyring),
     File(oo7::file::UnlockedKeyring),
     /// For UI tests: GPUI's test scheduler rejects wake-ups from the file backend's I/O threads.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Memory(std::sync::Mutex<std::collections::HashMap<SecretRef, String>>),
 }
 
@@ -113,7 +113,7 @@ impl SecretStore {
         Ok(Self(Arc::new(Backend::File(keyring))))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn in_memory() -> Self {
         Self(Arc::new(Backend::Memory(Default::default())))
     }
@@ -122,7 +122,7 @@ impl SecretStore {
         match &*self.0 {
             Backend::Keyring(_) => BackendKind::Keyring,
             Backend::File(_) => BackendKind::EncryptedFile,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Backend::Memory(_) => BackendKind::EncryptedFile,
         }
     }
@@ -150,7 +150,7 @@ impl SecretStore {
                 Some(oo7::file::Item::Locked(_)) => bail!("the secret file is locked"),
                 None => None,
             },
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Backend::Memory(map) => return Ok(map.lock().unwrap().get(secret).cloned()),
         };
         value
@@ -170,7 +170,7 @@ impl SecretStore {
             Backend::File(file) => {
                 file.create_item(label, &attributes, Secret::text(value), true).await?;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Backend::Memory(map) => {
                 map.lock().unwrap().insert(secret.clone(), value.to_string());
             }
@@ -184,7 +184,7 @@ impl SecretStore {
         match &*self.0 {
             Backend::Keyring(keyring) => keyring.delete(&attributes).await?,
             Backend::File(file) => file.delete(&attributes).await?,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Backend::Memory(map) => {
                 map.lock().unwrap().remove(secret);
             }

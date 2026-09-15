@@ -4768,7 +4768,7 @@ components:
         let paths = setup(cx, tmp.path());
         let root = create_example_project(tmp.path()).unwrap();
         let get_json = root.join("get-json.yaml");
-        let (port, received) = http_server(crate::graphql::tests::PETSTORE);
+        let (port, received) = http_server(crate::graphql::fixtures::PETSTORE);
         let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
         request.method = "POST".into();
         request.url = format!("http://127.0.0.1:{port}/graphql");

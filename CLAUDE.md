@@ -5,9 +5,9 @@ Native Linux API client (Postman/Yaak-style) in Rust on gpui-kit. See README.md 
 ## Commands
 
 ```sh
-cargo test                  # all tests, including headless UI tests
-cargo clippy --all-targets  # must be clean
-cargo fmt                   # rustfmt.toml: max_width 120
+cargo test --workspace      # all tests: the app (headless UI tests) and courier-core
+cargo clippy --workspace --all-targets  # must be clean
+cargo fmt --all             # rustfmt.toml: max_width 120
 cargo run -- <project-dir>
 COURIER_THEME_DIR=/usr/share/omarchy/themes/<name> cargo run   # preview a theme
 ```
@@ -15,6 +15,9 @@ COURIER_THEME_DIR=/usr/share/omarchy/themes/<name> cargo run   # preview a theme
 After moving the repo, `cargo clean -p courier` (tests locate files via `env!("CARGO_MANIFEST_DIR")`).
 
 ## Layout
+
+Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, project, paths, secrets, credentials, cookies, http/transport, chain, response cache, graphql schema/assist, template assist, importers); the root **`courier`** crate is the GPUI app. The app re-exports core modules in `main.rs`, so `crate::model` works in app code. Keep GPUI out of core; test-only helpers there sit behind the `test-support` feature.
+
 
 - `workspace.rs` (+ `workspace/palette.rs`): window root: sidebar, projects, imports, dialogs, command palette
 - `request_editor.rs`, `environment_editor.rs`: the two main panes

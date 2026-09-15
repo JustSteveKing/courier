@@ -1,0 +1,38 @@
+[package]
+name = "courier-core"
+version = "0.1.0"
+edition = "2024"
+description = "Courier's request engine: collections, resolution, chaining, secrets and sending, without any UI"
+license = "MIT"
+
+[features]
+# In-memory secret store, temporary app paths and fixtures for tests in other crates.
+test-support = []
+
+[dependencies]
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+cookie_store = "0.22"
+etcetera = "0.11.0"
+eventsource-stream = "0.2.3"
+futures-util = "0.3.34"
+indexmap = { version = "2.14.2", features = ["serde"] }
+oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
+reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate", "cookies"] }
+reqwest_cookie_store = "0.10"
+rust-i18n = "4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_json_path = "0.7"
+serde_norway = "0.9.42"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+uuid = { version = "1.26.1", features = ["v4"] }
+
+[dev-dependencies]
+futures-lite = "2.6.1"
+rcgen = "0.14"
+rustls = "0.23"
+tempfile = "3.27.0"
+tokio-rustls = "0.26"

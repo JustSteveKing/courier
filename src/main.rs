@@ -1,27 +1,18 @@
 mod auth_form;
-mod chain;
-mod cookies;
-mod credentials;
-mod encoding;
 mod environment_editor;
-mod graphql;
-mod http;
 mod i18n;
-mod import;
-mod model;
 mod omarchy_theme;
-mod paths;
-mod project;
 mod request_editor;
-mod response_cache;
-mod secret_store;
 mod settings;
 mod settings_form;
-mod storage;
-mod template_assist;
-mod transport;
 mod ui;
 mod workspace;
+
+// The engine lives in `courier-core`; these keep `crate::model` and friends working here.
+pub(crate) use courier_core::{
+    chain, cookies, credentials, graphql, http, import, model, paths, project, response_cache, secret_store, storage,
+    template_assist, transport,
+};
 
 use gpui_kit::component::Root;
 use gpui_kit::*;

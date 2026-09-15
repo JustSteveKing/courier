@@ -37,7 +37,7 @@ impl AppPaths {
     }
 
     /// Every directory under `root`, for tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn under(root: &std::path::Path) -> Self {
         Self {
             config_dir: root.join("config"),

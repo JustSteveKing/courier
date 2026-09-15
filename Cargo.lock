@@ -1409,15 +1409,35 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "courier-core",
+ "futures-lite",
+ "gpui-kit",
+ "indexmap",
+ "lsp-types",
+ "notify 8.2.0",
+ "reqwest",
+ "rust-i18n",
+ "serde",
+ "serde_json",
+ "serde_json_path",
+ "serde_norway",
+ "tempfile",
+ "tokio-tungstenite",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "courier-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
  "cookie_store",
  "etcetera",
  "eventsource-stream",
  "futures-lite",
  "futures-util",
- "gpui-kit",
  "indexmap",
- "lsp-types",
- "notify 8.2.0",
  "oo7",
  "rcgen",
  "reqwest",
@@ -1432,7 +1452,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
- "toml 1.1.6+spec-1.1.0",
  "url",
  "uuid",
 ]

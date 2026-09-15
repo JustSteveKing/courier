@@ -6,35 +6,28 @@ description = "A fast, native API client for Linux"
 license = "MIT"
 readme = "README.md"
 
+[workspace]
+members = ["crates/courier-core"]
+
 [dependencies]
+courier-core = { path = "crates/courier-core" }
 anyhow = "1.0.104"
 async-channel = "2.5.0"
-etcetera = "0.11.0"
-eventsource-stream = "0.2.3"
-futures-util = "0.3.34"
 gpui-kit = { version = "0.6.1", features = ["tree-sitter", "tree-sitter-graphql"] }
 indexmap = { version = "2.14.2", features = ["serde"] }
 notify = "8.2.0"
-oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
 reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate", "cookies"] }
-reqwest_cookie_store = "0.10"
-cookie_store = "0.22"
-url = "2"
 rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_norway = "0.9.42"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 serde_json_path = "0.7"
 toml = "1.1.6"
-uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
+courier-core = { path = "crates/courier-core", features = ["test-support"] }
 futures-lite = "2.6.1"
-rcgen = "0.14"
-rustls = "0.23"
-tokio-rustls = "0.26"
 gpui-kit = { version = "0.6.1", features = ["test-support", "tree-sitter", "tree-sitter-graphql"] }
 tempfile = "3.27.0"

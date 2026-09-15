@@ -133,7 +133,8 @@ mod tests {
     fn every_used_key_exists() {
         let known: BTreeSet<String> = locale_entries().into_iter().map(|(k, _)| k).collect();
         let mut missing = Vec::new();
-        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack = vec![root.join("src"), root.join("crates/courier-core/src")];
         while let Some(dir) = stack.pop() {
             for entry in fs::read_dir(dir).unwrap().flatten() {
                 let path = entry.path();

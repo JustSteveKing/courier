@@ -374,19 +374,26 @@ impl SchemaCache {
     }
 }
 
+/// A small introspection result for tests here and in the app.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures {
+    use super::Schema;
+
+    /// A pet store with an interface, a union, an enum and an input type.
+    pub const PETSTORE: &str = include_str!("graphql/petstore.json");
+
+    pub fn petstore() -> Schema {
+        Schema::from_introspection(PETSTORE).unwrap()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::time::Duration;
 
     use super::*;
 
-    /// A small introspection result: a pet store with an interface, a union, an enum and an
-    /// input type.
-    pub const PETSTORE: &str = include_str!("graphql/petstore.json");
-
-    pub fn petstore() -> Schema {
-        Schema::from_introspection(PETSTORE).unwrap()
-    }
+    pub use super::fixtures::{PETSTORE, petstore};
 
     #[test]
     fn parses_introspection() {
