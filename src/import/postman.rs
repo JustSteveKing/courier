@@ -1,29 +1,14 @@
 //! Importing Postman collections (format v2.0 and v2.1) and environment exports.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 
+use super::{CollectionImport, ImportItem};
 use crate::credentials::{hoist_credentials_with, looks_sensitive_name};
 use crate::encoding::{base64_encode, percent_encode};
 use crate::model::{
-    Body, BodyKind, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, Header, RequestFile, Variables,
-    headers_from_text, slugify,
+    Body, BodyKind, CollectionFile, EnvironmentFile, Header, RequestFile, Variables, headers_from_text,
 };
-use crate::storage::{create_request, is_collection, unique_path};
-
-#[derive(Debug)]
-pub struct PostmanImport {
-    /// Secret names are listed in `collection.secrets`; their values are only in `secrets`.
-    pub collection: CollectionFile,
-    pub items: Vec<ImportItem>,
-    /// Secret name -> value. Must go to the secret store, never to YAML.
-    pub secrets: Variables,
-    /// Human-readable, one per dropped or converted feature.
-    pub warnings: Vec<String>,
-}
 
 #[derive(Debug)]
 pub struct EnvironmentImport {
@@ -34,25 +19,7 @@ pub struct EnvironmentImport {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug)]
-pub enum ImportItem {
-    Folder { name: String, children: Vec<ImportItem> },
-    Request(RequestFile),
-}
-
-impl ImportItem {
-    /// Visits every request in `items`, depth first.
-    pub fn for_each_request_mut(items: &mut [ImportItem], f: &mut impl FnMut(&mut RequestFile)) {
-        for item in items {
-            match item {
-                ImportItem::Folder { children, .. } => Self::for_each_request_mut(children, f),
-                ImportItem::Request(request) => f(request),
-            }
-        }
-    }
-}
-
-pub fn parse_collection(json: &str) -> Result<PostmanImport> {
+pub fn parse_collection(json: &str) -> Result<CollectionImport> {
     let root: Value = serde_json::from_str(json).context("The file is not valid JSON")?;
     let (Some(name), Some(items)) = (
         root.pointer("/info/name").and_then(Value::as_str),
@@ -107,9 +74,10 @@ pub fn parse_collection(json: &str) -> Result<PostmanImport> {
         }
     }
 
-    Ok(PostmanImport {
+    Ok(CollectionImport {
         collection,
         items,
+        environments: Vec::new(),
         secrets,
         warnings,
     })
@@ -186,37 +154,6 @@ pub fn parse_environment(json: &str) -> Result<EnvironmentImport> {
         secrets,
         warnings,
     })
-}
-
-/// Creates the `.courier` collection for `project` from an import; returns its root. Only
-/// secret names are written; the caller stores `import.secrets` values in the secret store.
-pub fn write_project_collection(project: &Path, import: &PostmanImport) -> Result<PathBuf> {
-    let root = crate::project::init_with(project, &import.collection)?;
-    write_items(&root, &import.items)?;
-    Ok(root)
-}
-
-/// Writes items into an existing collection directory or folder.
-pub fn write_items(dir: &Path, items: &[ImportItem]) -> Result<()> {
-    for item in items {
-        match item {
-            ImportItem::Folder { name, children } => {
-                // A root folder called "environments" would be mistaken for environment files.
-                let name = if is_collection(dir) && slugify(name) == ENVIRONMENTS_DIR {
-                    format!("{name} folder")
-                } else {
-                    name.clone()
-                };
-                let folder = unique_path(dir, &name, "");
-                fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
-                write_items(&folder, children)?;
-            }
-            ImportItem::Request(request) => {
-                create_request(dir, request)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The auth that applies at some level of the tree, after `inherit`/`noauth` resolution.
@@ -527,6 +464,10 @@ fn value_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use crate::import::{write_items, write_project_collection};
     use crate::storage::{Item, load_collection};
 
     const COLLECTION: &str = r#"{

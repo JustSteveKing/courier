@@ -21,11 +21,6 @@ ws.new_request:
   es: Nueva solicitud
   de: Neue Anfrage
   fr: Nouvelle requête
-ws.new_collection_from_postman:
-  en: New project collection from Postman…
-  es: Nueva colección de proyecto desde Postman…
-  de: Neue Projektsammlung aus Postman…
-  fr: Nouvelle collection de projet depuis Postman…
 ws.import_curl:
   en: Import from curl…
   es: Importar desde curl…
@@ -41,11 +36,6 @@ ws.curl_placeholder:
   es: "curl https://api.example.com/users -H 'Accept: application/json'"
   de: "curl https://api.example.com/users -H 'Accept: application/json'"
   fr: "curl https://api.example.com/users -H 'Accept: application/json'"
-ws.import_postman_here:
-  en: Import Postman collection here…
-  es: Importar colección de Postman aquí…
-  de: Postman-Sammlung hierher importieren…
-  fr: Importer une collection Postman ici…
 ws.import_postman_environment:
   en: Import Postman environment…
   es: Importar entorno de Postman…
@@ -101,11 +91,6 @@ ws.imported_environment:
   es: "Entorno %{name} importado"
   de: "Umgebung %{name} importiert"
   fr: "Environnement %{name} importé"
-ws.postman_imported:
-  en: Postman collection imported
-  es: Colección de Postman importada
-  de: Postman-Sammlung importiert
-  fr: Collection Postman importée
 ws.imported_with_warnings:
   en: Imported with warnings
   es: Importado con advertencias
@@ -279,11 +264,6 @@ ws.create:
   es: Crear
   de: Anlegen
   fr: Créer
-ws.project_has_collection:
-  en: "%{path} already has a Courier collection. Open it, then use “Import Postman collection here…”."
-  es: "%{path} ya tiene una colección de Courier. Ábrela y usa «Importar colección de Postman aquí…»."
-  de: "%{path} hat bereits eine Courier-Sammlung. Öffne sie und nutze „Postman-Sammlung hierher importieren…“."
-  fr: "%{path} a déjà une collection Courier. Ouvrez-la, puis utilisez « Importer une collection Postman ici… »."
 ws.empty_title:
   en: Create or open a project to get started
   es: Crea o abre un proyecto para empezar
@@ -319,3 +299,98 @@ ws.already_a_project:
   es: "%{path} ya es un proyecto, así que se ha abierto"
   de: "%{path} ist bereits ein Projekt und wurde geöffnet"
   fr: "%{path} est déjà un projet, il a donc été ouvert"
+ws.new_project_title:
+  en: New project
+  es: Nuevo proyecto
+  de: Neues Projekt
+  fr: Nouveau projet
+ws.new_project_blank:
+  en: Blank
+  es: En blanco
+  de: Leer
+  fr: Vide
+ws.new_project_blank_detail:
+  en: Start with an empty collection and one request.
+  es: Empieza con una colección vacía y una solicitud.
+  de: Mit einer leeren Sammlung und einer Anfrage beginnen.
+  fr: Commencer avec une collection vide et une requête.
+ws.new_project_postman:
+  en: From a Postman collection
+  es: Desde una colección de Postman
+  de: Aus einer Postman-Sammlung
+  fr: Depuis une collection Postman
+ws.new_project_postman_detail:
+  en: Requests, folders, variables and auth from a Postman export (v2.0 or v2.1).
+  es: Solicitudes, carpetas, variables y autenticación de una exportación de Postman (v2.0 o v2.1).
+  de: Anfragen, Ordner, Variablen und Auth aus einem Postman-Export (v2.0 oder v2.1).
+  fr: Requêtes, dossiers, variables et authentification d’un export Postman (v2.0 ou v2.1).
+ws.new_project_openapi:
+  en: From an OpenAPI spec
+  es: Desde una especificación OpenAPI
+  de: Aus einer OpenAPI-Spezifikation
+  fr: Depuis une spécification OpenAPI
+ws.new_project_openapi_detail:
+  en: A request per operation with example bodies, an environment per server. OpenAPI 3 or Swagger 2, JSON or YAML.
+  es: Una solicitud por operación con cuerpos de ejemplo y un entorno por servidor. OpenAPI 3 o Swagger 2, JSON o YAML.
+  de: Eine Anfrage pro Operation mit Beispiel-Bodys, eine Umgebung pro Server. OpenAPI 3 oder Swagger 2, JSON oder YAML.
+  fr: Une requête par opération avec des corps d’exemple, un environnement par serveur. OpenAPI 3 ou Swagger 2, JSON ou YAML.
+ws.new_project_asyncapi:
+  en: From an AsyncAPI spec
+  es: Desde una especificación AsyncAPI
+  de: Aus einer AsyncAPI-Spezifikation
+  fr: Depuis une spécification AsyncAPI
+ws.new_project_asyncapi_detail:
+  en: A WebSocket request per channel with its messages as templates. AsyncAPI 2 or 3, JSON or YAML.
+  es: Una solicitud WebSocket por canal con sus mensajes como plantillas. AsyncAPI 2 o 3, JSON o YAML.
+  de: Eine WebSocket-Anfrage pro Kanal mit ihren Nachrichten als Vorlagen. AsyncAPI 2 oder 3, JSON oder YAML.
+  fr: Une requête WebSocket par canal avec ses messages comme modèles. AsyncAPI 2 ou 3, JSON ou YAML.
+ws.new_project_from_postman:
+  en: New project from Postman…
+  es: Nuevo proyecto desde Postman…
+  de: Neues Projekt aus Postman…
+  fr: Nouveau projet depuis Postman…
+ws.new_project_from_openapi:
+  en: New project from OpenAPI…
+  es: Nuevo proyecto desde OpenAPI…
+  de: Neues Projekt aus OpenAPI…
+  fr: Nouveau projet depuis OpenAPI…
+ws.new_project_from_asyncapi:
+  en: New project from AsyncAPI…
+  es: Nuevo proyecto desde AsyncAPI…
+  de: Neues Projekt aus AsyncAPI…
+  fr: Nouveau projet depuis AsyncAPI…
+ws.pick_postman_collection:
+  en: Choose a Postman collection
+  es: Elige una colección de Postman
+  de: Postman-Sammlung wählen
+  fr: Choisissez une collection Postman
+ws.pick_openapi:
+  en: Choose an OpenAPI file
+  es: Elige un archivo OpenAPI
+  de: OpenAPI-Datei wählen
+  fr: Choisissez un fichier OpenAPI
+ws.pick_asyncapi:
+  en: Choose an AsyncAPI file
+  es: Elige un archivo AsyncAPI
+  de: AsyncAPI-Datei wählen
+  fr: Choisissez un fichier AsyncAPI
+ws.import_summary:
+  en: "Imports %{requests} requests and %{environments} environments."
+  es: "Importa %{requests} solicitudes y %{environments} entornos."
+  de: "Importiert %{requests} Anfragen und %{environments} Umgebungen."
+  fr: "Importe %{requests} requêtes et %{environments} environnements."
+ws.import_file_here:
+  en: Import Postman, OpenAPI or AsyncAPI here…
+  es: Importar Postman, OpenAPI o AsyncAPI aquí…
+  de: Postman, OpenAPI oder AsyncAPI hierher importieren…
+  fr: Importer Postman, OpenAPI ou AsyncAPI ici…
+ws.imported:
+  en: Imported
+  es: Importado
+  de: Importiert
+  fr: Importé
+ws.project_has_collection:
+  en: "%{path} already has a Courier collection. Open it, then use “Import Postman, OpenAPI or AsyncAPI here…”."
+  es: "%{path} ya tiene una colección de Courier. Ábrela y usa «Importar Postman, OpenAPI o AsyncAPI aquí…»."
+  de: "%{path} hat bereits eine Courier-Sammlung. Öffne sie und nutze „Postman, OpenAPI oder AsyncAPI hierher importieren…“."
+  fr: "%{path} a déjà une collection Courier. Ouvrez-la, puis utilisez « Importer Postman, OpenAPI ou AsyncAPI ici… »."

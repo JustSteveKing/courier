@@ -2,9 +2,11 @@
 
 pub mod palette;
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -23,7 +25,7 @@ use rust_i18n::t;
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
 use crate::graphql::SchemaCache;
-use crate::import::postman::ImportItem;
+use crate::import::{self, CollectionImport, ImportFormat, ImportItem};
 use crate::import::{curl, postman};
 use crate::model::{CollectionFile, RequestFile, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
@@ -165,7 +167,7 @@ impl Workspace {
                     let weak = cx.entity().downgrade();
                     // Dialogs need the window's root view, which exists once this view does.
                     window.defer(cx, move |window, cx| {
-                        weak.update(cx, |this, cx| this.offer_init_project(launch.dir, window, cx))
+                        weak.update(cx, |this, cx| this.offer_init_project(launch.dir, None, window, cx))
                             .ok();
                     });
                 }
@@ -545,9 +547,84 @@ impl Workspace {
         self.pick_path(true, t!("ws.open_project").to_string(), window, cx, apply);
     }
 
-    /// Picks a folder for a new project and names its collection. A folder that is already
-    /// a project just opens.
+    /// Asks what to start the new project from: nothing, or a Postman, OpenAPI or AsyncAPI file.
     fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            let content = move |content: gpui_kit::component::dialog::DialogContent, _: &mut Window, cx: &mut App| {
+                let theme = cx.theme().clone();
+                let choice =
+                    |id: &'static str,
+                     icon: IconName,
+                     title: String,
+                     detail: String,
+                     start: fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| {
+                        let weak = weak.clone();
+                        h_flex()
+                            .id(id)
+                            .test_support()
+                            .gap_3()
+                            .p_3()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .cursor_pointer()
+                            .hover(|row| row.bg(theme.accent))
+                            .child(Icon::new(icon).text_color(theme.muted_foreground))
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title))
+                                    .child(div().text_xs().text_color(theme.muted_foreground).child(detail)),
+                            )
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                weak.update(cx, |this, cx| start(this, window, cx)).ok();
+                            })
+                    };
+                let rows = v_flex()
+                    .gap_2()
+                    .child(choice(
+                        "new-project-blank",
+                        IconName::Plus,
+                        t!("ws.new_project_blank").to_string(),
+                        t!("ws.new_project_blank_detail").to_string(),
+                        Workspace::new_blank_project,
+                    ))
+                    .child(choice(
+                        "new-project-postman",
+                        IconName::Inbox,
+                        t!("ws.new_project_postman").to_string(),
+                        t!("ws.new_project_postman_detail").to_string(),
+                        |this, window, cx| this.new_project_from(ImportFormat::Postman, window, cx),
+                    ))
+                    .child(choice(
+                        "new-project-openapi",
+                        IconName::BookOpen,
+                        t!("ws.new_project_openapi").to_string(),
+                        t!("ws.new_project_openapi_detail").to_string(),
+                        |this, window, cx| this.new_project_from(ImportFormat::OpenApi, window, cx),
+                    ))
+                    .child(choice(
+                        "new-project-asyncapi",
+                        IconName::Bell,
+                        t!("ws.new_project_asyncapi").to_string(),
+                        t!("ws.new_project_asyncapi_detail").to_string(),
+                        |this, window, cx| this.new_project_from(ImportFormat::AsyncApi, window, cx),
+                    ));
+                content.child(rows)
+            };
+            dialog
+                .title(t!("ws.new_project_title").to_string())
+                .w(px(480.))
+                .content(content)
+        });
+    }
+
+    /// Picks a folder for a new, empty project and names its collection. A folder that is
+    /// already a project just opens.
+    fn new_blank_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_path(
             true,
             t!("ws.new_project_prompt").to_string(),
@@ -563,27 +640,68 @@ impl Workspace {
                     );
                     this.open_collection(root, window, cx);
                 }
-                None => this.offer_init_project(dir, window, cx),
+                None => this.offer_init_project(dir, None, window, cx),
             },
         );
+    }
+
+    /// Picks a file to import, then a folder for the project, then names it.
+    fn new_project_from(&mut self, format: ImportFormat, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_import_file(format, window, cx, |this, import, window, cx| {
+            this.pick_path(
+                true,
+                t!("ws.new_project_prompt").to_string(),
+                window,
+                cx,
+                move |this, dir, window, cx| {
+                    if let Some(existing) = project::find(&dir) {
+                        let path = project::project_dir(&existing).display().to_string();
+                        notify_error(t!("ws.project_has_collection", path = path).to_string(), window, cx);
+                        return;
+                    }
+                    this.offer_init_project(dir, Some(import), window, cx);
+                },
+            );
+            Ok(())
+        });
     }
 
     fn open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_project_folder(window, cx, |this, dir, window, cx| match project::find(&dir) {
             Some(root) => this.open_collection(root, window, cx),
-            None => this.offer_init_project(dir, window, cx),
+            None => this.offer_init_project(dir, None, window, cx),
         });
     }
 
-    /// Asks for a name, then creates `.courier/` in a folder that has no collection yet and
-    /// opens a first request.
-    fn offer_init_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let name = cx.new(|cx| InputState::new(window, cx).default_value(project::default_name(&dir)));
+    /// Asks for a name, then creates `.courier/` in a folder that has no collection yet: from
+    /// `import` if given, otherwise empty with a first request.
+    fn offer_init_project(
+        &mut self,
+        dir: PathBuf,
+        import: Option<CollectionImport>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let default_name = match &import {
+            Some(import) => import.collection.name.clone(),
+            None => project::default_name(&dir),
+        };
+        let summary = import.as_ref().map(|import| {
+            t!(
+                "ws.import_summary",
+                requests = ImportItem::count_requests(&import.items),
+                environments = import.environments.len()
+            )
+            .to_string()
+        });
+        let import = Rc::new(RefCell::new(import));
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(default_name));
         name.focus_handle(cx).focus(window, cx);
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (weak, dir, name) = (weak.clone(), dir.clone(), name.clone());
+            let (weak, dir, name, import) = (weak.clone(), dir.clone(), name.clone(), import.clone());
             let hint = t!("ws.init_project_hint", path = dir.display(), dir = project::DOT_DIR).to_string();
+            let summary = summary.clone();
             let muted = cx.theme().muted_foreground;
             dialog
                 .title(t!("ws.init_project_title").to_string())
@@ -603,6 +721,7 @@ impl Workspace {
                                     )
                                     .child(text_input(&name)),
                             )
+                            .children(summary.clone().map(|summary| div().pt_2().text_sm().child(summary)))
                             .child(div().pt_2().text_sm().text_color(muted).child(hint.clone()))
                     }
                 })
@@ -612,18 +731,48 @@ impl Workspace {
                     if collection_name.is_empty() {
                         return false;
                     }
-                    let result = project::init_with(&dir, &CollectionFile::new(collection_name));
-                    weak.update(cx, |this, cx| match result {
-                        Ok(root) => {
-                            this.open_collection(root.clone(), window, cx);
-                            this.new_request(root, window, cx);
+                    let import = import.borrow_mut().take();
+                    weak.update(cx, |this, cx| {
+                        if let Err(e) = this.create_project(&dir, collection_name, import, window, cx) {
+                            notify_error(format!("{e:#}"), window, cx);
                         }
-                        Err(e) => notify_error(format!("{e:#}"), window, cx),
                     })
                     .ok();
                     true
                 })
         });
+    }
+
+    /// Creates and opens a project's collection, then shows its first request.
+    fn create_project(
+        &mut self,
+        dir: &Path,
+        name: String,
+        import: Option<CollectionImport>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let Some(mut import) = import else {
+            let root = project::init_with(dir, &CollectionFile::new(name))?;
+            self.open_collection(root.clone(), window, cx);
+            self.new_request(root, window, cx);
+            return Ok(());
+        };
+        import.collection.name = name;
+        let root = import::write_project_collection(dir, &import)?;
+        let collection = storage::load_collection(&root)?;
+        let writes = import
+            .secrets
+            .iter()
+            .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
+            .collect();
+        self.store_secrets(writes, window, cx);
+        self.open_collection(root.clone(), window, cx);
+        if let Some(first) = collection.first_request() {
+            self.select_request(first.to_path_buf(), window, cx);
+        }
+        notify_import(&import.warnings, window, cx);
+        Ok(())
     }
 
     fn import_curl_dialog(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -682,7 +831,7 @@ impl Workspace {
         });
     }
 
-    /// Asks for a Postman JSON file, then hands its contents to `apply`.
+    /// Asks for a Postman environment file, then hands its contents to `apply`.
     fn pick_postman_file(
         &mut self,
         window: &mut Window,
@@ -705,83 +854,95 @@ impl Workspace {
         );
     }
 
-    /// Picks a project folder without a collection, then a Postman file to create it from.
-    fn import_postman_as_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick_project_folder(window, cx, |this, dir, window, cx| {
-            if let Some(existing) = project::find(&dir) {
-                notify_error(
-                    t!(
-                        "ws.project_has_collection",
-                        path = project::project_dir(&existing).display()
-                    )
-                    .to_string(),
-                    window,
-                    cx,
-                );
-                return;
+    /// Asks for a Postman collection, OpenAPI or AsyncAPI file (`format` only sets the
+    /// prompt; the file's own format is detected), then hands the parsed import to `apply`.
+    fn pick_import_file(
+        &mut self,
+        format: ImportFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, CollectionImport, &mut Window, &mut Context<Self>) -> Result<()> + 'static,
+    ) {
+        let prompt = match format {
+            ImportFormat::Postman => t!("ws.pick_postman_collection"),
+            ImportFormat::OpenApi => t!("ws.pick_openapi"),
+            ImportFormat::AsyncApi => t!("ws.pick_asyncapi"),
+        };
+        self.pick_path(false, prompt.to_string(), window, cx, |this, file, window, cx| {
+            let result = fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))
+                .and_then(|text| import::parse_collection_file(&text))
+                .and_then(|(_, import)| apply(this, import, window, cx));
+            if let Err(e) = result {
+                notify_error(format!("{e:#}"), window, cx);
             }
-            this.pick_postman_file(window, cx, move |this, json, window, cx| {
-                this.create_project_from_postman(&dir, &json, window, cx)
-            });
         });
     }
 
-    fn create_project_from_postman(
+    fn import_file_into(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_import_file(ImportFormat::OpenApi, window, cx, move |this, import, window, cx| {
+            this.import_into(&root, import, window, cx)
+        });
+    }
+
+    /// Adds an import's requests, environments and secrets to an existing collection.
+    fn import_into(
         &mut self,
-        dir: &Path,
-        json: &str,
+        root: &Path,
+        mut import: CollectionImport,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let import = postman::parse_collection(json)?;
-        let root = postman::write_project_collection(dir, &import)?;
-        let collection = storage::load_collection(&root)?;
-        let writes = import
-            .secrets
+        let mut collection = storage::load_collection(root)?;
+        // Imported secret names that clash with this collection's names get a suffix.
+        let mut renamed = Variables::new();
+        let mut names = Vec::new();
+        for name in std::mem::take(&mut import.collection.secrets) {
+            let value = import.secrets.shift_remove(&name).unwrap_or_default();
+            let file = &collection.file;
+            let new_name = unique_name(&name, |candidate| {
+                file.secrets.iter().any(|s| s == candidate)
+                    || file.variables.contains_key(candidate)
+                    || names.iter().any(|n| n == candidate)
+            });
+            if new_name != name {
+                rename_placeholder(&mut import.items, &name, &new_name);
+            }
+            if !value.is_empty() {
+                renamed.insert(new_name.clone(), value);
+            }
+            names.push(new_name);
+        }
+        import::write_items(root, &import.items)?;
+        for environment in &import.environments {
+            storage::create_environment(root, environment)?;
+        }
+        // Variables the requests need (such as `base_url`) that the collection doesn't have yet.
+        let new_variables: Vec<_> = import
+            .collection
+            .variables
             .iter()
-            .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
+            .filter(|(name, _)| !collection.file.variables.contains_key(*name))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        self.store_secrets(writes, window, cx);
-        self.open_collection(root, window, cx);
+        if !names.is_empty() || !new_variables.is_empty() {
+            collection.file.ensure_id();
+            for name in names {
+                if !collection.file.secrets.contains(&name) {
+                    collection.file.secrets.push(name);
+                }
+            }
+            collection.file.variables.extend(new_variables);
+            storage::save_collection_file(root, &collection.file)?;
+            let writes = renamed
+                .iter()
+                .map(|(name, value)| SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value))
+                .collect();
+            self.store_secrets(writes, window, cx);
+        }
+        self.reload_collection(root, window, cx);
         notify_import(&import.warnings, window, cx);
         Ok(())
-    }
-
-    fn import_postman_into(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick_postman_file(window, cx, move |this, json, window, cx| {
-            let mut import = postman::parse_collection(&json)?;
-            let mut collection = storage::load_collection(&root)?;
-            // Imported secret names that clash with this collection's names get a suffix.
-            let mut renamed = Variables::new();
-            for (name, value) in std::mem::take(&mut import.secrets) {
-                let file = &collection.file;
-                let new_name = unique_name(&name, |candidate| {
-                    file.secrets.iter().any(|s| s == candidate)
-                        || file.variables.contains_key(candidate)
-                        || renamed.contains_key(candidate)
-                });
-                if new_name != name {
-                    rename_placeholder(&mut import.items, &name, &new_name);
-                }
-                renamed.insert(new_name, value);
-            }
-            postman::write_items(&root, &import.items)?;
-            if !renamed.is_empty() {
-                collection.file.ensure_id();
-                collection.file.secrets.extend(renamed.keys().cloned());
-                storage::save_collection_file(&root, &collection.file)?;
-                let writes = renamed
-                    .iter()
-                    .map(|(name, value)| {
-                        SecretWrite::new(&collection.file, DEFAULTS_SCOPE, DEFAULTS_LABEL, name, value)
-                    })
-                    .collect();
-                this.store_secrets(writes, window, cx);
-            }
-            this.reload_collection(&root, window, cx);
-            notify_import(&import.warnings, window, cx);
-            Ok(())
-        });
     }
 
     fn import_postman_environment(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -1015,14 +1176,10 @@ impl Workspace {
                                 menu.item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
                                     this.new_project(window, cx)
                                 }))
-                                .item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
-                                    this.open_project(window, cx)
-                                }))
-                                .separator()
                                 .item(menu_item(
-                                    t!("ws.new_collection_from_postman"),
+                                    t!("ws.open_project_ellipsis"),
                                     &weak,
-                                    |this, window, cx| this.import_postman_as_new(window, cx),
+                                    |this, window, cx| this.open_project(window, cx),
                                 ))
                             }),
                     ),
@@ -1069,12 +1226,6 @@ impl Workspace {
                             .icon(IconName::FolderOpen)
                             .label(t!("ws.open_project_ellipsis").to_string())
                             .on_click(cx.listener(|this, _, window, cx| this.open_project(window, cx))),
-                    )
-                    .child(
-                        Button::new("empty-import-postman")
-                            .ghost()
-                            .label(t!("ws.new_collection_from_postman").to_string())
-                            .on_click(cx.listener(|this, _, window, cx| this.import_postman_as_new(window, cx))),
                     ),
             )
     }
@@ -1325,7 +1476,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .separator()
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
-        .item(item("ws.import_postman_here", Workspace::import_postman_into))
+        .item(item("ws.import_file_here", Workspace::import_file_into))
         .item(item(
             "ws.import_postman_environment",
             Workspace::import_postman_environment,
@@ -1385,10 +1536,10 @@ fn notify_error(message: String, window: &mut Window, cx: &mut App) {
 
 fn notify_import(warnings: &[String], window: &mut Window, cx: &mut App) {
     let note = if warnings.is_empty() {
-        Notification::success(t!("ws.postman_imported").to_string())
+        Notification::success(t!("ws.imported").to_string())
     } else {
         for warning in warnings {
-            eprintln!("postman import: {warning}");
+            eprintln!("import: {warning}");
         }
         let shown: Vec<_> = warnings.iter().take(5).cloned().collect();
         let more = warnings.len().saturating_sub(shown.len());
@@ -1721,6 +1872,92 @@ mod tests {
         });
         let state = read(&paths.state_dir.join("state.yaml"));
         assert!(state.contains("einvoicing"), "{state}");
+    }
+
+    #[gpui_kit::test]
+    async fn new_projects_start_blank_or_from_a_spec(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let (workspace, window) = open_workspace(cx, &paths, None);
+
+        // New project offers each starting point.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.new_project(window, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            for id in [
+                "new-project-blank",
+                "new-project-postman",
+                "new-project-openapi",
+                "new-project-asyncapi",
+            ] {
+                assert!(window.try_find(id).is_some(), "offers {id}");
+            }
+            window.close_dialog(cx);
+        })
+        .unwrap();
+
+        // From an OpenAPI spec: the name comes from the spec, then Create writes the collection.
+        let spec = r#"
+openapi: 3.0.3
+info: { title: Pet API }
+servers:
+  - { url: https://pets.test, description: Production }
+  - { url: http://localhost:3000, description: Local }
+security: [{ bearerAuth: [] }]
+paths:
+  /pets/{petId}:
+    get: { summary: Get a pet, tags: [pets] }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+"#;
+        let (format, import) = import::parse_collection_file(spec).unwrap();
+        assert_eq!(format, ImportFormat::OpenApi);
+        let project = tmp.path().join("pet-api");
+        fs::create_dir_all(&project).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.offer_init_project(project.clone(), Some(import), window, cx)
+            });
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let root = project.join(".courier");
+        let collection = storage::load_collection(&root).unwrap();
+        assert_eq!(collection.file.name, "Pet API");
+        assert_eq!(collection.file.secrets, ["bearer_auth"]);
+        assert_eq!(collection.environments.len(), 2);
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.collections.len(), 1);
+            let opened = ws.editor.read(cx).path().cloned().expect("the first request is open");
+            assert!(opened.starts_with(root.join("pets")), "{}", opened.display());
+        });
+
+        // Importing into an existing collection adds requests without overwriting variables.
+        let example = create_example_project(tmp.path()).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.open_collection(example.clone(), window, cx);
+                let (_, import) = import::parse_collection_file(spec).unwrap();
+                this.import_into(&example, import, window, cx).unwrap();
+            });
+        })
+        .unwrap();
+        let merged = storage::load_collection(&example).unwrap();
+        assert_eq!(merged.file.variables["base_url"], "https://httpbin.org", "kept");
+        assert_eq!(merged.file.variables["petId"], "", "added");
+        assert_eq!(merged.file.secrets, ["bearer_auth"]);
+        assert_eq!(merged.requests().len(), 3);
+        assert_eq!(merged.environments.len(), 3);
     }
 
     #[gpui_kit::test]

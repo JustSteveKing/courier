@@ -23,7 +23,7 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 - `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL bodies), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
 - `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
 - `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions, hover and validation from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)
-- `import/` (curl, Postman), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`
+- `import/` (`mod.rs`: shared `CollectionImport` + writers and format detection; curl, Postman, `openapi.rs`, `asyncapi.rs`, `spec.rs` for `$ref`s and schema examples; `COURIER_IMPORT_FILES=… cargo test real_files -- --ignored --nocapture` tries real specs), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`
 
 ## Rules
 

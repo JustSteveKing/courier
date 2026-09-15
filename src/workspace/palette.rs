@@ -10,6 +10,7 @@ use rust_i18n::t;
 
 use super::{RootAction, Workspace};
 use crate::i18n::{self, LANGUAGES};
+use crate::import::ImportFormat;
 use crate::omarchy_theme;
 use crate::settings::AppSettings;
 
@@ -179,10 +180,20 @@ impl Workspace {
             .english("ws.open_project_ellipsis")
             .keywords(["folder".into(), "collection".into()])
             .icon(IconName::FolderOpen),
-            Entry::new(t!("ws.new_collection_from_postman"), |this, window, cx| {
-                this.import_postman_as_new(window, cx)
+            Entry::new(t!("ws.new_project_from_postman"), |this, window, cx| {
+                this.new_project_from(ImportFormat::Postman, window, cx)
             })
-            .english("ws.new_collection_from_postman"),
+            .english("ws.new_project_from_postman"),
+            Entry::new(t!("ws.new_project_from_openapi"), |this, window, cx| {
+                this.new_project_from(ImportFormat::OpenApi, window, cx)
+            })
+            .english("ws.new_project_from_openapi")
+            .keywords(["swagger".into(), "spec".into()]),
+            Entry::new(t!("ws.new_project_from_asyncapi"), |this, window, cx| {
+                this.new_project_from(ImportFormat::AsyncApi, window, cx)
+            })
+            .english("ws.new_project_from_asyncapi")
+            .keywords(["websocket".into(), "spec".into()]),
         ];
         if let Some(root) = self.active_collection(cx).map(|c| c.root.clone()) {
             let with_root = |key: &'static str, run: RootAction| {
@@ -193,7 +204,7 @@ impl Workspace {
                 with_root("ws.new_request", Workspace::new_request).icon(IconName::Plus),
                 with_root("ws.manage_environments_ellipsis", Workspace::manage_environments).icon(IconName::Settings),
                 with_root("ws.import_curl", Workspace::import_curl_dialog).icon(IconName::SquareTerminal),
-                with_root("ws.import_postman_here", Workspace::import_postman_into),
+                with_root("ws.import_file_here", Workspace::import_file_into),
                 with_root("ws.import_postman_environment", Workspace::import_postman_environment),
                 with_root("ws.reload_from_disk", |this, root, window, cx| {
                     this.reload_collection(&root, window, cx)
