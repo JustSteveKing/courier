@@ -71,4 +71,7 @@ pub struct AppState {
     pub active_environments: BTreeMap<PathBuf, PathBuf>,
     #[serde(default)]
     pub last_request: Option<PathBuf>,
+    /// Sidebar width in pixels, when resized from the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<f32>,
 }

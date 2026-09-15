@@ -52,6 +52,20 @@ enum MainView {
     Environments,
 }
 
+const SIDEBAR_WIDTH: f32 = 280.;
+const SIDEBAR_MIN_WIDTH: f32 = 180.;
+/// Room always left for the request editor when widening the sidebar.
+const MAIN_MIN_WIDTH: f32 = 420.;
+
+/// Dragged while resizing the sidebar.
+struct SidebarResize;
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 pub struct Workspace {
     paths: AppPaths,
     state: AppState,
@@ -174,6 +188,23 @@ impl Workspace {
                 None => {}
             }
         }
+    }
+
+    /// The sidebar width, kept within the window so the editor always has room.
+    fn sidebar_width(&self, window: &Window) -> Pixels {
+        let max = (f32::from(window.viewport_size().width) - MAIN_MIN_WIDTH).max(SIDEBAR_MIN_WIDTH);
+        px(self
+            .state
+            .sidebar_width
+            .unwrap_or(SIDEBAR_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, max))
+    }
+
+    fn resize_sidebar(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        self.state.sidebar_width = Some(f32::from(x).round());
+        let clamped = f32::from(self.sidebar_width(window));
+        self.state.sidebar_width = Some(clamped);
+        cx.notify();
     }
 
     fn save_state(&self) {
@@ -1137,7 +1168,7 @@ impl Workspace {
 
     // MARK: Rendering
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let weak = cx.entity().downgrade();
         let mut rows = Vec::new();
@@ -1145,11 +1176,31 @@ impl Workspace {
             self.render_collection(collection, &mut rows, cx);
         }
 
+        let handle = div()
+            .id("sidebar-resize")
+            .test_support()
+            .absolute()
+            .top_0()
+            .right(px(-3.))
+            .h_full()
+            .w(px(6.))
+            .cursor_col_resize()
+            .hover(|handle| handle.bg(theme.accent))
+            .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| SidebarResize))
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    this.state.sidebar_width = None;
+                    this.save_state();
+                    cx.notify();
+                }
+            }));
         v_flex()
-            .w(px(280.))
+            .relative()
+            .w(self.sidebar_width(window))
             .h_full()
             .flex_none()
             .bg(theme.sidebar)
+            .child(handle)
             .text_color(theme.sidebar_foreground)
             .border_r_1()
             .border_color(theme.sidebar_border)
@@ -1389,7 +1440,11 @@ impl Render for Workspace {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(self.render_sidebar(cx))
+            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<SidebarResize>, window, cx| {
+                this.resize_sidebar(event.event.position.x, window, cx)
+            }))
+            .on_drop(cx.listener(|this, _: &SidebarResize, _, _| this.save_state()))
+            .child(self.render_sidebar(window, cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -1958,6 +2013,48 @@ components:
         assert_eq!(merged.file.secrets, ["bearer_auth"]);
         assert_eq!(merged.requests().len(), 3);
         assert_eq!(merged.environments.len(), 3);
+    }
+
+    #[gpui_kit::test]
+    async fn sidebar_resizes_remembers_and_resets(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let (workspace, window) = open_workspace(cx, &paths, None);
+        let sidebar_width = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).state.sidebar_width);
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let handle = window.find("sidebar-resize").bounds();
+            let from = handle.center();
+            window.drag(from, point(px(400.), from.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(sidebar_width(cx), Some(400.));
+        let state = fs::read_to_string(paths.state_dir.join("state.yaml")).unwrap();
+        assert!(
+            state.contains("sidebar_width: 400"),
+            "saved when the drag ends: {state}"
+        );
+
+        // Never so wide that the editor loses its room.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let from = window.find("sidebar-resize").bounds().center();
+            let far = window.viewport_size().width + px(500.);
+            window.drag(from, point(far, from.y), cx);
+            let max = f32::from(window.viewport_size().width) - MAIN_MIN_WIDTH;
+            assert_eq!(workspace.read(cx).state.sidebar_width, Some(max));
+        })
+        .unwrap();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.double_click("sidebar-resize", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(sidebar_width(cx), None, "double-click resets");
     }
 
     #[gpui_kit::test]
