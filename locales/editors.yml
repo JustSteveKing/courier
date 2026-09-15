@@ -661,3 +661,58 @@ request.schema_possible_types:
   es: Tipos posibles
   de: Mögliche Typen
   fr: Types possibles
+graphql.unknown_field:
+  en: "Cannot query field `%{field}` on type `%{owner}`"
+  es: "No se puede consultar el campo `%{field}` en el tipo `%{owner}`"
+  de: "Feld `%{field}` gibt es auf Typ `%{owner}` nicht"
+  fr: "Impossible d’interroger le champ `%{field}` sur le type `%{owner}`"
+graphql.field_on_union:
+  en: "`%{union}` is a union: select `%{field}` inside `... on SomeType { }`"
+  es: "`%{union}` es una unión: selecciona `%{field}` dentro de `... on AlgúnTipo { }`"
+  de: "`%{union}` ist eine Union: `%{field}` innerhalb von `... on EinTyp { }` auswählen"
+  fr: "`%{union}` est une union : sélectionnez `%{field}` dans `... on UnType { }`"
+graphql.unknown_argument:
+  en: "Unknown argument `%{argument}` on `%{field}`"
+  es: "Argumento desconocido `%{argument}` en `%{field}`"
+  de: "Unbekanntes Argument `%{argument}` für `%{field}`"
+  fr: "Argument inconnu `%{argument}` sur `%{field}`"
+graphql.missing_argument:
+  en: "`%{field}` needs the argument `%{argument}`"
+  es: "`%{field}` necesita el argumento `%{argument}`"
+  de: "`%{field}` braucht das Argument `%{argument}`"
+  fr: "`%{field}` requiert l’argument `%{argument}`"
+graphql.unknown_enum_value:
+  en: "`%{value}` is not a value of enum `%{enum_type}`"
+  es: "`%{value}` no es un valor del enum `%{enum_type}`"
+  de: "`%{value}` ist kein Wert von Enum `%{enum_type}`"
+  fr: "`%{value}` n’est pas une valeur de l’enum `%{enum_type}`"
+graphql.unknown_type:
+  en: "Unknown type `%{name}`"
+  es: "Tipo desconocido `%{name}`"
+  de: "Unbekannter Typ `%{name}`"
+  fr: "Type inconnu `%{name}`"
+graphql.not_input_type:
+  en: "`%{name}` can't be used for a variable (it isn't a scalar, enum or input type)"
+  es: "`%{name}` no se puede usar para una variable (no es un escalar, enum ni tipo input)"
+  de: "`%{name}` kann nicht für eine Variable verwendet werden (kein Skalar-, Enum- oder Input-Typ)"
+  fr: "`%{name}` ne peut pas servir de variable (ce n’est ni un scalaire, ni un enum, ni un type input)"
+graphql.undeclared_variable:
+  en: "Variable `$%{name}` is not declared"
+  es: "La variable `$%{name}` no está declarada"
+  de: "Variable `$%{name}` ist nicht deklariert"
+  fr: "La variable `$%{name}` n’est pas déclarée"
+graphql.no_root_type:
+  en: "This schema has no %{operation} type"
+  es: "Este esquema no tiene tipo %{operation}"
+  de: "Dieses Schema hat keinen %{operation}-Typ"
+  fr: "Ce schéma n’a pas de type %{operation}"
+graphql.needs_selection:
+  en: "`%{field}` returns `%{returns}`: choose fields with `{ }`"
+  es: "`%{field}` devuelve `%{returns}`: elige campos con `{ }`"
+  de: "`%{field}` liefert `%{returns}`: Felder mit `{ }` auswählen"
+  fr: "`%{field}` renvoie `%{returns}` : choisissez des champs avec `{ }`"
+graphql.no_subfields:
+  en: "`%{field}` is `%{returns}` and has no fields to select"
+  es: "`%{field}` es `%{returns}` y no tiene campos que seleccionar"
+  de: "`%{field}` ist `%{returns}` und hat keine auswählbaren Felder"
+  fr: "`%{field}` est `%{returns}` et n’a pas de champs à sélectionner"

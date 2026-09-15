@@ -2291,6 +2291,28 @@ mod tests {
             cx.update(|cx| editor.read(cx).complete_for_test("{ pe", 4)),
             ["pets", "pet"]
         );
+        assert_eq!(cx.update(|cx| editor.read(cx).query_problems_for_test(cx)), []);
+
+        // Mistakes are underlined as you type, and cleared once fixed.
+        let query = cx.update(|cx| editor.read(cx).graphql_query_for_test());
+        cx.update_window(window, |_, window, cx| {
+            query.update(cx, |s, cx| s.replace_all("{ pets { id nmae } }", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).query_problems_for_test(cx)),
+            [(
+                "Cannot query field `nmae` on type `Pet`".to_string(),
+                "nmae".to_string()
+            )]
+        );
+        cx.update_window(window, |_, window, cx| {
+            query.update(cx, |s, cx| s.replace_all("{ pets { id name } }", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| editor.read(cx).query_problems_for_test(cx)), []);
 
         // The first row is the query root; opening it lists its fields.
         cx.update_window(window, |_, window, cx| {

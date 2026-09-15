@@ -5,7 +5,7 @@ A fast, native API client for Linux, in the spirit of Postman and Yaak, without 
 - **Requests live with your code.** A project's requests and environments are plain YAML in a `.courier/` folder inside the project, so they're reviewed and versioned in git like everything else.
 - **Secrets stay out of git.** Collections store secret *names*; values go in your desktop keyring (GNOME Keyring, KWallet, KeePassXC), or an encrypted file when there isn't one.
 - **Feels at home on Linux.** XDG directories, desktop portals for file pickers, and on [Omarchy](https://omarchy.org) it follows your theme and font live.
-- **Beyond plain HTTP:** streamed responses with Cancel, Server-Sent Events as a live, filterable event list with reconnect, WebSockets with a message timeline and saved message templates, and GraphQL queries with variables, plus a browsable schema, autocomplete and hover docs from introspection.
+- **Beyond plain HTTP:** streamed responses with Cancel, Server-Sent Events as a live, filterable event list with reconnect, WebSockets with a message timeline and saved message templates, and GraphQL queries with variables, plus a browsable schema, autocomplete, hover docs and mistakes underlined as you type, from introspection.
 - **Imports:** paste a curl command or bring a Postman collection/environment; literal tokens are moved into secrets automatically.
 - **Command palette** (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) for requests, actions, environments and settings.
 - **Languages:** English, Español, Deutsch, Français.

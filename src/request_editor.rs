@@ -278,6 +278,12 @@ impl RequestEditor {
             })
             .detach();
         }
+        cx.subscribe(&graphql_query, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.check_query(cx);
+            }
+        })
+        .detach();
         for editor in [&headers, &body, &graphql_query, &graphql_variables] {
             cx.subscribe(editor, |this, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
@@ -415,6 +421,26 @@ impl RequestEditor {
         suggestions.into_iter().map(|s| s.label).collect()
     }
 
+    /// Underlined problems in the query editor, as (message, underlined text).
+    #[cfg(test)]
+    pub fn query_problems_for_test(&self, cx: &App) -> Vec<(String, String)> {
+        let state = self.graphql_query.read(cx);
+        let text = state.value().to_string();
+        state
+            .diagnostics()
+            .map(|set| {
+                set.range(0..text.len())
+                    .map(|entry| (entry.message.to_string(), text[entry.range.clone()].to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn graphql_query_for_test(&self) -> Entity<EditorState> {
+        self.graphql_query.clone()
+    }
+
     #[cfg(test)]
     pub fn schema_nav_for_test(&self) -> Vec<String> {
         self.schema_nav.clone()
@@ -535,6 +561,7 @@ impl RequestEditor {
         self.dirty = false;
         self.schema_nav.clear();
         self.sync_schema(cx);
+        self.check_query(cx);
         self.show_response(window, cx);
     }
 

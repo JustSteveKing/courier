@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
+use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{CompletionProvider, HoverProvider};
 use gpui_kit::component::{ActiveTheme as _, IconName, Rope, RopeExt as _, Sizable as _, h_flex, v_flex};
@@ -64,18 +65,49 @@ impl RequestEditor {
         self.schemas.get(&self.schema_key(cx)?)
     }
 
+    /// Underlines problems in the query against the current schema. The editor clears its
+    /// diagnostics on every edit, so this runs after each change and when the schema changes.
+    pub(super) fn check_query(&mut self, cx: &mut Context<Self>) {
+        let schema = self.schema_slot.borrow().clone();
+        self.graphql_query.update(cx, |state, cx| {
+            let text = state.text().clone();
+            let problems = schema
+                .map(|cached| assist::validate(&cached.schema, &text.to_string()))
+                .unwrap_or_default();
+            let Some(diagnostics) = state.diagnostics_mut() else {
+                return;
+            };
+            diagnostics.reset(&text);
+            diagnostics.extend(problems.into_iter().map(|problem| {
+                let range = text.offset_to_position(problem.range.start)..text.offset_to_position(problem.range.end);
+                let severity = if problem.is_warning() {
+                    DiagnosticSeverity::Warning
+                } else {
+                    DiagnosticSeverity::Error
+                };
+                Diagnostic::new(range, problem.message()).with_severity(severity)
+            }));
+            cx.notify();
+        });
+    }
+
     /// Points the query editor at the schema for the current URL, loading it from the cache
     /// the first time it's needed.
     pub(super) fn sync_schema(&mut self, cx: &mut Context<Self>) {
         if !self.is_graphql(cx) {
             self.schema_slot.replace(None);
+            self.check_query(cx);
             return;
         }
         let Some(key) = self.schema_key(cx) else {
             return;
         };
         if let Some(state) = self.schemas.get(&key) {
+            let changed = !option_arc_eq(&self.schema_slot.borrow(), &state.schema);
             self.schema_slot.replace(state.schema.clone());
+            if changed {
+                self.check_query(cx);
+            }
             return;
         }
         self.schemas.insert(
@@ -86,6 +118,7 @@ impl RequestEditor {
             },
         );
         self.schema_slot.replace(None);
+        self.check_query(cx);
         let cache = self.schema_cache.clone();
         cx.spawn(async move |this, cx| {
             let lookup = key.clone();
@@ -558,6 +591,14 @@ impl RequestEditor {
             }
         }
         list.into_any_element()
+    }
+}
+
+fn option_arc_eq<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
     }
 }
 

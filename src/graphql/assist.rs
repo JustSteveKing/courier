@@ -4,6 +4,8 @@
 
 use std::ops::Range;
 
+use rust_i18n::t;
+
 use super::{OperationKind, Schema, TypeDef, TypeKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,23 +58,29 @@ enum Token<'a> {
     Value,
 }
 
-/// Tokens of `text`, and whether it ends inside a string or comment.
-fn tokenize(text: &str) -> (Vec<Token<'_>>, bool) {
+/// Tokens of `text` with their byte ranges, and whether it ends inside a string or comment.
+fn tokenize(text: &str) -> (Vec<(Token<'_>, Range<usize>)>, bool) {
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b' ' | b'\t' | b'\r' | b'\n' | b',' => i += 1,
+        let start = i;
+        let token = match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' | b',' => {
+                i += 1;
+                continue;
+            }
             b'#' => match text[i..].find('\n') {
-                Some(end) => i += end + 1,
+                Some(end) => {
+                    i += end + 1;
+                    continue;
+                }
                 None => return (tokens, true),
             },
             b'"' if text[i..].starts_with("\"\"\"") => match text[i + 3..].find("\"\"\"") {
                 Some(end) => {
                     i += 3 + end + 3;
-                    tokens.push(Token::Value);
+                    Token::Value
                 }
                 None => return (tokens, true),
             },
@@ -87,31 +95,34 @@ fn tokenize(text: &str) -> (Vec<Token<'_>>, bool) {
                     }
                 }
                 i = j + 1;
-                tokens.push(Token::Value);
+                Token::Value
             }
             b'.' if text[i..].starts_with("...") => {
                 i += 3;
-                tokens.push(Token::Spread);
+                Token::Spread
             }
             b'_' | b'a'..=b'z' | b'A'..=b'Z' => {
-                let start = i;
                 while i < bytes.len() && is_name_byte(bytes[i]) {
                     i += 1;
                 }
-                tokens.push(Token::Name(&text[start..i]));
+                Token::Name(&text[start..i])
             }
             b'0'..=b'9' | b'-' => {
                 while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
                     i += 1;
                 }
-                tokens.push(Token::Value);
+                Token::Value
             }
-            b'{' | b'}' | b'(' | b')' | b'[' | b']' | b':' | b'!' | b'$' | b'=' | b'@' | b'|' | b'&' => {
-                tokens.push(Token::Punct(b as char));
+            b @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b':' | b'!' | b'$' | b'=' | b'@' | b'|' | b'&') => {
                 i += 1;
+                Token::Punct(b as char)
             }
-            _ => i += 1,
-        }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        tokens.push((token, start..i));
     }
     (tokens, false)
 }
@@ -151,20 +162,219 @@ struct Scan<'a> {
     last_field: Option<String>,
     variables: Vec<String>,
     in_literal: bool,
+    /// Collected only when validating.
+    problems: Option<Vec<Problem>>,
+    /// The field most recently selected in the innermost selection set, until its
+    /// arguments and selection are complete.
+    field_use: Option<FieldUse>,
+}
+
+#[derive(Debug)]
+struct FieldUse {
+    owner: String,
+    name: String,
+    span: Range<usize>,
+    args: Vec<String>,
 }
 
 impl<'a> Scan<'a> {
     fn new(schema: &Schema, text: &'a str) -> Self {
+        Self::run(schema, text, false)
+    }
+
+    fn run(schema: &Schema, text: &'a str, validate: bool) -> Self {
         let (tokens, in_literal) = tokenize(text);
         let mut scan = Scan {
             in_literal,
+            problems: validate.then(Vec::new),
             ..Default::default()
         };
-        for token in tokens {
-            scan.step(schema, token);
-            scan.prev = Some(token);
+        for (index, (token, span)) in tokens.iter().enumerate() {
+            if validate {
+                let next = tokens.get(index + 1).map(|(t, _)| *t);
+                scan.check(schema, *token, span.clone(), next);
+            }
+            scan.step(schema, *token);
+            scan.prev = Some(*token);
         }
         scan
+    }
+
+    fn report(&mut self, range: Range<usize>, kind: ProblemKind) {
+        if let Some(problems) = &mut self.problems {
+            problems.push(Problem { range, kind });
+        }
+    }
+
+    /// Checks `token` against the schema before it's applied to the scan.
+    fn check(&mut self, schema: &Schema, token: Token<'a>, span: Range<usize>, next: Option<Token<'a>>) {
+        match token {
+            Token::Name(_) if self.prev == Some(Token::Punct('@')) => {}
+            Token::Name(name) if self.prev == Some(Token::Punct('$')) => {
+                let declaring = self.stack.last() == Some(&Frame::VarDefs);
+                if !declaring && !self.stack.is_empty() && !self.variables.iter().any(|v| v == name) {
+                    self.report(span, ProblemKind::UndeclaredVariable(name.to_string()));
+                }
+            }
+            Token::Name(name) if self.expect_type => {
+                if schema.get(name).is_none() {
+                    self.report(span, ProblemKind::UnknownType(name.to_string()));
+                }
+            }
+            Token::Name(name) => match self.stack.last().cloned() {
+                None => {
+                    let kind = match name {
+                        "mutation" => Some(OperationKind::Mutation),
+                        "subscription" => Some(OperationKind::Subscription),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind
+                        && self.prev.is_none_or(|p| p == Token::Punct('}'))
+                        && schema.root_name(kind).is_none()
+                    {
+                        self.report(span, ProblemKind::NoRootType(name.to_string()));
+                    }
+                }
+                Some(Frame::Selection(owner)) if !self.spread && next != Some(Token::Punct(':')) => {
+                    self.finish_field(schema, false);
+                    // Inside a scalar's `{ }`, which is already reported on the field.
+                    let Some(owner) = owner
+                        .as_deref()
+                        .and_then(|t| schema.get(t))
+                        .filter(|t| !matches!(t.kind, TypeKind::Scalar | TypeKind::Enum))
+                    else {
+                        return;
+                    };
+                    let is_query_root = schema.query_type.as_deref() == Some(owner.name.as_str());
+                    match owner.field(name) {
+                        Some(_) => {
+                            self.field_use = Some(FieldUse {
+                                owner: owner.name.clone(),
+                                name: name.to_string(),
+                                span,
+                                args: Vec::new(),
+                            })
+                        }
+                        None if name == "__typename" => {}
+                        None if is_query_root && matches!(name, "__schema" | "__type") => {}
+                        None if owner.kind == TypeKind::Union => self.report(
+                            span,
+                            ProblemKind::FieldOnUnion {
+                                field: name.to_string(),
+                                union: owner.name.clone(),
+                            },
+                        ),
+                        None => self.report(
+                            span,
+                            ProblemKind::UnknownField {
+                                field: name.to_string(),
+                                owner: owner.name.clone(),
+                            },
+                        ),
+                    }
+                }
+                Some(Frame::Args { owner, field, arg }) => {
+                    let Some(field_def) = owner
+                        .as_deref()
+                        .zip(field.as_deref())
+                        .and_then(|(owner, field)| schema.get(owner)?.field(field))
+                    else {
+                        return;
+                    };
+                    if next == Some(Token::Punct(':')) {
+                        if field_def.args.iter().any(|a| a.name == name) {
+                            if let Some(used) = &mut self.field_use
+                                && Some(&used.name) == field.as_ref()
+                            {
+                                used.args.push(name.to_string());
+                            }
+                        } else {
+                            self.report(
+                                span,
+                                ProblemKind::UnknownArgument {
+                                    argument: name.to_string(),
+                                    field: format!("{}.{}", owner.unwrap_or_default(), field_def.name),
+                                },
+                            );
+                        }
+                    } else if self.prev == Some(Token::Punct(':'))
+                        && let Some(enum_type) = arg
+                            .as_deref()
+                            .and_then(|arg| field_def.args.iter().find(|a| a.name == arg))
+                            .and_then(|arg| schema.get(arg.ty.named()))
+                            .filter(|t| t.kind == TypeKind::Enum)
+                        && name != "null"
+                        && !enum_type.enum_values.iter().any(|v| v.name == name)
+                    {
+                        self.report(
+                            span,
+                            ProblemKind::UnknownEnumValue {
+                                value: name.to_string(),
+                                enum_type: enum_type.name.clone(),
+                            },
+                        );
+                    }
+                }
+                Some(Frame::VarDefs) if matches!(self.prev, Some(Token::Punct(':' | '['))) => match schema.get(name) {
+                    None => self.report(span, ProblemKind::UnknownType(name.to_string())),
+                    Some(t) if !t.kind.is_input() => self.report(span, ProblemKind::NotInputType(name.to_string())),
+                    Some(_) => {}
+                },
+                _ => {}
+            },
+            Token::Spread | Token::Punct('}') if matches!(self.stack.last(), Some(Frame::Selection(_))) => {
+                self.finish_field(schema, false);
+            }
+            Token::Punct('{')
+                if matches!(self.stack.last(), Some(Frame::Selection(_))) && !self.spread && self.pending.is_none() =>
+            {
+                self.finish_field(schema, true);
+            }
+            _ => {}
+        }
+    }
+
+    /// Checks the last selected field once its arguments and selection (if any) are known.
+    fn finish_field(&mut self, schema: &Schema, has_selection: bool) {
+        let Some(used) = self.field_use.take() else {
+            return;
+        };
+        let Some(field) = schema.get(&used.owner).and_then(|t| t.field(&used.name)) else {
+            return;
+        };
+        for arg in &field.args {
+            let required = arg.ty.kind == TypeKind::NonNull && arg.default_value.is_none();
+            if required && !used.args.contains(&arg.name) {
+                self.report(
+                    used.span.clone(),
+                    ProblemKind::MissingArgument {
+                        field: used.name.clone(),
+                        argument: format!("{}: {}", arg.name, arg.ty),
+                    },
+                );
+            }
+        }
+        let Some(returns) = schema.get(field.ty.named()) else {
+            return;
+        };
+        let composite = matches!(returns.kind, TypeKind::Object | TypeKind::Interface | TypeKind::Union);
+        if composite && !has_selection {
+            self.report(
+                used.span,
+                ProblemKind::NeedsSelection {
+                    field: used.name,
+                    returns: field.ty.to_string(),
+                },
+            );
+        } else if !composite && has_selection {
+            self.report(
+                used.span,
+                ProblemKind::NoSubfields {
+                    field: used.name,
+                    returns: field.ty.to_string(),
+                },
+            );
+        }
     }
 
     fn step(&mut self, schema: &Schema, token: Token<'a>) {
@@ -283,6 +493,67 @@ impl<'a> Scan<'a> {
             Token::Punct(_) | Token::Value => {}
         }
     }
+}
+
+/// Something wrong with a query, at a byte range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Problem {
+    pub range: Range<usize>,
+    pub kind: ProblemKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProblemKind {
+    UnknownField { field: String, owner: String },
+    FieldOnUnion { field: String, union: String },
+    UnknownArgument { argument: String, field: String },
+    MissingArgument { field: String, argument: String },
+    UnknownEnumValue { value: String, enum_type: String },
+    UnknownType(String),
+    NotInputType(String),
+    UndeclaredVariable(String),
+    NoRootType(String),
+    NeedsSelection { field: String, returns: String },
+    NoSubfields { field: String, returns: String },
+}
+
+impl Problem {
+    /// Missing arguments are warnings (the server may still answer); the rest are errors.
+    pub fn is_warning(&self) -> bool {
+        matches!(self.kind, ProblemKind::MissingArgument { .. })
+    }
+
+    pub fn message(&self) -> String {
+        match &self.kind {
+            ProblemKind::UnknownField { field, owner } => t!("graphql.unknown_field", field = field, owner = owner),
+            ProblemKind::FieldOnUnion { field, union } => t!("graphql.field_on_union", field = field, union = union),
+            ProblemKind::UnknownArgument { argument, field } => {
+                t!("graphql.unknown_argument", argument = argument, field = field)
+            }
+            ProblemKind::MissingArgument { field, argument } => {
+                t!("graphql.missing_argument", field = field, argument = argument)
+            }
+            ProblemKind::UnknownEnumValue { value, enum_type } => {
+                t!("graphql.unknown_enum_value", value = value, enum_type = enum_type)
+            }
+            ProblemKind::UnknownType(name) => t!("graphql.unknown_type", name = name),
+            ProblemKind::NotInputType(name) => t!("graphql.not_input_type", name = name),
+            ProblemKind::UndeclaredVariable(name) => t!("graphql.undeclared_variable", name = name),
+            ProblemKind::NoRootType(operation) => t!("graphql.no_root_type", operation = operation),
+            ProblemKind::NeedsSelection { field, returns } => {
+                t!("graphql.needs_selection", field = field, returns = returns)
+            }
+            ProblemKind::NoSubfields { field, returns } => t!("graphql.no_subfields", field = field, returns = returns),
+        }
+        .to_string()
+    }
+}
+
+/// Checks a query against the schema: unknown fields, arguments, enum values, types and
+/// variables, missing required arguments, and missing or impossible selections. Text that
+/// doesn't parse is skipped rather than reported, so a half-typed query stays quiet.
+pub fn validate(schema: &Schema, text: &str) -> Vec<Problem> {
+    Scan::run(schema, text, true).problems.unwrap_or_default()
 }
 
 /// The identifier around (or ending at) `offset`.
@@ -569,6 +840,145 @@ mod tests {
         assert!(labels("{ unknown { |").is_empty(), "unknown field");
         assert_eq!(labels("|"), ["query", "mutation", "subscription", "fragment"]);
         assert!(labels("{ pets(first: 1|").is_empty(), "a number");
+    }
+
+    /// Problems in `query` as (kind, underlined text).
+    fn problems(query: &str) -> Vec<(ProblemKind, String)> {
+        validate(&petstore(), query)
+            .into_iter()
+            .map(|p| (p.kind, query[p.range].to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn valid_queries_have_no_problems() {
+        let query = r#"
+            query Pets($species: Species, $id: ID!) {
+              pets(first: 10, species: $species) {
+                id
+                name
+                ... on Dog { goodBoy }
+                ...petFields
+                owner { name }
+              }
+              favourite: pet(id: $id) { __typename id }
+              search(text: "x") { ... on Owner { name } }
+              __schema { types { name } }
+            }
+            mutation { adopt(input: { petId: "1", ownerName: "Sam" }) { id } }
+            fragment petFields on Pet { species }
+        "#;
+        assert_eq!(problems(query), []);
+        assert_eq!(problems("{ pets(species: DOG) { id } }"), []);
+    }
+
+    #[test]
+    fn reports_unknown_names() {
+        use ProblemKind::*;
+        let unknown_field = |field: &str, owner: &str| UnknownField {
+            field: field.into(),
+            owner: owner.into(),
+        };
+        assert_eq!(
+            problems("{ pets { id nmae owner { email } } }"),
+            [
+                (unknown_field("nmae", "Pet"), "nmae".into()),
+                (unknown_field("email", "Owner"), "email".into()),
+            ]
+        );
+        assert_eq!(
+            problems("{ pets(limit: 1) { id } }"),
+            [(
+                UnknownArgument {
+                    argument: "limit".into(),
+                    field: "Query.pets".into()
+                },
+                "limit".into()
+            )]
+        );
+        assert_eq!(
+            problems("{ pets(species: HAMSTER) { id } }"),
+            [(
+                UnknownEnumValue {
+                    value: "HAMSTER".into(),
+                    enum_type: "Species".into()
+                },
+                "HAMSTER".into()
+            )]
+        );
+        assert_eq!(
+            problems("query ($n: Integer, $p: Pet) { pets { ... on Parrot { id } } }"),
+            [
+                (UnknownType("Integer".into()), "Integer".into()),
+                (NotInputType("Pet".into()), "Pet".into()),
+                (UnknownType("Parrot".into()), "Parrot".into()),
+            ]
+        );
+        assert_eq!(
+            problems("{ pets(first: $count) { id } }"),
+            [(UndeclaredVariable("count".into()), "count".into())]
+        );
+        assert_eq!(
+            problems("subscription { pets { id } }"),
+            [(NoRootType("subscription".into()), "subscription".into())]
+        );
+        assert_eq!(
+            problems("{ search(text: \"x\") { name } }"),
+            [(
+                FieldOnUnion {
+                    field: "name".into(),
+                    union: "SearchResult".into()
+                },
+                "name".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn reports_selection_and_argument_mistakes() {
+        use ProblemKind::*;
+        assert_eq!(
+            problems("{ pets }"),
+            [(
+                NeedsSelection {
+                    field: "pets".into(),
+                    returns: "[Pet!]!".into()
+                },
+                "pets".into()
+            )]
+        );
+        assert_eq!(
+            problems("{ pets { name { first } } }"),
+            [(
+                NoSubfields {
+                    field: "name".into(),
+                    returns: "String!".into()
+                },
+                "name".into()
+            )]
+        );
+        assert_eq!(
+            problems("{ pet { id } }"),
+            [(
+                MissingArgument {
+                    field: "pet".into(),
+                    argument: "id: ID!".into()
+                },
+                "pet".into()
+            )]
+        );
+        let problem = &validate(&petstore(), "{ pet { id } }")[0];
+        assert!(problem.is_warning());
+        assert!(!problem.message().is_empty());
+    }
+
+    #[test]
+    fn half_typed_queries_stay_mostly_quiet() {
+        // Still typing the selection or an argument list: nothing is complete enough to judge.
+        assert_eq!(problems("{ pets { id "), []);
+        assert_eq!(problems("{ pets(first: "), []);
+        assert_eq!(problems("{ pets { ... on "), []);
+        assert_eq!(problems("{ pets { id } # a comment with { braces"), []);
     }
 
     #[test]
