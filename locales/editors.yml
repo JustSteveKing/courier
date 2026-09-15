@@ -731,3 +731,8 @@ request.filter_not_json:
   es: No es JSON
   de: Kein JSON
   fr: Pas du JSON
+request.params_label:
+  en: "Query params (name=value, # to disable)"
+  es: "Parámetros de consulta (nombre=valor, # para desactivar)"
+  de: "Query-Parameter (Name=Wert, # zum Deaktivieren)"
+  fr: "Paramètres de requête (nom=valeur, # pour désactiver)"

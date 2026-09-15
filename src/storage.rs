@@ -20,6 +20,8 @@ pub struct Collection {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+// Trees of requests read from or written to disk once; boxing wouldn't buy anything.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Item {
     Folder {

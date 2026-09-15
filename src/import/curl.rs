@@ -200,6 +200,7 @@ impl Parsed {
             order: None,
             messages: Vec::new(),
             graphql: None,
+            disabled_params: Vec::new(),
         })
     }
 }

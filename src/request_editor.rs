@@ -23,7 +23,10 @@ use rust_i18n::t;
 use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
 use crate::http::{self, Request};
-use crate::model::{Body, BodyKind, Graphql, RequestFile, Variables, headers_from_text, headers_to_text};
+use crate::model::{
+    Body, BodyKind, Graphql, QueryParam, RequestFile, Variables, apply_params_text, headers_from_text, headers_to_text,
+    params_to_text,
+};
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
 use crate::settings::AppSettings;
@@ -194,6 +197,11 @@ pub struct RequestEditor {
     /// A one-line code editor rather than a plain input, so `{{variables}}` can be coloured.
     url: Entity<EditorState>,
     headers: Entity<EditorState>,
+    /// The URL's query parameters as `name=value` lines, kept in sync with the URL.
+    params: Entity<EditorState>,
+    disabled_params: Vec<QueryParam>,
+    /// Set while the params editor rewrites the URL, so that URL change doesn't echo back.
+    params_to_url: bool,
     body: Entity<EditorState>,
     graphql_query: Entity<EditorState>,
     graphql_variables: Entity<EditorState>,
@@ -257,6 +265,21 @@ impl RequestEditor {
                 .placeholder("{{base_url}}/path")
         });
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        let params = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        cx.subscribe_in(&params, window, |this, params, event: &InputEvent, window, cx| {
+            if let InputEvent::Change = event {
+                let text = params.read(cx).value().to_string();
+                let (url, disabled) = apply_params_text(&this.url.read(cx).value(), &text);
+                this.disabled_params = disabled;
+                if url != this.url.read(cx).value().as_ref() {
+                    this.params_to_url = true;
+                    this.url.update(cx, |s, cx| s.replace_all(url, window, cx));
+                }
+                this.update_dirty(cx);
+                this.rehighlight(params, cx);
+            }
+        })
+        .detach();
         let body = cx.new(|cx| EditorState::new(window, cx).language("json"));
         let schema_slot = schema::SchemaSlot::default();
         let graphql_query = cx.new(|cx| {
@@ -316,6 +339,15 @@ impl RequestEditor {
                     let joined = value.replace(['\n', '\r'], "");
                     url.update(cx, |s, cx| s.replace_all(joined, window, cx));
                 }
+                if std::mem::take(&mut this.params_to_url) {
+                    // Written by the params editor, which is already up to date.
+                } else {
+                    let text = params_to_text(&url.read(cx).value(), &this.disabled_params);
+                    if text != this.params.read(cx).value().as_ref() {
+                        this.params.update(cx, |s, cx| s.set_value(text, window, cx));
+                        this.rehighlight(&this.params.clone(), cx);
+                    }
+                }
                 this.update_dirty(cx);
                 this.sync_schema(cx);
                 this.rehighlight(url, cx);
@@ -346,7 +378,7 @@ impl RequestEditor {
             })
             .detach();
         }
-        let highlighted = [&url, &headers, &body, &graphql_query, &graphql_variables]
+        let highlighted = [&url, &params, &headers, &body, &graphql_query, &graphql_variables]
             .into_iter()
             .map(|editor| {
                 let decorations = editor.update(cx, |state, cx| state.create_decorations_collection(Vec::new(), cx));
@@ -374,6 +406,9 @@ impl RequestEditor {
             method,
             url,
             headers,
+            params,
+            disabled_params: Vec::new(),
+            params_to_url: false,
             body,
             graphql_query,
             graphql_variables,
@@ -534,6 +569,11 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn params_for_test(&self) -> Entity<EditorState> {
+        self.params.clone()
+    }
+
+    #[cfg(test)]
     pub fn url_for_test(&self) -> Entity<EditorState> {
         self.url.clone()
     }
@@ -543,7 +583,7 @@ impl RequestEditor {
     pub fn highlights_for_test(&self, cx: &App) -> Vec<(String, String)> {
         self.highlighted
             .iter()
-            .take(2)
+            .filter(|(editor, _, _)| editor == &self.url || editor == &self.headers)
             .flat_map(|(editor, decorations, _)| {
                 let text = editor.read(cx).value().to_string();
                 let spans = self.spans(&text, editor == &self.url);
@@ -713,6 +753,9 @@ impl RequestEditor {
             .update(cx, |s, cx| s.set_value(request.url.clone(), window, cx));
         self.headers
             .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
+        self.disabled_params = request.disabled_params.clone();
+        let params = params_to_text(&request.url, &request.disabled_params);
+        self.params.update(cx, |s, cx| s.set_value(params, window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
         let graphql = request.graphql.clone().unwrap_or_default();
@@ -751,8 +794,10 @@ impl RequestEditor {
         for input in [&self.name, &self.operation_name] {
             input.update(cx, |s, cx| s.set_value("", window, cx));
         }
+        self.disabled_params.clear();
         for editor in [
             &self.url,
+            &self.params,
             &self.headers,
             &self.body,
             &self.graphql_query,
@@ -784,6 +829,7 @@ impl RequestEditor {
                 body: None,
                 order: saved.order,
                 messages: saved.messages,
+                disabled_params: self.disabled_params.clone(),
                 graphql: Some(Graphql {
                     query: self.graphql_query.read(cx).value().to_string(),
                     variables: self.graphql_variables.read(cx).value().to_string(),
@@ -820,6 +866,7 @@ impl RequestEditor {
             order: saved.order,
             messages: saved.messages,
             graphql: None,
+            disabled_params: self.disabled_params.clone(),
         }
     }
 
@@ -1456,6 +1503,8 @@ impl Render for RequestEditor {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
+                            .child(label(t!("request.params_label").to_string()))
+                            .child(code_editor(&self.params).h_20())
                             .child(label(t!("request.headers_label").to_string()))
                             .child(code_editor(&self.headers).h_32())
                             .children(self.render_credential_warning(cx))

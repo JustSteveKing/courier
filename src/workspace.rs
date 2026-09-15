@@ -410,7 +410,10 @@ impl Workspace {
 
     /// Shows a request from an open collection in the editor.
     fn load_in_editor(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = self.find_request(path).cloned() {
+        // Read the file itself: the sidebar's copy may not have caught up with a save that
+        // just happened (e.g. saving one request and opening another in the same update).
+        let fresh = storage::read_yaml::<RequestFile>(path).ok();
+        if let Some(request) = fresh.or_else(|| self.find_request(path).cloned()) {
             let key = self.response_key(path);
             self.editor.update(cx, |editor, cx| {
                 editor.load(path.to_path_buf(), request, key, window, cx)
@@ -2991,6 +2994,77 @@ components:
             let path = ws.editor.read(cx).path().cloned().unwrap();
             assert!(path.ends_with("new-event-stream-sse.yaml"), "the newest is open");
         });
+    }
+
+    #[gpui_kit::test]
+    async fn query_params_edit_with_the_url(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        let (url, params) = cx.update(|cx| (editor.read(cx).url_for_test(), editor.read(cx).params_for_test()));
+        let text = |cx: &mut TestAppContext, e: &Entity<gpui_kit::component::input::EditorState>| {
+            cx.update(|cx| e.read(cx).value().to_string())
+        };
+
+        // Typing a query in the URL fills the params.
+        let (port, received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        let base = format!("http://127.0.0.1:{port}/json");
+        cx.update_window(window, |_, window, cx| {
+            url.update(cx, |s, cx| {
+                s.replace_all(format!("{base}?page=2&sort=name"), window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(text(cx, &params), "page=2\nsort=name");
+
+        // Editing params rewrites the URL; `#` switches one off without losing it.
+        cx.update_window(window, |_, window, cx| {
+            params.update(cx, |s, cx| {
+                s.replace_all("# page=2\nsort=name\nlimit={{limit}}", window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(text(cx, &url), format!("{base}?sort=name&limit={{{{limit}}}}"));
+        assert_eq!(
+            text(cx, &params),
+            "# page=2\nsort=name\nlimit={{limit}}",
+            "not rewritten under the cursor"
+        );
+
+        // Saved with the request, and restored when coming back to it.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.select_request(echo.clone(), window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+        })
+        .unwrap();
+        let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
+        assert_eq!(saved.disabled_params[0].name, "page");
+        assert_eq!(text(cx, &params), "sort=name\nlimit={{limit}}\n# page=2");
+
+        // Only enabled params are sent.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let head = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            head.starts_with("GET /json?sort=name&limit=%7B%7Blimit%7D%7D ")
+                || head.starts_with("GET /json?sort=name&limit={{limit}} "),
+            "{head}"
+        );
     }
 
     #[gpui_kit::test]

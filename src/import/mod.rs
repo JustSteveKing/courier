@@ -28,6 +28,8 @@ pub struct CollectionImport {
     pub warnings: Vec<String>,
 }
 
+// Trees of requests read from or written to disk once; boxing wouldn't buy anything.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ImportItem {
     Folder { name: String, children: Vec<ImportItem> },

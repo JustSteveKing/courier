@@ -109,6 +109,79 @@ pub struct RequestFile {
     /// Present for a GraphQL request; the body is built from it when sending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql: Option<Graphql>,
+    /// Query parameters switched off in the params editor. Enabled ones live in the URL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_params: Vec<QueryParam>,
+}
+
+/// A `name=value` query parameter, as written (percent-encoding and `{{variables}}` kept).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct QueryParam {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+}
+
+/// Splits a URL into the part before the query, the query, and the `#fragment` (if any).
+fn split_query(url: &str) -> (&str, &str, &str) {
+    let (before_fragment, fragment) = match url.find('#') {
+        Some(i) => url.split_at(i),
+        None => (url, ""),
+    };
+    match before_fragment.split_once('?') {
+        Some((base, query)) => (base, query, fragment),
+        None => (before_fragment, "", fragment),
+    }
+}
+
+/// Renders the params editor text: the URL's parameters as `name=value` lines, then the
+/// disabled ones prefixed with `# `.
+pub fn params_to_text(url: &str, disabled: &[QueryParam]) -> String {
+    let (_, query, _) = split_query(url);
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(str::to_string)
+        .chain(disabled.iter().map(|p| {
+            if p.value.is_empty() {
+                format!("# {}", p.name)
+            } else {
+                format!("# {}={}", p.name, p.value)
+            }
+        }))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Applies params editor text to a URL: enabled lines become its query, `#` lines are
+/// returned as disabled parameters.
+pub fn apply_params_text(url: &str, text: &str) -> (String, Vec<QueryParam>) {
+    let (base, _, fragment) = split_query(url);
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.strip_prefix('#') {
+            Some(rest) => {
+                let rest = rest.trim_start();
+                if rest.is_empty() {
+                    continue;
+                }
+                let (name, value) = rest.split_once('=').unwrap_or((rest, ""));
+                disabled.push(QueryParam {
+                    name: name.trim().to_string(),
+                    value: value.trim().to_string(),
+                });
+            }
+            None => enabled.push(line.to_string()),
+        }
+    }
+    let mut url = base.to_string();
+    if !enabled.is_empty() {
+        url.push('?');
+        url.push_str(&enabled.join("&"));
+    }
+    url.push_str(fragment);
+    (url, disabled)
 }
 
 impl RequestFile {
@@ -121,6 +194,7 @@ impl RequestFile {
             body: None,
             order: None,
             messages: Vec::new(),
+            disabled_params: Vec::new(),
             graphql: None,
         }
     }
@@ -387,6 +461,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn params_sync_with_the_url() {
+        let url = "{{base_url}}/pets?limit=10&species={{kind}}&flag#top";
+        let disabled = vec![QueryParam {
+            name: "debug".into(),
+            value: "1".into(),
+        }];
+        let text = params_to_text(url, &disabled);
+        assert_eq!(text, "limit=10\nspecies={{kind}}\nflag\n# debug=1");
+
+        // Switching `limit` off and `debug` on moves them between the URL and the file.
+        let edited = "# limit=10\nspecies={{kind}}\nflag\ndebug=1";
+        let (new_url, new_disabled) = apply_params_text(url, edited);
+        assert_eq!(new_url, "{{base_url}}/pets?species={{kind}}&flag&debug=1#top");
+        assert_eq!(
+            new_disabled,
+            [QueryParam {
+                name: "limit".into(),
+                value: "10".into()
+            }]
+        );
+        assert_eq!(
+            params_to_text(&new_url, &new_disabled),
+            "species={{kind}}\nflag\ndebug=1\n# limit=10"
+        );
+
+        let (cleared, none) = apply_params_text(url, "");
+        assert_eq!((cleared.as_str(), none.len()), ("{{base_url}}/pets#top", 0));
+        assert_eq!(params_to_text("https://x.test", &[]), "");
+    }
+
+    #[test]
     fn request_round_trips_through_yaml() {
         let request = RequestFile {
             name: "Create user".into(),
@@ -414,6 +519,10 @@ mod tests {
                 content: "{\"op\": \"sub\"}".into(),
             }],
             graphql: None,
+            disabled_params: vec![QueryParam {
+                name: "debug".into(),
+                value: "1".into(),
+            }],
         };
         let yaml = serde_norway::to_string(&request).unwrap();
         assert!(!yaml.contains("enabled: true"), "enabled headers stay terse:\n{yaml}");
