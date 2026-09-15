@@ -45,6 +45,20 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### From a terminal or CI
+
+The same binary sends requests and runs checks without a window:
+
+```sh
+courier list                                  # requests in the project here
+courier send auth/login -e staging            # body to stdout, status and checks to stderr
+courier run -e staging --var base_url=http://localhost:8080
+courier run smoke --bail --report junit -o report.xml
+courier completions fish > ~/.config/fish/completions/courier.fish
+```
+
+`run` sends a folder (or the whole collection) in order, so `response()` chaining works, and exits 1 if any check fails or a request errors. Secrets come from the keyring; in CI set `COURIER_SECRET_<NAME>` (e.g. `COURIER_SECRET_API_TOKEN`) and pass `--no-keyring`. Cookies set during a run carry over to later requests but aren't saved. WebSocket and event-stream requests are skipped.
+
 ## What lives where
 
 ```text

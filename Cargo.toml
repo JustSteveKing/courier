@@ -7,10 +7,11 @@ license = "MIT"
 readme = "README.md"
 
 [workspace]
-members = ["crates/courier-core"]
+members = ["crates/courier-core", "crates/courier-cli"]
 
 [dependencies]
 courier-core = { path = "crates/courier-core" }
+courier-cli = { path = "crates/courier-cli" }
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 gpui-kit = { version = "0.6.1", features = ["tree-sitter", "tree-sitter-graphql"] }

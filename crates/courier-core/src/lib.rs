@@ -15,6 +15,7 @@ pub mod model;
 pub mod paths;
 pub mod project;
 pub mod response_cache;
+pub mod runner;
 pub mod secret_store;
 pub mod storage;
 pub mod template_assist;

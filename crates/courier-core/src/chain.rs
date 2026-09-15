@@ -328,6 +328,12 @@ async fn response_of(
     Ok(response)
 }
 
+/// Sends the request at `path` as a chained dependency would be, with `sent` holding
+/// responses already sent in this run.
+pub async fn send_path(path: &Path, context: &Context, sent: &mut Sent) -> Result<StoredResponse, String> {
+    send(path, context, &mut vec![path.to_path_buf()], sent).await
+}
+
 /// Sends the request at `path` with its inherited auth and its own calls evaluated.
 async fn send(
     path: &Path,

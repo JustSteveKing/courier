@@ -16,7 +16,7 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 
 ## Layout
 
-Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, project, paths, secrets, credentials, cookies, http/transport, chain, response cache, graphql schema/assist, template assist, importers); the root **`courier`** crate is the GPUI app. The app re-exports core modules in `main.rs`, so `crate::model` works in app code. Keep GPUI out of core; test-only helpers there sit behind the `test-support` feature.
+Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, project, paths, secrets, credentials, cookies, http/transport, chain, response cache, graphql schema/assist, template assist, importers); **`crates/courier-cli`** is the command line (`send`/`run`/`list`/`envs`/`completions`, on `runner.rs` in core; the app's `main.rs` forwards those subcommands to it); the root **`courier`** crate is the GPUI app. The app re-exports core modules in `main.rs`, so `crate::model` works in app code. Keep GPUI out of core; test-only helpers there sit behind the `test-support` feature.
 
 
 - `workspace.rs` (+ `workspace/palette.rs`): window root: sidebar, projects, imports, dialogs, command palette

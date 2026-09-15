@@ -24,6 +24,14 @@ use crate::workspace::{Launch, Workspace};
 rust_i18n::i18n!("locales", fallback = "en");
 
 fn main() {
+    // `courier run …`, `courier send …` and friends work without opening a window.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| courier_cli::SUBCOMMANDS.iter().any(|command| arg == *command))
+    {
+        std::process::exit(courier_cli::main_from(std::env::args_os()));
+    }
+
     let paths = match AppPaths::from_env() {
         Ok(paths) => paths,
         Err(e) => {
@@ -76,7 +84,7 @@ fn launch_from_args() -> Result<Option<Launch>, String> {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         Some(arg) if arg == "-h" || arg == "--help" => Err(
-            "Usage: courier [PROJECT]\n\nOpens PROJECT's .courier collection (offering to create one), or the\nproject containing the current directory."
+            "Usage: courier [PROJECT]\n       courier <send|run|list|envs|completions> …\n\nOpens PROJECT's .courier collection (offering to create one), or the\nproject containing the current directory.\n\nThe subcommands work in a terminal or CI without a window; see `courier run --help`.\n(To open a folder with one of those names, write it as ./run.)"
                 .into(),
         ),
         Some(arg) => {
