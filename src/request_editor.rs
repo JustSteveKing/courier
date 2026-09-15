@@ -1,6 +1,7 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
 mod highlight;
+mod json_filter;
 mod schema;
 mod sse;
 mod ws;
@@ -200,6 +201,13 @@ pub struct RequestEditor {
 
     response_tab: usize,
     response_body: Entity<EditorState>,
+    /// A JSONPath expression narrowing the response body, remembered per request.
+    response_filter: Entity<InputState>,
+    response_filters: HashMap<PathBuf, String>,
+    /// The shown response parsed as JSON, keyed by request and receive time, so typing a
+    /// filter doesn't reparse a large body on every keystroke.
+    parsed_body: Option<(PathBuf, u64, Option<std::rc::Rc<serde_json::Value>>)>,
+    filter_status: Option<json_filter::Filtered>,
     response_headers: Entity<EditorState>,
     stream_filter: Entity<InputState>,
     stream_detail: Entity<EditorState>,
@@ -266,6 +274,26 @@ impl RequestEditor {
         let operation_name = cx
             .new(|cx| InputState::new(window, cx).placeholder(t!("request.graphql_operation_placeholder").to_string()));
         let response_body = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let response_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.filter_placeholder").to_string()));
+        cx.subscribe_in(
+            &response_filter,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if let InputEvent::Change = event
+                    && let Some(path) = this.path.clone()
+                {
+                    let expression = input.read(cx).value().to_string();
+                    if expression.trim().is_empty() {
+                        this.response_filters.remove(&path);
+                    } else {
+                        this.response_filters.insert(path, expression);
+                    }
+                    this.show_response(window, cx);
+                }
+            },
+        )
+        .detach();
         let response_headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
         let stream_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.stream_filter_placeholder").to_string()));
@@ -352,6 +380,10 @@ impl RequestEditor {
             operation_name,
             response_tab: 0,
             response_body,
+            response_filter,
+            response_filters: HashMap::new(),
+            parsed_body: None,
+            filter_status: None,
             response_headers,
             stream_filter,
             stream_detail,
@@ -404,6 +436,9 @@ impl RequestEditor {
         });
         self.stream_filter.update(cx, |s, cx| {
             s.set_placeholder(t!("request.stream_filter_placeholder").to_string(), window, cx)
+        });
+        self.response_filter.update(cx, |s, cx| {
+            s.set_placeholder(t!("request.filter_placeholder").to_string(), window, cx)
         });
         self.operation_name.update(cx, |s, cx| {
             s.set_placeholder(t!("request.graphql_operation_placeholder").to_string(), window, cx)
@@ -489,6 +524,16 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn response_filter_for_test(&self) -> Entity<InputState> {
+        self.response_filter.clone()
+    }
+
+    #[cfg(test)]
+    pub fn response_body_text(&self, cx: &App) -> String {
+        self.response_body.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
     pub fn url_for_test(&self) -> Entity<EditorState> {
         self.url.clone()
     }
@@ -561,18 +606,57 @@ impl RequestEditor {
     }
 
     /// Puts the current request's response (if any) into the response panes.
+    /// The response body narrowed by `expression`, updating the filter status. Falls back to
+    /// the whole body when the expression doesn't apply.
+    fn filtered_body(&mut self, expression: &str) -> String {
+        let (Some(path), Some(response)) = (self.path.clone(), self.state().and_then(|s| s.response.as_ref())) else {
+            return String::new();
+        };
+        let Outcome::Response { body, .. } = &response.outcome else {
+            return String::new();
+        };
+        let received_at = response.received_at;
+        let fresh = matches!(&self.parsed_body, Some((p, at, _)) if *p == path && *at == received_at);
+        if !fresh {
+            let parsed = json_filter::parse_body(body).map(std::rc::Rc::new);
+            self.parsed_body = Some((path, received_at, parsed));
+        }
+        let parsed = self.parsed_body.as_ref().and_then(|(_, _, v)| v.clone());
+        let result = json_filter::filter(parsed.as_deref(), expression);
+        let text = match &result {
+            json_filter::Filtered::Matches { text, .. } => text.clone(),
+            _ => self
+                .state()
+                .and_then(ResponseState::outcome)
+                .map(|outcome| match outcome {
+                    Outcome::Response { body, .. } => http::pretty_body(body),
+                    Outcome::Error { message } => message.clone(),
+                })
+                .unwrap_or_default(),
+        };
+        self.filter_status = Some(result);
+        text
+    }
+
     fn show_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_status = None;
+        let expression = self.path.as_ref().and_then(|p| self.response_filters.get(p)).cloned();
         let (body, headers) = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, body, .. }) => (
-                http::pretty_body(body),
+                expression.is_none().then(|| http::pretty_body(body)),
                 headers
                     .iter()
                     .map(|(n, v)| format!("{n}: {v}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
-            Some(Outcome::Error { message }) => (message.clone(), String::new()),
-            None => (String::new(), String::new()),
+            Some(Outcome::Error { message }) => (Some(message.clone()), String::new()),
+            None => (Some(String::new()), String::new()),
+        };
+        let body = match (body, expression) {
+            (Some(body), _) => body,
+            (None, Some(expression)) => self.filtered_body(&expression),
+            (None, None) => String::new(),
         };
         self.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
         self.response_headers
@@ -647,6 +731,8 @@ impl RequestEditor {
             state.restore_from(&cache);
         }
 
+        let filter = self.response_filters.get(&path).cloned().unwrap_or_default();
+        self.response_filter.update(cx, |s, cx| s.set_value(filter, window, cx));
         self.path = Some(path);
         self.saved = Some(request);
         self.dirty = false;
@@ -1110,6 +1196,43 @@ impl RequestEditor {
 
     /// The status line above the response. Event streams show their own status in their view,
     /// so this shows only warnings for them.
+    fn render_filter_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (status, color) = match &self.filter_status {
+            None => (String::new(), theme.muted_foreground),
+            Some(json_filter::Filtered::Matches { count, .. }) => (
+                t!("request.filter_matches", count = count).to_string(),
+                if *count == 0 {
+                    theme.warning
+                } else {
+                    theme.muted_foreground
+                },
+            ),
+            Some(json_filter::Filtered::Invalid(error)) => (error.clone(), theme.danger),
+            Some(json_filter::Filtered::NotJson) => (t!("request.filter_not_json").to_string(), theme.warning),
+        };
+        h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(text_input(&self.response_filter).small()),
+            )
+            .when(!status.is_empty(), |bar| {
+                bar.child(
+                    div()
+                        .id("filter-status")
+                        .test_support()
+                        .max_w(px(220.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(color)
+                        .child(status),
+                )
+            })
+    }
+
     fn render_status(&self, event_stream: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let state = self.state();
@@ -1228,6 +1351,20 @@ impl Render for RequestEditor {
             _ if response_tab == 2 => self.render_schema(cx),
             (Some(log), _) if response_tab == 0 => self.render_ws(log, cx),
             (None, Some(log)) if response_tab == 0 => self.render_sse(log, sending, cx),
+            _ if response_tab == 0
+                && matches!(
+                    self.state().and_then(ResponseState::outcome),
+                    Some(Outcome::Response { .. })
+                ) =>
+            {
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_1()
+                    .child(self.render_filter_bar(cx))
+                    .child(readonly_editor(&self.response_body).flex_1().min_h_0())
+                    .into_any_element()
+            }
             _ => readonly_editor(if response_tab == 0 {
                 &self.response_body
             } else {

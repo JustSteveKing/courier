@@ -24,6 +24,7 @@ serde_norway = "0.9.42"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
+serde_json_path = "0.7"
 toml = "1.1.6"
 uuid = { version = "1.26.1", features = ["v4"] }
 

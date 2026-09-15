@@ -716,3 +716,18 @@ graphql.no_subfields:
   es: "`%{field}` es `%{returns}` y no tiene campos que seleccionar"
   de: "`%{field}` ist `%{returns}` und hat keine auswählbaren Felder"
   fr: "`%{field}` est `%{returns}` et n’a pas de champs à sélectionner"
+request.filter_placeholder:
+  en: "Filter with JSONPath, e.g. $.items[*].id"
+  es: "Filtrar con JSONPath, p. ej. $.items[*].id"
+  de: "Mit JSONPath filtern, z. B. $.items[*].id"
+  fr: "Filtrer avec JSONPath, p. ex. $.items[*].id"
+request.filter_matches:
+  en: "%{count} matches"
+  es: "%{count} coincidencias"
+  de: "%{count} Treffer"
+  fr: "%{count} résultats"
+request.filter_not_json:
+  en: Not JSON
+  es: No es JSON
+  de: Kein JSON
+  fr: Pas du JSON

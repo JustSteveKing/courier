@@ -2729,6 +2729,79 @@ components:
     }
 
     #[gpui_kit::test]
+    async fn json_responses_filter_with_jsonpath(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let body = r#"{"items":[{"id":1,"name":"Rex"},{"id":2,"name":"Tom"}]}"#;
+        let (port, _received) = http_server(body);
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/pets");
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let filter = cx.update(|cx| editor.read(cx).response_filter_for_test());
+        let set_filter = |cx: &mut TestAppContext, text: &str| {
+            cx.update_window(window, |_, window, cx| {
+                filter.update(cx, |s, cx| s.replace_all(text.to_string(), window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let shown = |cx: &mut TestAppContext| cx.update(|cx| editor.read(cx).response_body_text(cx));
+
+        set_filter(cx, "$.items[*].name");
+        assert_eq!(shown(cx), "[\n  \"Rex\",\n  \"Tom\"\n]");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("filter-status").is_some(), "shows the match count");
+        })
+        .unwrap();
+
+        // A half-typed expression keeps the whole body visible.
+        set_filter(cx, "$.items[");
+        assert!(shown(cx).contains("\"Tom\""));
+        assert!(shown(cx).contains("\"items\""));
+
+        // Each request remembers its own filter.
+        set_filter(cx, "$.items[0].id");
+        assert_eq!(shown(cx), "1");
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(echo.clone(), window, cx));
+        })
+        .unwrap();
+        assert_eq!(cx.update(|cx| filter.read(cx).value().to_string()), "");
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        assert_eq!(cx.update(|cx| filter.read(cx).value().to_string()), "$.items[0].id");
+        assert_eq!(shown(cx), "1");
+
+        // Clearing it shows everything again.
+        set_filter(cx, "");
+        assert!(shown(cx).contains("\"Rex\""));
+    }
+
+    #[gpui_kit::test]
     async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = setup(cx, tmp.path());
