@@ -294,6 +294,19 @@ pub fn rename_request(path: &Path, name: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Moves a request file into `dir` (another folder or collection), renaming it if the name is
+/// taken there. Returns the new path.
+pub fn move_request(path: &Path, dir: &Path) -> Result<PathBuf> {
+    let request: RequestFile = read_yaml(path)?;
+    let target = unique_path(dir, &request.name, ".yaml");
+    if fs::rename(path, &target).is_err() {
+        // Across filesystems (e.g. from the data dir into a project on another disk).
+        write_yaml(&target, &request)?;
+        delete_file(path)?;
+    }
+    Ok(target)
+}
+
 /// Copies a request next to itself as “<name> copy”, just after it in the list.
 pub fn duplicate_request(path: &Path, copy_name: &str) -> Result<PathBuf> {
     let mut request: RequestFile = read_yaml(path)?;
@@ -338,7 +351,10 @@ mod tests {
         assert!(moved.join("search-pets.yaml").exists());
         assert!(rename_folder(&moved, "environments").is_err());
 
-        delete_item(&moved.join("search-pets-copy.yaml")).unwrap();
+        let other = create_folder(&root, "Other").unwrap();
+        let relocated = move_request(&moved.join("search-pets-copy.yaml"), &other).unwrap();
+        assert_eq!(relocated, other.join("search-pets-copy.yaml"));
+        delete_item(&relocated).unwrap();
         delete_item(&moved).unwrap();
         assert!(!moved.exists());
     }

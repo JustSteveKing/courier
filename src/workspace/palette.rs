@@ -14,10 +14,13 @@ use crate::import::ImportFormat;
 use crate::omarchy_theme;
 use crate::settings::AppSettings;
 
-gpui_kit::actions!(workspace, [OpenCommandPalette]);
+gpui_kit::actions!(workspace, [OpenCommandPalette, NewScratchRequest]);
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
+        KeyBinding::new("ctrl-n", NewScratchRequest, None),
+    ]);
 }
 
 type Run = Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
@@ -146,7 +149,8 @@ impl Workspace {
         let mut entries = Vec::new();
         for collection in &self.collections {
             for entry in collection.requests() {
-                let label = std::iter::once(collection.file.name.as_str())
+                let collection_label = self.collection_label(collection);
+                let label = std::iter::once(collection_label.as_str())
                     .chain(entry.folders.iter().copied())
                     .chain([entry.request.name.as_str()])
                     .collect::<Vec<_>>()
@@ -168,6 +172,11 @@ impl Workspace {
 
     fn action_group(&self, cx: &App) -> Group {
         let mut entries = vec![
+            Entry::new(t!("ws.new_scratch_request"), |this, window, cx| {
+                this.new_scratch_request(window, cx)
+            })
+            .english("ws.new_scratch_request")
+            .keywords(["quick".into(), "scratchpad".into(), "request".into()]),
             Entry::new(t!("ws.new_project_ellipsis"), |this, window, cx| {
                 this.new_project(window, cx)
             })

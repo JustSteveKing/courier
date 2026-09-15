@@ -68,6 +68,8 @@ impl Render for SidebarResize {
 
 pub struct Workspace {
     paths: AppPaths,
+    /// The always-open collection for quick requests, kept in the data dir, not a project.
+    scratch_root: PathBuf,
     state: AppState,
     collections: Vec<Collection>,
     collapsed: HashSet<PathBuf>,
@@ -129,6 +131,7 @@ impl Workspace {
         .detach();
 
         let mut this = Self {
+            scratch_root: project::collection_dir(&paths.data_dir.join("scratchpad")),
             state: paths.load_state(),
             paths,
             collections: Vec::new(),
@@ -149,6 +152,10 @@ impl Workspace {
 
     /// Reopens last session's projects, then the project the app was launched for.
     fn restore(&mut self, launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) {
+        match self.load_scratchpad() {
+            Ok(scratch) => self.collections.push(scratch),
+            Err(e) => eprintln!("could not open the scratchpad: {e:#}"),
+        }
         for project in self.state.open_projects.clone() {
             match storage::load_collection(&project::collection_dir(&project)) {
                 Ok(collection) => self.collections.push(collection),
@@ -156,8 +163,7 @@ impl Workspace {
             }
         }
         self.state.open_projects = self
-            .collections
-            .iter()
+            .projects()
             .map(|c| project::project_dir(&c.root).to_path_buf())
             .collect();
         self.save_state();
@@ -167,7 +173,7 @@ impl Workspace {
             .last_request
             .clone()
             .filter(|p| self.find_request(p).is_some());
-        let first = || self.collections.iter().find_map(Collection::first_request);
+        let first = || self.projects().find_map(Collection::first_request);
         if let Some(path) = last.or_else(first) {
             self.select_request(path, window, cx);
         } else {
@@ -223,6 +229,65 @@ impl Workspace {
 
     /// The collection whose environments are being managed, else the one owning the open
     /// request, else the first one.
+    /// The scratchpad collection, created the first time it's needed.
+    fn load_scratchpad(&self) -> Result<Collection> {
+        if !storage::is_collection(&self.scratch_root) {
+            let dir = project::project_dir(&self.scratch_root);
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            project::init_with(dir, &CollectionFile::new("Scratchpad"))?;
+        }
+        storage::load_collection(&self.scratch_root)
+    }
+
+    fn is_scratch(&self, root: &Path) -> bool {
+        root == self.scratch_root
+    }
+
+    /// Open project collections, without the scratchpad.
+    fn projects(&self) -> impl Iterator<Item = &Collection> {
+        self.collections.iter().filter(|c| !self.is_scratch(&c.root))
+    }
+
+    /// A collection's name as shown: the scratchpad's is translated.
+    fn collection_label(&self, collection: &Collection) -> String {
+        if self.is_scratch(&collection.root) {
+            t!("ws.scratchpad").to_string()
+        } else {
+            collection.file.name.clone()
+        }
+    }
+
+    fn new_scratch_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.scratch_root.clone();
+        if !self.collections.iter().any(|c| c.root == root) {
+            match self.load_scratchpad() {
+                Ok(scratch) => self.collections.insert(0, scratch),
+                Err(e) => return notify_error(format!("{e:#}"), window, cx),
+            }
+        }
+        self.new_request(root, window, cx);
+    }
+
+    /// Moves a request into another collection's top level, e.g. from the scratchpad into a
+    /// project.
+    fn move_request(&mut self, path: PathBuf, destination: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| editor.save(cx));
+        match storage::move_request(&path, &destination) {
+            Ok(target) => {
+                self.collapsed.remove(&destination);
+                self.after_move(&path, &target, window, cx);
+                if let Some(ix) = self.collections.iter().position(|c| c.root == destination) {
+                    let name = self.collection_label(&self.collections[ix]);
+                    window.push_notification(
+                        Notification::success(t!("ws.moved_to", collection = name).to_string()),
+                        cx,
+                    );
+                }
+            }
+            Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
     fn active_collection(&self, cx: &App) -> Option<&Collection> {
         let path = match self.main_view {
             MainView::Environments => self.environment_editor.read(cx).root().map(Path::to_path_buf),
@@ -257,7 +322,9 @@ impl Workspace {
                 }
                 let first = collection.first_request();
                 self.collections.push(collection);
-                self.state.open_projects.push(project::project_dir(&root).to_path_buf());
+                if !self.is_scratch(&root) {
+                    self.state.open_projects.push(project::project_dir(&root).to_path_buf());
+                }
                 self.save_state();
                 if let Some(path) = first {
                     self.select_request(path, window, cx);
@@ -303,6 +370,9 @@ impl Workspace {
     }
 
     fn close_collection(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_scratch(root) {
+            return;
+        }
         self.editor.update(cx, |editor, cx| {
             if editor.path().is_some_and(|p| p.starts_with(root)) {
                 editor.save(cx);
@@ -428,7 +498,15 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
+        let from_root = self
+            .collection_index_for(from)
+            .map(|ix| self.collections[ix].root.clone());
         self.reload_containing(to, window, cx);
+        if let Some(from_root) = from_root
+            && !to.starts_with(&from_root)
+        {
+            self.reload_collection(&from_root, window, cx);
+        }
         let cache = ResponseCache::new(&self.paths.cache_dir);
         for (old_key, new_path) in old_keys {
             if let (Some(response), Some(new_key)) = (cache.load(&old_key), self.response_key(&new_path))
@@ -1437,7 +1515,11 @@ impl Workspace {
                             .icon(IconName::Plus)
                             .tooltip(t!("ws.new_or_import").to_string())
                             .dropdown_menu(move |menu, _, _| {
-                                menu.item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                                menu.item(menu_item(t!("ws.new_scratch_request"), &weak, |this, window, cx| {
+                                    this.new_scratch_request(window, cx)
+                                }))
+                                .separator()
+                                .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
                                     this.new_project(window, cx)
                                 }))
                                 .item(menu_item(
@@ -1460,7 +1542,11 @@ impl Workspace {
                     .child(div().id("sidebar-space").flex_1().min_h(px(48.)).context_menu({
                         let weak = cx.entity().downgrade();
                         move |menu, _, _| {
-                            menu.item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                            menu.item(menu_item(t!("ws.new_scratch_request"), &weak, |this, window, cx| {
+                                this.new_scratch_request(window, cx)
+                            }))
+                            .separator()
+                            .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
                                 this.new_project(window, cx)
                             }))
                             .item(menu_item(
@@ -1493,8 +1579,14 @@ impl Workspace {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("empty-new-project")
+                        Button::new("empty-scratch-request")
                             .primary()
+                            .icon(IconName::SquareTerminal)
+                            .label(t!("ws.new_scratch_request").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| this.new_scratch_request(window, cx))),
+                    )
+                    .child(
+                        Button::new("empty-new-project")
                             .icon(IconName::Plus)
                             .label(t!("ws.new_project_ellipsis").to_string())
                             .on_click(cx.listener(|this, _, window, cx| this.new_project(window, cx))),
@@ -1511,6 +1603,7 @@ impl Workspace {
     fn render_collection(&self, collection: &Collection, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
         let theme = cx.theme();
         let root = collection.root.clone();
+        let scratch = self.is_scratch(&root);
         let collapsed = self.collapsed.contains(&root);
         let weak = cx.entity().downgrade();
         let row_id = rows.len();
@@ -1527,6 +1620,13 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .child(chevron(collapsed))
+                .when(scratch, |row| {
+                    row.child(
+                        Icon::new(IconName::SquareTerminal)
+                            .xsmall()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -1534,7 +1634,7 @@ impl Workspace {
                         .truncate()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(collection.file.name.clone()),
+                        .child(self.collection_label(collection)),
                 )
                 .when(!collection.errors.is_empty(), |this| {
                     this.child(Icon::new(IconName::TriangleAlert).xsmall().text_color(theme.warning))
@@ -1545,7 +1645,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Ellipsis)
-                        .dropdown_menu(move |menu, _, _| collection_menu(menu, &weak, &root))
+                        .dropdown_menu(move |menu, _, _| collection_menu(menu, &weak, &root, scratch))
                 })
                 .on_click(cx.listener({
                     let root = root.clone();
@@ -1558,7 +1658,7 @@ impl Workspace {
                 }))
                 .context_menu({
                     let (weak, root) = (cx.entity().downgrade(), root.clone());
-                    move |menu, _, _| collection_menu(menu, &weak, &root)
+                    move |menu, _, _| collection_menu(menu, &weak, &root, scratch)
                 })
                 .into_any_element(),
         );
@@ -1570,6 +1670,12 @@ impl Workspace {
 
     fn render_items(&self, items: &[Item], depth: usize, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
         let theme = cx.theme().clone();
+        let destinations: Rc<Vec<(String, PathBuf)>> = Rc::new(
+            self.collections
+                .iter()
+                .map(|c| (self.collection_label(c), c.root.clone()))
+                .collect(),
+        );
         let selected = self.editor.read(cx).path().cloned();
         let indent = px(4. + depth as f32 * 14.);
 
@@ -1648,7 +1754,10 @@ impl Workspace {
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
                             )
-                            .context_menu(move |menu, _, _| request_menu(menu, &weak, &menu_path))
+                            .context_menu({
+                                let destinations = destinations.clone();
+                                move |menu, window, cx| request_menu(menu, &weak, &menu_path, &destinations, window, cx)
+                            })
                             .into_any_element(),
                     );
                 }
@@ -1662,7 +1771,7 @@ impl Render for Workspace {
         let theme = cx.theme().clone();
         let active = self
             .active_collection(cx)
-            .map(|c| (c.file.name.clone(), c.root.clone()));
+            .map(|c| (self.collection_label(c), c.root.clone()));
         let collection_name = active.as_ref().map(|(name, _)| name.clone()).unwrap_or_default();
         let managing = self.main_view == MainView::Environments;
         let dialog_layer = Root::render_dialog_layer(window, cx);
@@ -1673,6 +1782,9 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(
                 cx.listener(|this, _: &palette::OpenCommandPalette, window, cx| this.open_command_palette(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &palette::NewScratchRequest, window, cx| this.new_scratch_request(window, cx)),
             )
             .size_full()
             .bg(theme.background)
@@ -1728,13 +1840,15 @@ impl Render for Workspace {
                                 )
                             }),
                     )
-                    .child(div().flex_1().min_h_0().child(if self.collections.is_empty() {
-                        self.render_no_projects(cx).into_any_element()
-                    } else if managing {
-                        self.environment_editor.clone().into_any_element()
-                    } else {
-                        self.editor.clone().into_any_element()
-                    })),
+                    .child(div().flex_1().min_h_0().child(
+                        if !managing && self.projects().next().is_none() && self.editor.read(cx).path().is_none() {
+                            self.render_no_projects(cx).into_any_element()
+                        } else if managing {
+                            self.environment_editor.clone().into_any_element()
+                        } else {
+                            self.editor.clone().into_any_element()
+                        },
+                    )),
             )
             .children(dialog_layer)
             .children(notification_layer)
@@ -1770,7 +1884,20 @@ fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> 
         .item(item("ws.show_in_file_manager", |_, path, _, cx| cx.reveal_path(&path)))
 }
 
-fn request_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, request: &Path) -> PopupMenu {
+fn request_menu(
+    menu: PopupMenu,
+    weak: &WeakEntity<Workspace>,
+    request: &Path,
+    collections: &[(String, PathBuf)],
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    // Other collections this request can move to.
+    let targets: Vec<(String, PathBuf)> = collections
+        .iter()
+        .filter(|(_, root)| !request.starts_with(root))
+        .cloned()
+        .collect();
     let item = |key: &str, action: RootAction| {
         let request = request.to_path_buf();
         menu_item(t!(key), weak, move |this, window, cx| {
@@ -1786,6 +1913,18 @@ fn request_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, request: &Path) -
                 this.new_request(dir.to_path_buf(), window, cx)
             }
         }))
+        .when(!targets.is_empty(), |menu| {
+            let (weak, request) = (weak.clone(), request.to_path_buf());
+            menu.submenu(t!("ws.move_to").to_string(), window, cx, move |mut menu, _, _| {
+                for (name, root) in &targets {
+                    let (request, root) = (request.clone(), root.clone());
+                    menu = menu.item(menu_item(name.clone(), &weak, move |this, window, cx| {
+                        this.move_request(request.clone(), root.clone(), window, cx)
+                    }));
+                }
+                menu
+            })
+        })
         .separator()
         .item(item("ws.delete_ellipsis", Workspace::delete_item))
         .item(item("ws.show_in_file_manager", |_, path, _, cx| cx.reveal_path(&path)))
@@ -1794,7 +1933,7 @@ fn request_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, request: &Path) -
 /// A collection action, as used by the collection menu and the command palette.
 pub(super) type RootAction = fn(&mut Workspace, PathBuf, &mut Window, &mut Context<Workspace>);
 
-fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -> PopupMenu {
+fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, scratch: bool) -> PopupMenu {
     let item = |key: &str, action: RootAction| {
         let root = root.to_path_buf();
         menu_item(t!(key), weak, move |this, window, cx| {
@@ -1816,9 +1955,11 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -
         .item(item("ws.reload_from_disk", |this, root, window, cx| {
             this.reload_collection(&root, window, cx)
         }))
-        .item(item("ws.close_collection", |this, root, window, cx| {
-            this.close_collection(&root, window, cx)
-        }))
+        .when(!scratch, |menu| {
+            menu.item(item("ws.close_collection", |this, root, window, cx| {
+                this.close_collection(&root, window, cx)
+            }))
+        })
 }
 
 fn chevron(collapsed: bool) -> Icon {
@@ -2155,7 +2296,7 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(!window.has_active_dialog(cx));
-            assert!(workspace.read(cx).collections.is_empty());
+            assert_eq!(workspace.read(cx).projects().count(), 0, "only the scratchpad");
             window.render_frame(cx);
             assert!(
                 window.try_find("empty-new-project").is_some(),
@@ -2190,10 +2331,10 @@ mod tests {
         assert!(read(&root.join("collection.yaml")).contains("name: einvoicing"));
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert_eq!(ws.collections.len(), 1);
+            assert_eq!(ws.projects().count(), 1);
             let opened = ws.editor.read(cx).path().cloned().expect("a first request is open");
             assert!(opened.starts_with(&root), "{}", opened.display());
-            assert_eq!(ws.collections[0].requests().len(), 1);
+            assert_eq!(ws.projects().next().unwrap().requests().len(), 1);
             assert_eq!(
                 ws.state.open_projects,
                 vec![einvoicing.clone()],
@@ -2267,7 +2408,7 @@ components:
         assert_eq!(collection.environments.len(), 2);
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert_eq!(ws.collections.len(), 1);
+            assert_eq!(ws.projects().count(), 1);
             let opened = ws.editor.read(cx).path().cloned().expect("the first request is open");
             assert!(opened.starts_with(root.join("pets")), "{}", opened.display());
         });
@@ -2515,6 +2656,75 @@ components:
         cx.update(|cx| {
             assert_eq!(editor.read(cx).path(), None);
             assert_eq!(workspace.read(cx).state.last_request, None);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn the_scratchpad_is_always_there_for_quick_requests(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let (workspace, window) = open_workspace(cx, &paths, None);
+        let scratch = project::collection_dir(&paths.data_dir.join("scratchpad"));
+
+        // No projects: the scratchpad exists, and the welcome screen offers a quick request.
+        cx.update_window(window, |_, window, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.collections.len(), 1);
+            assert_eq!(ws.collections[0].root, scratch);
+            window.render_frame(cx);
+            window.click("empty-scratch-request", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let quick = scratch.join("new-request.yaml");
+        assert!(quick.exists());
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.editor.read(cx).path(), Some(&quick));
+            assert!(ws.state.open_projects.is_empty(), "not remembered as a project");
+        });
+
+        // Ctrl+N makes another; the scratchpad can't be closed.
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_action(Box::new(palette::NewScratchRequest), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let second = scratch.join("new-request-2.yaml");
+        assert!(second.exists());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.close_collection(&scratch, window, cx));
+            assert_eq!(workspace.read(cx).collections.len(), 1);
+        })
+        .unwrap();
+
+        // A quick request that turned out useful moves into a project.
+        let root = create_example_project(tmp.path()).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.open_collection(root.clone(), window, cx);
+                this.select_request(quick.clone(), window, cx);
+                this.move_request(quick.clone(), root.clone(), window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let moved = root.join("new-request.yaml");
+        assert!(moved.exists() && !quick.exists());
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.editor.read(cx).path(), Some(&moved));
+            assert_eq!(ws.collections[0].requests().len(), 1, "scratchpad keeps the other one");
+            assert_eq!(ws.projects().next().unwrap().requests().len(), 3);
+        });
+
+        // Still there after a restart.
+        let (restarted, _) = open_workspace(cx, &paths, None);
+        cx.update(|cx| {
+            let ws = restarted.read(cx);
+            assert_eq!(ws.collections[0].root, scratch);
+            assert_eq!(ws.collections[0].requests().len(), 1);
+            assert_eq!(ws.projects().count(), 1);
         });
     }
 

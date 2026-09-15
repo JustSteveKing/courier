@@ -30,7 +30,7 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 - **Secret values never touch YAML, logs or the response cache.** Collections store secret names; values go through `SecretStore` (`SecretWrite` + `apply`). Imports hoist literal credentials into secrets.
 - **Every user-visible string is `t!("key")`** with an entry in `locales/*.yml` for `en`, `es`, `de` and `fr` (same `%{placeholders}`). Tests fail on missing keys. Keep low-level error details (`anyhow` context) in English.
 - **Build inputs, editors and dialog footers with `crate::ui`** (`text_input`, `secret_input`, `code_editor`, `readonly_editor`, `textarea`, `dialog_footer`); bare `Input::new`/`Editor::new`/`Textarea::new` fail a test because GPUI Kit's own menus aren't translated.
-- **Per-machine data lives in XDG dirs** via `AppPaths` (config: settings; state: open projects; cache: responses; data: secrets fallback). Only `.courier/` goes in projects.
+- **Per-machine data lives in XDG dirs** via `AppPaths` (config: settings; state: open projects; cache: responses, schemas; data: secrets fallback and the scratchpad collection at `data/scratchpad/.courier`). Only `.courier/` goes in projects. The scratchpad is always `collections[0]`, never in `open_projects`, can't be closed; use `projects()` when you mean project collections.
 - **Never block the UI thread on I/O that scales with collection size or network**; use `cx.background_executor()`.
 - **Tests never touch the real keyring**: the workspace uses `SecretStore::in_memory()` under `cfg(test)`. The one real-keyring test is `#[ignore]`.
 

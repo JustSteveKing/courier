@@ -469,3 +469,23 @@ ws.delete_folder_message:
   es: "¿Eliminar la carpeta «%{name}» y las %{count} solicitudes que contiene?"
   de: "Ordner „%{name}“ und die %{count} Anfragen darin löschen?"
   fr: "Supprimer le dossier « %{name} » et les %{count} requêtes qu’il contient ?"
+ws.scratchpad:
+  en: Scratchpad
+  es: Borrador
+  de: Notizblock
+  fr: Brouillon
+ws.new_scratch_request:
+  en: New scratch request
+  es: Nueva solicitud rápida
+  de: Neue schnelle Anfrage
+  fr: Nouvelle requête rapide
+ws.move_to:
+  en: Move to
+  es: Mover a
+  de: Verschieben nach
+  fr: Déplacer vers
+ws.moved_to:
+  en: "Moved to %{collection}"
+  es: "Movida a %{collection}"
+  de: "Nach %{collection} verschoben"
+  fr: "Déplacée vers %{collection}"
