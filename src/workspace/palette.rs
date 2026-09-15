@@ -216,6 +216,18 @@ impl Workspace {
                 let root = root.clone();
                 Entry::new(t!(key), move |this, window, cx| run(this, root.clone(), window, cx)).english(key)
             };
+            if let Some(path) = self.editor.read(cx).path().cloned() {
+                for (key, include_secrets) in [("ws.copy_as_curl", false), ("ws.copy_as_curl_with_secrets", true)] {
+                    let path = path.clone();
+                    entries.push(
+                        Entry::new(t!(key), move |this, window, cx| {
+                            this.copy_as_curl(path.clone(), include_secrets, window, cx)
+                        })
+                        .english(key)
+                        .keywords(["export".into(), "clipboard".into()]),
+                    );
+                }
+            }
             for kind in RequestKind::ALL {
                 let root = root.clone();
                 entries.push(

@@ -67,6 +67,7 @@ pub enum RequestEditorEvent {
         path: PathBuf,
     },
     Error(String),
+    Notice(String),
 }
 
 impl EventEmitter<RequestEditorEvent> for RequestEditor {}
@@ -749,6 +750,44 @@ impl RequestEditor {
 
     pub fn set_cookies(&mut self, cookies: Option<Cookies>) {
         self.cookies = cookies;
+    }
+
+    /// Copies the open request as a curl command. Without `include_secrets`, secret
+    /// placeholders such as `{{token}}` are left in, so the command is safe to share.
+    pub fn copy_as_curl(&mut self, include_secrets: bool, cx: &mut Context<Self>) {
+        if self.path.is_none() {
+            return;
+        }
+        if self.is_websocket(cx) {
+            cx.emit(RequestEditorEvent::Error(t!("request.curl_no_websocket").to_string()));
+            return;
+        }
+        let mut file = self.current(cx);
+        if file.auth.is_inherit() {
+            file.auth = self.inherited_auth.clone();
+        }
+        let copied = move |result: Result<(Request, Vec<String>), String>, cx: &mut Context<Self>| match result {
+            Ok((request, _)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(request.to_curl()));
+                let notice = if include_secrets {
+                    t!("request.copied_curl_with_secrets")
+                } else {
+                    t!("request.copied_curl")
+                };
+                cx.emit(RequestEditorEvent::Notice(notice.to_string()));
+            }
+            Err(message) => cx.emit(RequestEditorEvent::Error(message)),
+        };
+        if !include_secrets {
+            copied(Request::resolve(&file, &self.variables), cx);
+            return;
+        }
+        let resolving = self.resolve_in_background(file, cx);
+        cx.spawn(async move |this, cx| {
+            let result = resolving.await.map(|(request, missing, _)| (request, missing));
+            this.update(cx, |_, cx| copied(result, cx)).ok();
+        })
+        .detach();
     }
 
     pub fn set_secret_store(&mut self, store: SecretStore) {

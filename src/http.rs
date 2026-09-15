@@ -129,6 +129,32 @@ fn graphql_body(graphql: &Graphql, sub: &mut impl FnMut(&str) -> String) -> Resu
     Ok(body.to_string())
 }
 
+impl Request {
+    /// The request as a `curl` command, quoted for POSIX shells.
+    pub fn to_curl(&self) -> String {
+        let method = self.method.to_ascii_uppercase();
+        let implied = if self.body.is_empty() { "GET" } else { "POST" };
+        let mut command = String::from("curl");
+        if method != implied {
+            command.push_str(&format!(" -X {method}"));
+        }
+        command.push(' ');
+        command.push_str(&shell_quote(&self.url));
+        for (name, value) in &self.headers {
+            command.push_str(&format!(" \\\n  -H {}", shell_quote(&format!("{name}: {value}"))));
+        }
+        if !self.body.is_empty() {
+            command.push_str(&format!(" \\\n  --data-raw {}", shell_quote(&self.body)));
+        }
+        command
+    }
+}
+
+/// Single-quotes `text` for a POSIX shell.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 /// A response body, re-indented when it is JSON.
 pub fn pretty_body(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
@@ -179,6 +205,34 @@ mod tests {
             ]
         );
         assert_eq!(missing, vec!["token"]);
+    }
+
+    #[test]
+    fn exports_curl() {
+        let request = Request {
+            method: "POST".into(),
+            url: "https://api.test/pets?q=it's".into(),
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: "{\"name\": \"Rex\"}".into(),
+        };
+        assert_eq!(
+            request.to_curl(),
+            "curl 'https://api.test/pets?q=it'\\''s' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\": \"Rex\"}'"
+        );
+        let get = Request {
+            method: "DELETE".into(),
+            url: "https://api.test/pets/1".into(),
+            headers: Vec::new(),
+            body: String::new(),
+        };
+        assert_eq!(get.to_curl(), "curl -X DELETE 'https://api.test/pets/1'");
+
+        // What we export, we can import again.
+        let file = crate::import::curl::parse(&request.to_curl()).unwrap();
+        assert_eq!(
+            (file.method.as_str(), file.url.as_str()),
+            ("POST", "https://api.test/pets?q=it's")
+        );
     }
 
     #[test]

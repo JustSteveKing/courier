@@ -111,6 +111,7 @@ impl Workspace {
             }
             RequestEditorEvent::MoveAuthToSecret { path } => this.move_auth_to_secret(path.clone(), window, cx),
             RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
+            RequestEditorEvent::Notice(message) => window.push_notification(Notification::success(message.clone()), cx),
         })
         .detach();
         let environment_editor = cx.new(|cx| EnvironmentEditor::new(window, cx));
@@ -555,6 +556,15 @@ impl Workspace {
             self.load_in_editor(&new, window, cx);
         }
         cx.notify();
+    }
+
+    /// Opens `path` if it isn't open, then copies it as a curl command.
+    fn copy_as_curl(&mut self, path: PathBuf, include_secrets: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.read(cx).path() != Some(&path) {
+            self.select_request(path, window, cx);
+        }
+        self.editor
+            .update(cx, |editor, cx| editor.copy_as_curl(include_secrets, cx));
     }
 
     fn duplicate_request(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -2327,6 +2337,13 @@ fn request_menu(
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.duplicate", Workspace::duplicate_request))
         .separator()
+        .item(item("ws.copy_as_curl", |this, path, window, cx| {
+            this.copy_as_curl(path, false, window, cx)
+        }))
+        .item(item("ws.copy_as_curl_with_secrets", |this, path, window, cx| {
+            this.copy_as_curl(path, true, window, cx)
+        }))
+        .separator()
         .when_some(request.parent(), |menu, dir| {
             let (weak, dir) = (weak.clone(), dir.to_path_buf());
             menu.submenu(
@@ -3586,6 +3603,63 @@ components:
             "saved jar removed"
         );
         assert!(jar.list().is_empty());
+    }
+
+    #[gpui_kit::test]
+    async fn requests_copy_as_curl_without_or_with_secrets(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let mut file: CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        file.ensure_id();
+        file.secrets.push("token".into());
+        storage::save_collection_file(&root, &file).unwrap();
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.auth = Auth::Bearer {
+            token: "{{token}}".into(),
+        };
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.store_secrets(
+                    vec![SecretWrite::new(
+                        &file,
+                        DEFAULTS_SCOPE,
+                        DEFAULTS_LABEL,
+                        "token",
+                        "t0p-secret",
+                    )],
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.copy_as_curl(get_json.clone(), false, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let clipboard = |cx: &mut TestAppContext| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        let shared = clipboard(cx);
+        assert!(shared.starts_with("curl 'https://httpbin.org/json'"), "{shared}");
+        assert!(shared.contains("-H 'Authorization: Bearer {{token}}'"), "{shared}");
+        assert!(!shared.contains("t0p-secret"));
+
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.copy_as_curl(get_json.clone(), true, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(clipboard(cx).contains("Bearer t0p-secret"));
     }
 
     #[gpui_kit::test]

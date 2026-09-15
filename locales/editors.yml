@@ -811,3 +811,18 @@ auth.move_to_secret:
   es: Mover a secreto
   de: In Secret verschieben
   fr: Déplacer vers un secret
+request.copied_curl:
+  en: "Copied as curl. Secrets are left as {{placeholders}}."
+  es: "Copiado como curl. Los secretos quedan como {{marcadores}}."
+  de: "Als curl kopiert. Secrets bleiben als {{Platzhalter}}."
+  fr: "Copié en curl. Les secrets restent en {{espaces réservés}}."
+request.copied_curl_with_secrets:
+  en: Copied as curl, including secret values. Be careful where you paste it.
+  es: Copiado como curl, con los valores secretos. Cuidado dónde lo pegas.
+  de: Als curl kopiert, einschließlich Secret-Werten. Achte darauf, wo du es einfügst.
+  fr: Copié en curl, valeurs secrètes comprises. Attention à l’endroit où vous le collez.
+request.curl_no_websocket:
+  en: curl can't open WebSockets
+  es: curl no puede abrir WebSockets
+  de: curl kann keine WebSockets öffnen
+  fr: curl ne peut pas ouvrir de WebSockets

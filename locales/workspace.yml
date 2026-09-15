@@ -629,3 +629,13 @@ cookies.clear:
   es: Borrar todas
   de: Alle löschen
   fr: Tout effacer
+ws.copy_as_curl:
+  en: Copy as curl
+  es: Copiar como curl
+  de: Als curl kopieren
+  fr: Copier en curl
+ws.copy_as_curl_with_secrets:
+  en: Copy as curl (with secrets)
+  es: Copiar como curl (con secretos)
+  de: Als curl kopieren (mit Secrets)
+  fr: Copier en curl (avec les secrets)
