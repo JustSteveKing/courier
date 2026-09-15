@@ -24,6 +24,7 @@ use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
 use crate::chain;
+use crate::checks;
 use crate::cookies::Cookies;
 use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
@@ -114,6 +115,21 @@ pub(super) struct Resolved {
     /// A client set up for the request's settings (and its collection's cookies).
     client: reqwest::Client,
     settings: EffectiveSettings,
+}
+
+/// The tabs above the response.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ResponseTab {
+    #[default]
+    Body,
+    Headers,
+    Checks,
+    Schema,
+}
+
+/// Whether `url` (with variables filled in) opens a WebSocket.
+fn websocket_url(url: &str, variables: &Variables) -> bool {
+    crate::model::is_websocket_url(&crate::model::interpolate(url, variables).0)
 }
 
 /// Status code, reason phrase and headers of a response.
@@ -261,7 +277,11 @@ pub struct RequestEditor {
     graphql_variables: Entity<EditorState>,
     operation_name: Entity<InputState>,
 
-    response_tab: usize,
+    response_tab: ResponseTab,
+    /// Assertions about the response, one per line.
+    checks: Entity<EditorState>,
+    /// How the checks went against the response on screen.
+    check_results: Option<Vec<checks::CheckResult>>,
     response_body: Entity<EditorState>,
     /// A JSONPath expression narrowing the response body, remembered per request.
     response_filter: Entity<InputState>,
@@ -331,6 +351,14 @@ impl RequestEditor {
         })
         .detach();
         let params = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        let checks = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        cx.subscribe(&checks, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.update_dirty(cx);
+                this.refresh_checks(cx);
+            }
+        })
+        .detach();
         cx.subscribe_in(&params, window, |this, params, event: &InputEvent, window, cx| {
             if let InputEvent::Change = event {
                 let text = params.read(cx).value().to_string();
@@ -448,7 +476,7 @@ impl RequestEditor {
         let completion = std::rc::Rc::new(template_completion::TemplateCompletion {
             editor: cx.weak_entity(),
         });
-        for editor in [&url, &params, &headers, &body, &graphql_variables] {
+        for editor in [&url, &params, &headers, &body, &graphql_variables, &checks] {
             editor.update(cx, |state, _| {
                 state.lsp_mut().completion_provider = Some(completion.clone())
             });
@@ -494,7 +522,9 @@ impl RequestEditor {
             graphql_query,
             graphql_variables,
             operation_name,
-            response_tab: 0,
+            response_tab: ResponseTab::Body,
+            checks,
+            check_results: None,
             response_body,
             response_filter,
             response_filters: HashMap::new(),
@@ -603,7 +633,7 @@ impl RequestEditor {
 
     #[cfg(test)]
     pub fn show_schema_tab_for_test(&mut self, cx: &mut Context<Self>) {
-        self.response_tab = 2;
+        self.response_tab = ResponseTab::Schema;
         cx.notify();
     }
 
@@ -667,6 +697,13 @@ impl RequestEditor {
     #[cfg(test)]
     pub fn history_len(&self) -> usize {
         self.state().map_or(0, |s| s.history.len())
+    }
+
+    #[cfg(test)]
+    pub fn check_results_for_test(&self) -> Option<Vec<(String, bool)>> {
+        self.check_results
+            .as_ref()
+            .map(|results| results.iter().map(|r| (r.line.clone(), r.passed)).collect())
     }
 
     #[cfg(test)]
@@ -797,7 +834,99 @@ impl RequestEditor {
         self.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
         self.response_headers
             .update(cx, |s, cx| s.set_value(headers, window, cx));
+        self.refresh_checks(cx);
         cx.notify();
+    }
+
+    /// The checks editor's lines, as stored in the request file.
+    fn check_lines(&self, cx: &App) -> Vec<String> {
+        self.checks
+            .read(cx)
+            .value()
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .filter(|line| !line.trim().is_empty())
+            .collect()
+    }
+
+    /// Runs the checks against the response on screen.
+    fn refresh_checks(&mut self, cx: &mut Context<Self>) {
+        let lines = self.check_lines(cx);
+        let response = self.state().filter(|s| s.live.is_none()).and_then(ResponseState::shown);
+        self.check_results = match response {
+            Some(response) if !lines.is_empty() => Some(checks::evaluate(&lines, response, &self.variables)),
+            _ => None,
+        };
+        cx.notify();
+    }
+
+    /// Adds a check that the filtered value equals what the response has now.
+    fn add_check_from_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(expression) = self.path.as_ref().and_then(|p| self.response_filters.get(p)).cloned() else {
+            return;
+        };
+        let shown = self.response_body.read(cx).value().to_string();
+        let value = serde_json::from_str::<serde_json::Value>(&shown)
+            .map(|v| v.to_string())
+            .unwrap_or(shown);
+        let mut lines = self.check_lines(cx);
+        lines.push(checks::equals_line(expression.trim(), &value));
+        self.checks
+            .update(cx, |s, cx| s.replace_all(lines.join("\n"), window, cx));
+    }
+
+    fn render_checks(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(results) = &self.check_results else {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(t!("request.checks_hint").to_string())
+                .into_any_element();
+        };
+        let mut rows = v_flex()
+            .id("check-results")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap_1();
+        for (ix, result) in results.iter().enumerate() {
+            let (icon, color) = if result.passed {
+                (IconName::Check, theme.success)
+            } else {
+                (IconName::Close, theme.danger)
+            };
+            let detail = match (&result.error, result.passed) {
+                (Some(error), _) => Some(error.clone()),
+                (None, false) => Some(t!("request.check_actual", actual = result.actual).to_string()),
+                (None, true) => None,
+            };
+            rows = rows.child(
+                h_flex()
+                    .id(("check-result", ix))
+                    .test_support()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(gpui_kit::component::Icon::new(icon).small().text_color(color))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_sm()
+                                    .child(result.line.clone()),
+                            )
+                            .when_some(detail, |col, detail| {
+                                col.child(div().text_xs().text_color(theme.muted_foreground).child(detail))
+                            }),
+                    ),
+            );
+        }
+        rows.into_any_element()
     }
 
     pub fn set_inherited_settings(&mut self, settings: RequestSettings) {
@@ -931,6 +1060,8 @@ impl RequestEditor {
         self.auth.update(cx, |form, cx| form.set(&request.auth, window, cx));
         let params = params_to_text(&request.url, &request.disabled_params);
         self.params.update(cx, |s, cx| s.set_value(params, window, cx));
+        self.checks
+            .update(cx, |s, cx| s.set_value(request.checks.join("\n"), window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
         let graphql = request.graphql.clone().unwrap_or_default();
@@ -1005,6 +1136,7 @@ impl RequestEditor {
                 order: saved.order,
                 messages: saved.messages,
                 disabled_params: self.disabled_params.clone(),
+                checks: self.check_lines(cx),
                 auth: self.auth.read(cx).value(cx),
                 settings: saved.settings.clone(),
                 graphql: Some(Graphql {
@@ -1044,6 +1176,7 @@ impl RequestEditor {
             messages: saved.messages,
             graphql: None,
             disabled_params: self.disabled_params.clone(),
+            checks: self.check_lines(cx),
             auth: self.auth.read(cx).value(cx),
             settings: saved.settings.clone(),
         }
@@ -1550,6 +1683,23 @@ impl RequestEditor {
                     .min_w_0()
                     .child(text_input(&self.response_filter).small()),
             )
+            .when(
+                matches!(
+                    self.filter_status,
+                    Some(json_filter::Filtered::Matches { count: 1, .. })
+                ),
+                |bar| {
+                    bar.child(
+                        Button::new("filter-add-check")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .label(t!("request.add_check").to_string())
+                            .tooltip(t!("request.add_check_tooltip").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| this.add_check_from_filter(window, cx))),
+                    )
+                },
+            )
             .when(!status.is_empty(), |bar| {
                 bar.child(
                     div()
@@ -1628,6 +1778,17 @@ impl RequestEditor {
             .gap_x_3()
             .text_sm()
             .when(!event_stream, |this| this.child(div().text_color(color).child(line)))
+            .when_some(self.check_results.as_ref().filter(|_| !sending), |this, results| {
+                let passed = results.iter().filter(|r| r.passed).count();
+                let all = passed == results.len();
+                this.child(
+                    div()
+                        .id("checks-badge")
+                        .test_support()
+                        .text_color(if all { theme.success } else { theme.danger })
+                        .child(t!("request.checks_badge", passed = passed, total = results.len()).to_string()),
+                )
+            })
             .when_some(history, |this, labels| {
                 this.child(
                     Button::new("response-history")
@@ -1690,11 +1851,21 @@ impl Render for RequestEditor {
 
         let label = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
         let graphql = !self.is_websocket(cx) && self.is_graphql(cx);
-        let response_tab = if !graphql && self.response_tab == 2 {
-            0
-        } else {
+        let has_checks =
+            !websocket_url(&self.url.read(cx).value(), &self.variables) && !self.check_lines(cx).is_empty();
+        let mut tabs = vec![ResponseTab::Body, ResponseTab::Headers];
+        if has_checks {
+            tabs.push(ResponseTab::Checks);
+        }
+        if graphql {
+            tabs.push(ResponseTab::Schema);
+        }
+        let response_tab = if tabs.contains(&self.response_tab) {
             self.response_tab
+        } else {
+            ResponseTab::Body
         };
+        let tab_index = tabs.iter().position(|t| *t == response_tab).unwrap_or(0);
         let header_count = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, .. }) => {
                 t!("request.headers_tab_count", count = headers.len()).to_string()
@@ -1711,10 +1882,11 @@ impl Render for RequestEditor {
             (None, None) => t!("request.body").to_string(),
         };
         let response_view = match (ws_log, sse_log) {
-            _ if response_tab == 2 => self.render_schema(cx),
-            (Some(log), _) if response_tab == 0 => self.render_ws(log, cx),
-            (None, Some(log)) if response_tab == 0 => self.render_sse(log, sending, cx),
-            _ if response_tab == 0
+            _ if response_tab == ResponseTab::Schema => self.render_schema(cx),
+            _ if response_tab == ResponseTab::Checks => self.render_checks(cx),
+            (Some(log), _) if response_tab == ResponseTab::Body => self.render_ws(log, cx),
+            (None, Some(log)) if response_tab == ResponseTab::Body => self.render_sse(log, sending, cx),
+            _ if response_tab == ResponseTab::Body
                 && matches!(
                     self.state().and_then(ResponseState::outcome),
                     Some(Outcome::Response { .. })
@@ -1728,7 +1900,7 @@ impl Render for RequestEditor {
                     .child(readonly_editor(&self.response_body).flex_1().min_h_0())
                     .into_any_element()
             }
-            _ => readonly_editor(if response_tab == 0 {
+            _ => readonly_editor(if response_tab == ResponseTab::Body {
                 &self.response_body
             } else {
                 &self.response_headers
@@ -1864,6 +2036,11 @@ impl Render for RequestEditor {
                             .when(!graphql, |column| {
                                 column.child(code_editor(&self.body).flex_1().min_h_0())
                             })
+                            .when(!websocket, |column| {
+                                column
+                                    .child(label(t!("request.checks_label").to_string()))
+                                    .child(code_editor(&self.checks).h_20())
+                            })
                             .when(websocket, |column| column.child(self.render_composer_actions(cx))),
                     )
                     .child(
@@ -1881,14 +2058,25 @@ impl Render for RequestEditor {
                                             TabBar::new("response-tabs")
                                                 .segmented()
                                                 .small()
-                                                .selected_index(response_tab)
+                                                .selected_index(tab_index)
                                                 .child(Tab::new().label(body_tab_label))
                                                 .child(Tab::new().label(header_count))
+                                                .when(has_checks, |bar| {
+                                                    let label = match &self.check_results {
+                                                        Some(results) => t!(
+                                                            "request.checks_tab_count",
+                                                            passed = results.iter().filter(|r| r.passed).count(),
+                                                            total = results.len()
+                                                        ),
+                                                        None => t!("request.checks_tab"),
+                                                    };
+                                                    bar.child(Tab::new().label(label.to_string()))
+                                                })
                                                 .when(graphql, |bar| {
                                                     bar.child(Tab::new().label(t!("request.schema_tab").to_string()))
                                                 })
-                                                .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                                    this.response_tab = *index;
+                                                .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                                                    this.response_tab = tabs.get(*index).copied().unwrap_or_default();
                                                     cx.notify();
                                                 })),
                                         ),

@@ -976,3 +976,43 @@ settings_form.outside_project:
   es: "%{path} está fuera del proyecto, así que se guarda su ruta completa y la colección no lo encontrará en otras máquinas."
   de: "%{path} liegt außerhalb des Projekts; der volle Pfad wird gespeichert, auf anderen Rechnern findet die Sammlung die Datei nicht."
   fr: "%{path} est hors du projet : son chemin complet est enregistré et la collection ne le trouvera pas sur d’autres machines."
+request.checks_label:
+  en: "Checks (status == 200, $.id exists, # to turn off)"
+  es: "Comprobaciones (status == 200, $.id exists, # para desactivar)"
+  de: "Prüfungen (status == 200, $.id exists, # zum Deaktivieren)"
+  fr: "Vérifications (status == 200, $.id exists, # pour désactiver)"
+request.checks_tab:
+  en: Checks
+  es: Comprobaciones
+  de: Prüfungen
+  fr: Vérifications
+request.checks_tab_count:
+  en: "Checks %{passed}/%{total}"
+  es: "Comprobaciones %{passed}/%{total}"
+  de: "Prüfungen %{passed}/%{total}"
+  fr: "Vérifications %{passed}/%{total}"
+request.checks_badge:
+  en: "%{passed}/%{total} checks"
+  es: "%{passed}/%{total} comprobaciones"
+  de: "%{passed}/%{total} Prüfungen"
+  fr: "%{passed}/%{total} vérifications"
+request.checks_hint:
+  en: Send the request to run its checks.
+  es: Envía la solicitud para ejecutar sus comprobaciones.
+  de: Sende die Anfrage, um ihre Prüfungen auszuführen.
+  fr: Envoyez la requête pour lancer ses vérifications.
+request.check_actual:
+  en: "Got %{actual}"
+  es: "Se obtuvo %{actual}"
+  de: "Erhalten: %{actual}"
+  fr: "Obtenu : %{actual}"
+request.add_check:
+  en: Add check
+  es: Añadir comprobación
+  de: Prüfung hinzufügen
+  fr: Ajouter une vérification
+request.add_check_tooltip:
+  en: Check that this value stays the same
+  es: Comprobar que este valor no cambia
+  de: Prüfen, dass dieser Wert gleich bleibt
+  fr: Vérifier que cette valeur ne change pas

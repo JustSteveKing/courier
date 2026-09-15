@@ -4,6 +4,7 @@
 //! behave the same.
 
 pub mod chain;
+pub mod checks;
 pub mod cookies;
 pub mod credentials;
 pub mod encoding;

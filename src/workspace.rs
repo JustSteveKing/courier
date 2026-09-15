@@ -4197,6 +4197,85 @@ components:
     }
 
     #[gpui_kit::test]
+    async fn checks_run_on_responses_and_can_be_added_from_the_filter(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let (port, _received) = http_server("{\"id\":7,\"name\":\"Rex\"}");
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/pets/7");
+        request.checks = vec![
+            "status == 200".into(),
+            "$.id == 7".into(),
+            "$.name == Max".into(),
+            "# time < 1".into(),
+        ];
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(get_json.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let results = |cx: &mut TestAppContext| cx.update(|cx| editor.read(cx).check_results_for_test());
+        assert_eq!(
+            results(cx),
+            Some(vec![
+                ("status == 200".to_string(), true),
+                ("$.id == 7".to_string(), true),
+                ("$.name == Max".to_string(), false),
+            ]),
+            "switched-off checks don't run"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("checks-badge").is_some());
+        })
+        .unwrap();
+
+        // Filter to a value and turn it into a check.
+        let filter = cx.update(|cx| editor.read(cx).response_filter_for_test());
+        cx.update_window(window, |_, window, cx| {
+            filter.update(cx, |s, cx| s.replace_all("$.name", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("filter-add-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            results(cx).unwrap().last(),
+            Some(&("$.name == \"Rex\"".to_string(), true))
+        );
+
+        // Checks are saved with the request.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(echo.clone(), window, cx));
+        })
+        .unwrap();
+        let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
+        assert_eq!(saved.checks.len(), 5);
+        assert_eq!(saved.checks[4], "$.name == \"Rex\"");
+    }
+
+    #[gpui_kit::test]
     async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = setup(cx, tmp.path());

@@ -201,6 +201,7 @@ impl Parsed {
             messages: Vec::new(),
             graphql: None,
             disabled_params: Vec::new(),
+            checks: Vec::new(),
             auth: Auth::Inherit,
             settings: Default::default(),
         })

@@ -341,6 +341,9 @@ pub struct RequestFile {
     pub auth: Auth,
     #[serde(default, skip_serializing_if = "RequestSettings::is_empty")]
     pub settings: RequestSettings,
+    /// Assertions about the response, one per line (see `checks`); `#` lines are off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
 }
 
 /// A `name=value` query parameter, as written (percent-encoding and `{{variables}}` kept).
@@ -424,6 +427,7 @@ impl RequestFile {
             order: None,
             messages: Vec::new(),
             disabled_params: Vec::new(),
+            checks: Vec::new(),
             graphql: None,
             auth: Auth::Inherit,
             settings: RequestSettings::default(),
@@ -821,6 +825,7 @@ mod tests {
                 verify_tls: Some(false),
                 ..Default::default()
             },
+            checks: vec!["status == 201".into(), "# $.id exists".into()],
         };
         let yaml = serde_norway::to_string(&request).unwrap();
         assert!(!yaml.contains("enabled: true"), "enabled headers stay terse:\n{yaml}");
