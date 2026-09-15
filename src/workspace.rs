@@ -27,7 +27,7 @@ use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Targe
 use crate::graphql::SchemaCache;
 use crate::import::{self, CollectionImport, ImportFormat, ImportItem};
 use crate::import::{curl, postman};
-use crate::model::{CollectionFile, RequestFile, Variables, placeholder};
+use crate::model::{CollectionFile, RequestFile, RequestKind, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
@@ -258,6 +258,10 @@ impl Workspace {
     }
 
     fn new_scratch_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_scratch_request_of(RequestKind::Http, window, cx);
+    }
+
+    fn new_scratch_request_of(&mut self, kind: RequestKind, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.scratch_root.clone();
         if !self.collections.iter().any(|c| c.root == root) {
             match self.load_scratchpad() {
@@ -265,7 +269,7 @@ impl Workspace {
                 Err(e) => return notify_error(format!("{e:#}"), window, cx),
             }
         }
-        self.new_request(root, window, cx);
+        self.new_request_of(root, kind, window, cx);
     }
 
     /// Moves a request into another collection's top level, e.g. from the scratchpad into a
@@ -426,7 +430,11 @@ impl Workspace {
     }
 
     fn new_request(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match storage::create_request(&dir, &RequestFile::new(t!("ws.new_request"))) {
+        self.new_request_of(dir, RequestKind::Http, window, cx);
+    }
+
+    fn new_request_of(&mut self, dir: PathBuf, kind: RequestKind, window: &mut Window, cx: &mut Context<Self>) {
+        match storage::create_request(&dir, &kind.template(new_request_label(kind))) {
             Ok(path) => {
                 self.collapsed.remove(&dir);
                 self.reload_containing(&path, window, cx);
@@ -1514,19 +1522,15 @@ impl Workspace {
                             .xsmall()
                             .icon(IconName::Plus)
                             .tooltip(t!("ws.new_or_import").to_string())
-                            .dropdown_menu(move |menu, _, _| {
-                                menu.item(menu_item(t!("ws.new_scratch_request"), &weak, |this, window, cx| {
-                                    this.new_scratch_request(window, cx)
-                                }))
-                                .separator()
-                                .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
-                                    this.new_project(window, cx)
-                                }))
-                                .item(menu_item(
-                                    t!("ws.open_project_ellipsis"),
-                                    &weak,
-                                    |this, window, cx| this.open_project(window, cx),
-                                ))
+                            .dropdown_menu(move |menu, window, cx| {
+                                scratch_request_submenu(menu, &weak, window, cx)
+                                    .separator()
+                                    .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                                        this.new_project(window, cx)
+                                    }))
+                                    .item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
+                                        this.open_project(window, cx)
+                                    }))
                             }),
                     ),
             )
@@ -1541,19 +1545,15 @@ impl Workspace {
                     // Right-clicking the empty space below the rows.
                     .child(div().id("sidebar-space").flex_1().min_h(px(48.)).context_menu({
                         let weak = cx.entity().downgrade();
-                        move |menu, _, _| {
-                            menu.item(menu_item(t!("ws.new_scratch_request"), &weak, |this, window, cx| {
-                                this.new_scratch_request(window, cx)
-                            }))
-                            .separator()
-                            .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
-                                this.new_project(window, cx)
-                            }))
-                            .item(menu_item(
-                                t!("ws.open_project_ellipsis"),
-                                &weak,
-                                |this, window, cx| this.open_project(window, cx),
-                            ))
+                        move |menu, window, cx| {
+                            scratch_request_submenu(menu, &weak, window, cx)
+                                .separator()
+                                .item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                                    this.new_project(window, cx)
+                                }))
+                                .item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
+                                    this.open_project(window, cx)
+                                }))
                         }
                     })),
             )
@@ -1583,7 +1583,17 @@ impl Workspace {
                             .primary()
                             .icon(IconName::SquareTerminal)
                             .label(t!("ws.new_scratch_request").to_string())
-                            .on_click(cx.listener(|this, _, window, cx| this.new_scratch_request(window, cx))),
+                            .dropdown_caret(true)
+                            .dropdown_menu({
+                                let weak = cx.entity().downgrade();
+                                move |menu, _, _| {
+                                    RequestKind::ALL.into_iter().fold(menu, |menu, kind| {
+                                        menu.item(menu_item(new_request_label(kind), &weak, move |this, window, cx| {
+                                            this.new_scratch_request_of(kind, window, cx)
+                                        }))
+                                    })
+                                }
+                            }),
                     )
                     .child(
                         Button::new("empty-new-project")
@@ -1868,6 +1878,47 @@ fn menu_item(
     })
 }
 
+fn new_request_label(kind: RequestKind) -> String {
+    match kind {
+        RequestKind::Http => t!("ws.new_http_request"),
+        RequestKind::Graphql => t!("ws.new_graphql_request"),
+        RequestKind::WebSocket => t!("ws.new_websocket_request"),
+        RequestKind::EventStream => t!("ws.new_event_stream_request"),
+    }
+    .to_string()
+}
+
+/// "New HTTP request", "New GraphQL request", … creating in `dir`.
+fn new_request_items(menu: PopupMenu, weak: &WeakEntity<Workspace>, dir: &Path) -> PopupMenu {
+    RequestKind::ALL.into_iter().fold(menu, |menu, kind| {
+        let dir = dir.to_path_buf();
+        menu.item(menu_item(new_request_label(kind), weak, move |this, window, cx| {
+            this.new_request_of(dir.clone(), kind, window, cx)
+        }))
+    })
+}
+
+fn scratch_request_submenu(
+    menu: PopupMenu,
+    weak: &WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let weak = weak.clone();
+    menu.submenu(
+        t!("ws.new_scratch_request").to_string(),
+        window,
+        cx,
+        move |menu, _, _| {
+            RequestKind::ALL.into_iter().fold(menu, |menu, kind| {
+                menu.item(menu_item(new_request_label(kind), &weak, move |this, window, cx| {
+                    this.new_scratch_request_of(kind, window, cx)
+                }))
+            })
+        },
+    )
+}
+
 fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> PopupMenu {
     let item = |key: &str, action: RootAction| {
         let folder = folder.to_path_buf();
@@ -1875,7 +1926,8 @@ fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> 
             action(this, folder.clone(), window, cx)
         })
     };
-    menu.item(item("ws.new_request", Workspace::new_request))
+    new_request_items(menu, weak, folder)
+        .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .separator()
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
@@ -1908,11 +1960,15 @@ fn request_menu(
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.duplicate", Workspace::duplicate_request))
         .separator()
-        .item(item("ws.new_request_beside", |this, path, window, cx| {
-            if let Some(dir) = path.parent() {
-                this.new_request(dir.to_path_buf(), window, cx)
-            }
-        }))
+        .when_some(request.parent(), |menu, dir| {
+            let (weak, dir) = (weak.clone(), dir.to_path_buf());
+            menu.submenu(
+                t!("ws.new_request_beside").to_string(),
+                window,
+                cx,
+                move |menu, _, _| new_request_items(menu, &weak, &dir),
+            )
+        })
         .when(!targets.is_empty(), |menu| {
             let (weak, request) = (weak.clone(), request.to_path_buf());
             menu.submenu(t!("ws.move_to").to_string(), window, cx, move |mut menu, _, _| {
@@ -1940,7 +1996,8 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
             action(this, root.clone(), window, cx)
         })
     };
-    menu.item(item("ws.new_request", Workspace::new_request))
+    new_request_items(menu, weak, root)
+        .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .separator()
@@ -2635,7 +2692,7 @@ components:
         .unwrap();
         type_and_confirm(cx, "Animals");
         let animals = root.join("Animals");
-        let inside = animals.join("new-request.yaml");
+        let inside = animals.join("new-http-request.yaml");
         assert!(inside.exists() && !pets.exists());
         cx.update(|cx| assert_eq!(editor.read(cx).path(), Some(&inside)));
 
@@ -2672,11 +2729,14 @@ components:
             assert_eq!(ws.collections.len(), 1);
             assert_eq!(ws.collections[0].root, scratch);
             window.render_frame(cx);
-            window.click("empty-scratch-request", cx);
+            assert!(window.try_find("empty-scratch-request").is_some());
+            workspace.update(cx, |this, cx| {
+                this.new_scratch_request_of(RequestKind::Http, window, cx)
+            });
         })
         .unwrap();
         cx.run_until_parked();
-        let quick = scratch.join("new-request.yaml");
+        let quick = scratch.join("new-http-request.yaml");
         assert!(quick.exists());
         cx.update(|cx| {
             let ws = workspace.read(cx);
@@ -2690,7 +2750,7 @@ components:
         })
         .unwrap();
         cx.run_until_parked();
-        let second = scratch.join("new-request-2.yaml");
+        let second = scratch.join("new-http-request-2.yaml");
         assert!(second.exists());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| this.close_collection(&scratch, window, cx));
@@ -2709,7 +2769,7 @@ components:
         })
         .unwrap();
         cx.run_until_parked();
-        let moved = root.join("new-request.yaml");
+        let moved = root.join("new-http-request.yaml");
         assert!(moved.exists() && !quick.exists());
         cx.update(|cx| {
             let ws = workspace.read(cx);
@@ -2799,6 +2859,37 @@ components:
         // Clearing it shows everything again.
         set_filter(cx, "");
         assert!(shown(cx).contains("\"Rex\""));
+    }
+
+    #[gpui_kit::test]
+    async fn new_requests_come_in_kinds(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                for kind in RequestKind::ALL {
+                    this.new_request_of(root.clone(), kind, window, cx);
+                }
+            });
+        })
+        .unwrap();
+        let read = |name: &str| storage::read_yaml::<RequestFile>(&root.join(name)).unwrap();
+        let http = read("new-http-request.yaml");
+        assert_eq!((http.method.as_str(), request_label(&http).as_str()), ("GET", "GET"));
+        let graphql = read("new-graphql-request.yaml");
+        assert_eq!(request_label(&graphql), "GQL");
+        assert!(graphql.graphql.unwrap().query.starts_with("query {"));
+        let websocket = read("new-websocket.yaml");
+        assert_eq!(request_label(&websocket), "WS");
+        let stream = read("new-event-stream-sse.yaml");
+        assert_eq!(stream.headers[0].value, "text/event-stream");
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let path = ws.editor.read(cx).path().cloned().unwrap();
+            assert!(path.ends_with("new-event-stream-sse.yaml"), "the newest is open");
+        });
     }
 
     #[gpui_kit::test]

@@ -11,6 +11,7 @@ use rust_i18n::t;
 use super::{RootAction, Workspace};
 use crate::i18n::{self, LANGUAGES};
 use crate::import::ImportFormat;
+use crate::model::RequestKind;
 use crate::omarchy_theme;
 use crate::settings::AppSettings;
 
@@ -171,12 +172,18 @@ impl Workspace {
     }
 
     fn action_group(&self, cx: &App) -> Group {
-        let mut entries = vec![
-            Entry::new(t!("ws.new_scratch_request"), |this, window, cx| {
-                this.new_scratch_request(window, cx)
+        let mut entries: Vec<Entry> = RequestKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let label = t!("ws.in_scratchpad", action = super::new_request_label(kind));
+                Entry::new(label, move |this, window, cx| {
+                    this.new_scratch_request_of(kind, window, cx)
+                })
+                .english("ws.new_scratch_request")
+                .keywords(["quick".into(), "scratchpad".into(), "request".into()])
             })
-            .english("ws.new_scratch_request")
-            .keywords(["quick".into(), "scratchpad".into(), "request".into()]),
+            .collect();
+        entries.extend([
             Entry::new(t!("ws.new_project_ellipsis"), |this, window, cx| {
                 this.new_project(window, cx)
             })
@@ -203,14 +210,22 @@ impl Workspace {
             })
             .english("ws.new_project_from_asyncapi")
             .keywords(["websocket".into(), "spec".into()]),
-        ];
+        ]);
         if let Some(root) = self.active_collection(cx).map(|c| c.root.clone()) {
             let with_root = |key: &'static str, run: RootAction| {
                 let root = root.clone();
                 Entry::new(t!(key), move |this, window, cx| run(this, root.clone(), window, cx)).english(key)
             };
+            for kind in RequestKind::ALL {
+                let root = root.clone();
+                entries.push(
+                    Entry::new(super::new_request_label(kind), move |this, window, cx| {
+                        this.new_request_of(root.clone(), kind, window, cx)
+                    })
+                    .icon(IconName::Plus),
+                );
+            }
             entries.extend([
-                with_root("ws.new_request", Workspace::new_request).icon(IconName::Plus),
                 with_root("ws.manage_environments_ellipsis", Workspace::manage_environments).icon(IconName::Settings),
                 with_root("ws.import_curl", Workspace::import_curl_dialog).icon(IconName::SquareTerminal),
                 with_root("ws.import_file_here", Workspace::import_file_into),

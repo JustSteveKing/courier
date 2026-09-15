@@ -138,6 +138,37 @@ pub struct MessageTemplate {
     pub content: String,
 }
 
+/// The kinds of request that can be created from scratch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    Http,
+    Graphql,
+    WebSocket,
+    EventStream,
+}
+
+impl RequestKind {
+    pub const ALL: [RequestKind; 4] = [Self::Http, Self::Graphql, Self::WebSocket, Self::EventStream];
+
+    /// A new, empty request of this kind called `name`.
+    pub fn template(self, name: impl Into<String>) -> RequestFile {
+        let mut request = RequestFile::new(name);
+        match self {
+            Self::Http => {}
+            Self::Graphql => {
+                request.method = "POST".into();
+                request.graphql = Some(Graphql {
+                    query: "query {\n  \n}\n".into(),
+                    ..Default::default()
+                });
+            }
+            Self::WebSocket => request.url = "wss://".into(),
+            Self::EventStream => request.headers = vec![Header::new("Accept", "text/event-stream")],
+        }
+        request
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Graphql {
     pub query: String,

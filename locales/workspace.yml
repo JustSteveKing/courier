@@ -16,11 +16,6 @@ ws.could_not_read:
   es: "No se pudo leer: %{files}"
   de: "Konnte nicht gelesen werden: %{files}"
   fr: "Impossible de lire : %{files}"
-ws.new_request:
-  en: New request
-  es: Nueva solicitud
-  de: Neue Anfrage
-  fr: Nouvelle requête
 ws.import_curl:
   en: Import from curl…
   es: Importar desde curl…
@@ -405,10 +400,10 @@ ws.new_folder_title:
   de: Neuer Ordner
   fr: Nouveau dossier
 ws.new_request_beside:
-  en: New request beside
-  es: Nueva solicitud al lado
-  de: Neue Anfrage daneben
-  fr: Nouvelle requête à côté
+  en: New beside
+  es: Nueva al lado
+  de: Neu daneben
+  fr: Nouvelle à côté
 ws.open:
   en: Open
   es: Abrir
@@ -489,3 +484,28 @@ ws.moved_to:
   es: "Movida a %{collection}"
   de: "Nach %{collection} verschoben"
   fr: "Déplacée vers %{collection}"
+ws.new_http_request:
+  en: New HTTP request
+  es: Nueva solicitud HTTP
+  de: Neue HTTP-Anfrage
+  fr: Nouvelle requête HTTP
+ws.new_graphql_request:
+  en: New GraphQL request
+  es: Nueva solicitud GraphQL
+  de: Neue GraphQL-Anfrage
+  fr: Nouvelle requête GraphQL
+ws.new_websocket_request:
+  en: New WebSocket
+  es: Nuevo WebSocket
+  de: Neuer WebSocket
+  fr: Nouveau WebSocket
+ws.new_event_stream_request:
+  en: New event stream (SSE)
+  es: Nuevo flujo de eventos (SSE)
+  de: Neuer Event-Stream (SSE)
+  fr: Nouveau flux d’événements (SSE)
+ws.in_scratchpad:
+  en: "%{action} in scratchpad"
+  es: "%{action} en el borrador"
+  de: "%{action} im Notizblock"
+  fr: "%{action} dans le brouillon"
