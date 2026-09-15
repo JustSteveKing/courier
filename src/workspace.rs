@@ -22,12 +22,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
+use crate::auth_form::{AuthForm, AuthFormEvent};
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
 use crate::graphql::SchemaCache;
 use crate::import::{self, CollectionImport, ImportFormat, ImportItem};
 use crate::import::{curl, postman};
-use crate::model::{CollectionFile, RequestFile, RequestKind, Variables, placeholder};
+use crate::model::{Auth, CollectionFile, RequestFile, RequestKind, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
@@ -105,6 +106,7 @@ impl Workspace {
             RequestEditorEvent::MoveHeaderToSecret { path, index } => {
                 this.move_header_to_secret(path.clone(), *index, window, cx)
             }
+            RequestEditorEvent::MoveAuthToSecret { path } => this.move_auth_to_secret(path.clone(), window, cx),
             RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
         })
         .detach();
@@ -418,6 +420,7 @@ impl Workspace {
             self.editor.update(cx, |editor, cx| {
                 editor.load(path.to_path_buf(), request, key, window, cx)
             });
+            self.refresh_inherited_auth(cx);
         }
     }
 
@@ -1411,6 +1414,215 @@ impl Workspace {
         Ok((added, writes))
     }
 
+    /// Adds a secret named like `base` holding `value` to the active environment, or to the
+    /// collection defaults when none is active. Returns its name, where it went, and the
+    /// write for the secret store.
+    fn add_secret(&self, root: &Path, base: &str, value: String) -> Result<(String, String, SecretWrite)> {
+        let ix = self
+            .collections
+            .iter()
+            .position(|c| c.root == root)
+            .context(t!("ws.not_in_open_collection").to_string())?;
+        let mut file: CollectionFile = storage::read_yaml(&root.join(crate::model::COLLECTION_FILE))?;
+        let environment = self
+            .state
+            .active_environments
+            .get(root)
+            .and_then(|env_path| self.collections[ix].environment(env_path))
+            .cloned();
+        let taken: Vec<String> = match &environment {
+            Some(env) => env
+                .file
+                .secrets
+                .iter()
+                .chain(env.file.variables.keys())
+                .cloned()
+                .collect(),
+            None => file.secrets.iter().chain(file.variables.keys()).cloned().collect(),
+        };
+        let name = unique_name(base, |candidate| taken.iter().any(|t| t == candidate));
+        let assigned = file.ensure_id().1;
+        let (scope, label) = match environment {
+            Some(mut env) => {
+                if assigned {
+                    storage::save_collection_file(root, &file)?;
+                }
+                env.file.secrets.push(name.clone());
+                storage::write_yaml(&env.path, &env.file)?;
+                (SecretRef::environment_scope(&env.path), env.file.name)
+            }
+            None => {
+                file.secrets.push(name.clone());
+                storage::save_collection_file(root, &file)?;
+                (DEFAULTS_SCOPE.to_string(), t!("ws.defaults").to_string())
+            }
+        };
+        let write = SecretWrite::new(&file, &scope, &label, &name, value);
+        Ok((name, label, write))
+    }
+
+    /// Moves a request's literal auth credential into a secret.
+    fn move_auth_to_secret(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let result = (|| -> Result<(PathBuf, String, SecretWrite)> {
+            let root = self
+                .collection_index_for(&path)
+                .map(|ix| self.collections[ix].root.clone())
+                .context(t!("ws.not_in_open_collection").to_string())?;
+            let mut request: RequestFile = storage::read_yaml(&path)?;
+            let literal = request
+                .auth
+                .literal_credential()
+                .context(t!("ws.no_literal_credential").to_string())?
+                .to_string();
+            let (name, scope, write) = self.add_secret(&root, &request.auth.credential_name(), literal)?;
+            request.auth.set_credential(placeholder(&name));
+            storage::write_yaml(&path, &request)?;
+            Ok((
+                root,
+                t!("ws.moved_to_secret", name = name, scope = scope).to_string(),
+                write,
+            ))
+        })();
+        match result {
+            Ok((root, message, write)) => {
+                self.store_secrets(vec![write], window, cx);
+                self.reload_collection(&root, window, cx);
+                self.load_in_editor(&path, window, cx);
+                window.push_notification(Notification::success(message), cx);
+            }
+            Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
+    /// The auth that an inheriting item at `path` gets (a request file, or a folder for its
+    /// own settings), and the name of the folder or collection it comes from. `path` itself
+    /// is not consulted.
+    fn inherited_auth(&self, path: &Path) -> Option<(Auth, String)> {
+        let collection = &self.collections[self.collection_index_for(path)?];
+        let mut folders = storage::folder_auths(&collection.root, path);
+        if path.is_dir() {
+            // A folder's own settings aren't inherited by itself.
+            folders.retain(|(dir, _)| dir != path);
+        }
+        let nearest = folders.into_iter().rev().find(|(_, auth)| !auth.is_inherit());
+        Some(match nearest {
+            Some((dir, auth)) => (
+                auth,
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            None => (collection.file.auth.clone(), self.collection_label(collection)),
+        })
+    }
+
+    /// Tells the editor what its request inherits, after loading it or changing auth above it.
+    fn refresh_inherited_auth(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.editor.read(cx).path().cloned() else {
+            return;
+        };
+        if let Some((auth, source)) = self.inherited_auth(&path) {
+            self.editor
+                .update(cx, |editor, cx| editor.set_inherited_auth(auth, source, cx));
+        }
+    }
+
+    /// Edits the auth of a collection (at its root) or a folder.
+    fn edit_auth(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.collection_index_for(&path) else {
+            return;
+        };
+        let root = self.collections[ix].root.clone();
+        let is_collection = path == root;
+        let (current, name) = if is_collection {
+            (
+                self.collections[ix].file.auth.clone(),
+                self.collection_label(&self.collections[ix]),
+            )
+        } else {
+            (
+                storage::read_folder(&path).auth,
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        };
+        let inherited = if is_collection {
+            None
+        } else {
+            self.inherited_auth(&path)
+        };
+        let form = cx.new(|cx| {
+            let mut form = AuthForm::new(!is_collection, window, cx);
+            form.set(&current, window, cx);
+            form.set_inherited(inherited, cx);
+            form
+        });
+        cx.subscribe_in(&form, window, {
+            let root = root.clone();
+            move |this, form, event: &AuthFormEvent, window, cx| {
+                if let AuthFormEvent::MoveToSecret = event {
+                    let auth = form.read(cx).value(cx);
+                    let Some(literal) = auth.literal_credential().map(str::to_string) else {
+                        return;
+                    };
+                    match this.add_secret(&root, &auth.credential_name(), literal) {
+                        Ok((name, scope, write)) => {
+                            this.store_secrets(vec![write], window, cx);
+                            this.reload_collection(&root, window, cx);
+                            form.update(cx, |form, cx| form.set_credential(placeholder(&name), window, cx));
+                            window.push_notification(
+                                Notification::success(t!("ws.moved_to_secret", name = name, scope = scope).to_string()),
+                                cx,
+                            );
+                        }
+                        Err(e) => notify_error(format!("{e:#}"), window, cx),
+                    }
+                }
+            }
+        })
+        .detach();
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (weak, form, path, root, name) = (weak.clone(), form.clone(), path.clone(), root.clone(), name.clone());
+            dialog
+                .title(t!("ws.auth_title", name = name).to_string())
+                .w(px(560.))
+                .content({
+                    let form = form.clone();
+                    move |content, _, _| content.child(form.clone())
+                })
+                .footer(dialog_footer(
+                    Some(t!("ws.save_button").to_string()),
+                    ButtonVariant::Primary,
+                ))
+                .on_ok(move |_, window, cx| {
+                    let auth = form.read(cx).value(cx);
+                    let result = if path == root {
+                        storage::read_yaml::<CollectionFile>(&root.join(crate::model::COLLECTION_FILE)).and_then(
+                            |mut file| {
+                                file.auth = auth;
+                                storage::save_collection_file(&root, &file)
+                            },
+                        )
+                    } else {
+                        let mut folder = storage::read_folder(&path);
+                        folder.auth = auth;
+                        storage::write_folder(&path, &folder)
+                    };
+                    weak.update(cx, |this, cx| match result {
+                        Ok(()) => {
+                            this.reload_collection(&root, window, cx);
+                            this.refresh_inherited_auth(cx);
+                        }
+                        Err(e) => notify_error(format!("{e:#}"), window, cx),
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
     /// Moves one header's literal credential into a secret in the active environment, or in
     /// the collection defaults when no environment is active.
     fn move_header_to_secret(&mut self, path: PathBuf, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1940,6 +2152,7 @@ fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> 
     new_request_items(menu, weak, folder)
         .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
+        .item(item("ws.auth_ellipsis", Workspace::edit_auth))
         .separator()
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.delete_ellipsis", Workspace::delete_item))
@@ -2025,6 +2238,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
     new_request_items(menu, weak, root)
         .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
+        .item(item("ws.auth_ellipsis", Workspace::edit_auth))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .separator()
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
@@ -3065,6 +3279,93 @@ components:
                 || head.starts_with("GET /json?sort=name&limit={{limit}} "),
             "{head}"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn auth_is_inherited_from_folders_and_the_collection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // The collection uses a bearer token; the Public folder turns auth off.
+        let mut file: CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        file.variables.insert("token".into(), "abc".into());
+        file.auth = Auth::Bearer {
+            token: "{{token}}".into(),
+        };
+        storage::save_collection_file(&root, &file).unwrap();
+        let public = storage::create_folder(&root, "Public").unwrap();
+        storage::write_folder(&public, &crate::model::FolderFile { auth: Auth::None }).unwrap();
+        let open_request = storage::create_request(&public, &RequestFile::new("Status")).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let send_to = |cx: &mut TestAppContext, path: &Path| {
+            let (port, received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            let mut request: RequestFile = storage::read_yaml(path).unwrap();
+            request.url = format!("http://127.0.0.1:{port}/");
+            storage::write_yaml(path, &request).unwrap();
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(path.to_path_buf(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .to_ascii_lowercase()
+        };
+
+        let head = send_to(cx, &get_json);
+        assert!(head.contains("authorization: bearer abc"), "{head}");
+        cx.update(|cx| {
+            assert!(matches!(editor.read(cx).inherited_auth_for_test(), Auth::Bearer { .. }));
+        });
+        let head = send_to(cx, &open_request);
+        assert!(!head.contains("authorization"), "{head}");
+
+        // A literal token typed into a request moves into a secret, leaving a placeholder.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+            let form = editor.read(cx).auth_form_for_test();
+            form.update(cx, |form, cx| {
+                form.set(&Auth::Bearer { token: "s3cr3t".into() }, window, cx);
+                cx.emit(AuthFormEvent::MoveToSecret);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
+        assert_eq!(
+            saved.auth,
+            Auth::Bearer {
+                token: "{{token_2}}".into()
+            },
+            "`token` is already a variable"
+        );
+        let file: CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        assert!(file.secrets.contains(&"token_2".to_string()));
+        assert!(!fs::read_to_string(&get_json).unwrap().contains("s3cr3t"));
+
+        // Folder auth is edited in a dialog.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.edit_auth(public.clone(), window, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(storage::read_folder(&public).auth, Auth::None, "kept as it was");
     }
 
     #[gpui_kit::test]

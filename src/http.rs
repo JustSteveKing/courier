@@ -2,7 +2,8 @@
 
 use rust_i18n::t;
 
-use crate::model::{BodyKind, Graphql, RequestFile, Variables, interpolate};
+use crate::encoding::{base64_encode, percent_encode};
+use crate::model::{Auth, BodyKind, Graphql, RequestFile, Variables, interpolate};
 
 /// A request with variables already substituted, ready to go on the wire.
 #[derive(Debug, PartialEq)]
@@ -58,9 +59,44 @@ impl Request {
             headers.push(("Content-Type".into(), content_type.into()));
         }
 
+        let mut url = sub(file.url.trim());
+        // `file.auth` is the effective auth by now: callers resolve `Inherit` first.
+        let has_header =
+            |headers: &[(String, String)], name: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
+        match &file.auth {
+            Auth::Basic { username, password } if !has_header(&headers, "authorization") => {
+                let credentials = format!("{}:{}", sub(username), sub(password));
+                headers.push((
+                    "Authorization".into(),
+                    format!("Basic {}", base64_encode(credentials.as_bytes())),
+                ));
+            }
+            Auth::Bearer { token } if !has_header(&headers, "authorization") => {
+                headers.push(("Authorization".into(), format!("Bearer {}", sub(token))));
+            }
+            Auth::ApiKey { name, value, in_query } if !name.trim().is_empty() => {
+                let (name, value) = (sub(name.trim()), sub(value));
+                if *in_query {
+                    let (before, fragment) = match url.find('#') {
+                        Some(i) => (url[..i].to_string(), url[i..].to_string()),
+                        None => (url.clone(), String::new()),
+                    };
+                    let separator = if before.contains('?') { '&' } else { '?' };
+                    url = format!(
+                        "{before}{separator}{}={}{fragment}",
+                        percent_encode(&name),
+                        percent_encode(&value)
+                    );
+                } else if !has_header(&headers, &name) {
+                    headers.push((name, value));
+                }
+            }
+            _ => {}
+        }
+
         let request = Self {
             method: file.method.clone(),
-            url: sub(file.url.trim()),
+            url,
             headers,
             body,
         };
@@ -143,6 +179,45 @@ mod tests {
             ]
         );
         assert_eq!(missing, vec!["token"]);
+    }
+
+    #[test]
+    fn applies_auth() {
+        let vars = Variables::from([
+            ("token".to_string(), "t0k".to_string()),
+            ("password".to_string(), "p@ss".to_string()),
+        ]);
+        let mut file = RequestFile::new("Me");
+        file.url = "https://api.test/me#top".into();
+        let header = |file: &RequestFile| Request::resolve(file, &vars).unwrap().0.headers;
+
+        file.auth = Auth::Bearer {
+            token: "{{token}}".into(),
+        };
+        assert_eq!(header(&file), [("Authorization".to_string(), "Bearer t0k".to_string())]);
+
+        file.auth = Auth::Basic {
+            username: "sam".into(),
+            password: "{{password}}".into(),
+        };
+        assert_eq!(header(&file)[0].1, format!("Basic {}", base64_encode(b"sam:p@ss")));
+
+        // An explicit Authorization header wins.
+        file.headers = crate::model::headers_from_text("Authorization: Custom 1");
+        assert_eq!(header(&file), [("Authorization".to_string(), "Custom 1".to_string())]);
+        file.headers.clear();
+
+        file.auth = Auth::ApiKey {
+            name: "api key".into(),
+            value: "{{token}}".into(),
+            in_query: true,
+        };
+        let (request, _) = Request::resolve(&file, &vars).unwrap();
+        assert_eq!(request.url, "https://api.test/me?api%20key=t0k#top");
+        assert!(request.headers.is_empty());
+
+        file.auth = Auth::None;
+        assert!(header(&file).is_empty());
     }
 
     #[test]

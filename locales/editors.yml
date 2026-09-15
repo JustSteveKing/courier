@@ -736,3 +736,78 @@ request.params_label:
   es: "Parámetros de consulta (nombre=valor, # para desactivar)"
   de: "Query-Parameter (Name=Wert, # zum Deaktivieren)"
   fr: "Paramètres de requête (nom=valeur, # pour désactiver)"
+request.auth_label:
+  en: Auth
+  es: Autenticación
+  de: Authentifizierung
+  fr: Authentification
+auth.inherit:
+  en: Inherit
+  es: Heredar
+  de: Erben
+  fr: Hériter
+auth.none:
+  en: No auth
+  es: Sin autenticación
+  de: Keine
+  fr: Aucune
+auth.basic:
+  en: Basic
+  es: Básica
+  de: Basic
+  fr: Basique
+auth.bearer:
+  en: Bearer token
+  es: Token Bearer
+  de: Bearer-Token
+  fr: Jeton Bearer
+auth.api_key:
+  en: API key
+  es: Clave de API
+  de: API-Schlüssel
+  fr: Clé d’API
+auth.username:
+  en: Username
+  es: Usuario
+  de: Benutzername
+  fr: Nom d’utilisateur
+auth.inherited_from:
+  en: "Uses %{kind} from %{source}"
+  es: "Usa %{kind} de %{source}"
+  de: "Verwendet %{kind} von %{source}"
+  fr: "Utilise %{kind} de %{source}"
+auth.inherited_none:
+  en: "%{source} sets no auth"
+  es: "%{source} no define autenticación"
+  de: "%{source} legt keine Authentifizierung fest"
+  fr: "%{source} ne définit pas d’authentification"
+auth.inherit_hint:
+  en: Uses the folder's or collection's auth
+  es: Usa la autenticación de la carpeta o colección
+  de: Verwendet die Authentifizierung des Ordners oder der Sammlung
+  fr: Utilise l’authentification du dossier ou de la collection
+auth.none_hint:
+  en: Sent without auth
+  es: Se envía sin autenticación
+  de: Wird ohne Authentifizierung gesendet
+  fr: Envoyée sans authentification
+auth.in_header:
+  en: Header
+  es: Cabecera
+  de: Header
+  fr: En-tête
+auth.in_query:
+  en: Query
+  es: Consulta
+  de: Query
+  fr: Requête
+auth.literal_warning:
+  en: This credential is saved as plain text in the project.
+  es: Esta credencial se guarda como texto sin cifrar en el proyecto.
+  de: Diese Zugangsdaten werden als Klartext im Projekt gespeichert.
+  fr: Cet identifiant est enregistré en clair dans le projet.
+auth.move_to_secret:
+  en: Move to secret
+  es: Mover a secreto
+  de: In Secret verschieben
+  fr: Déplacer vers un secret

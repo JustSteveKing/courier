@@ -7,7 +7,9 @@ use anyhow::{Context as _, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::model::{COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, RequestFile, slugify};
+use crate::model::{
+    Auth, COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, FolderFile, RequestFile, slugify,
+};
 use crate::response_cache::{CacheKey, cache_key};
 
 #[derive(Clone, Debug)]
@@ -226,6 +228,51 @@ pub fn save_collection_file(collection_root: &Path, file: &CollectionFile) -> Re
 
 pub fn delete_file(path: &Path) -> Result<()> {
     fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))
+}
+
+/// A folder's settings file, hidden so it's never taken for a request.
+pub const FOLDER_FILE: &str = ".folder.yaml";
+
+/// A folder's settings; a folder without a file inherits everything.
+pub fn read_folder(dir: &Path) -> FolderFile {
+    let path = dir.join(FOLDER_FILE);
+    if !path.exists() {
+        return FolderFile::default();
+    }
+    read_yaml(&path).unwrap_or_else(|e| {
+        eprintln!("ignoring {}: {e:#}", path.display());
+        FolderFile::default()
+    })
+}
+
+/// Saves a folder's settings, removing the file when there's nothing to keep.
+pub fn write_folder(dir: &Path, folder: &FolderFile) -> Result<()> {
+    let path = dir.join(FOLDER_FILE);
+    if folder == &FolderFile::default() {
+        if path.exists() {
+            delete_file(&path)?;
+        }
+        return Ok(());
+    }
+    write_yaml(&path, folder)
+}
+
+/// The auth set on each folder between a collection's root and `request`, outermost first.
+pub fn folder_auths(root: &Path, request: &Path) -> Vec<(PathBuf, Auth)> {
+    let Some(parent) = request.parent() else {
+        return Vec::new();
+    };
+    let Ok(relative) = parent.strip_prefix(root) else {
+        return Vec::new();
+    };
+    let mut dir = root.to_path_buf();
+    relative
+        .components()
+        .map(|part| {
+            dir.push(part);
+            (dir.clone(), read_folder(&dir).auth)
+        })
+        .collect()
 }
 
 /// Deletes a request file or a folder with everything in it.

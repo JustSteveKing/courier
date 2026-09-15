@@ -20,12 +20,13 @@ use gpui_kit::*;
 use indexmap::IndexMap;
 use rust_i18n::t;
 
+use crate::auth_form::{AuthForm, AuthFormEvent};
 use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
 use crate::http::{self, Request};
 use crate::model::{
-    Body, BodyKind, Graphql, QueryParam, RequestFile, Variables, apply_params_text, headers_from_text, headers_to_text,
-    params_to_text,
+    Auth, Body, BodyKind, Graphql, QueryParam, RequestFile, Variables, apply_params_text, headers_from_text,
+    headers_to_text, params_to_text,
 };
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
@@ -58,6 +59,11 @@ pub enum RequestEditorEvent {
     MoveHeaderToSecret {
         path: PathBuf,
         index: usize,
+    },
+    /// The user asked to move the request auth's literal credential into a secret. The
+    /// request has already been saved.
+    MoveAuthToSecret {
+        path: PathBuf,
     },
     Error(String),
 }
@@ -197,6 +203,9 @@ pub struct RequestEditor {
     /// A one-line code editor rather than a plain input, so `{{variables}}` can be coloured.
     url: Entity<EditorState>,
     headers: Entity<EditorState>,
+    auth: Entity<AuthForm>,
+    /// What the request's `Inherit` auth resolves to, from its folders and collection.
+    inherited_auth: Auth,
     /// The URL's query parameters as `name=value` lines, kept in sync with the URL.
     params: Entity<EditorState>,
     disabled_params: Vec<QueryParam>,
@@ -265,6 +274,17 @@ impl RequestEditor {
                 .placeholder("{{base_url}}/path")
         });
         let headers = cx.new(|cx| EditorState::new(window, cx).language("text"));
+        let auth = cx.new(|cx| AuthForm::new(true, window, cx));
+        cx.subscribe(&auth, |this, _, event: &AuthFormEvent, cx| match event {
+            AuthFormEvent::Changed => this.update_dirty(cx),
+            AuthFormEvent::MoveToSecret => {
+                if let Some(path) = this.path.clone() {
+                    this.save(cx);
+                    cx.emit(RequestEditorEvent::MoveAuthToSecret { path });
+                }
+            }
+        })
+        .detach();
         let params = cx.new(|cx| EditorState::new(window, cx).language("text"));
         cx.subscribe_in(&params, window, |this, params, event: &InputEvent, window, cx| {
             if let InputEvent::Change = event {
@@ -406,6 +426,8 @@ impl RequestEditor {
             method,
             url,
             headers,
+            auth,
+            inherited_auth: Auth::None,
             params,
             disabled_params: Vec::new(),
             params_to_url: false,
@@ -574,6 +596,16 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn auth_form_for_test(&self) -> Entity<AuthForm> {
+        self.auth.clone()
+    }
+
+    #[cfg(test)]
+    pub fn inherited_auth_for_test(&self) -> &Auth {
+        &self.inherited_auth
+    }
+
+    #[cfg(test)]
     pub fn url_for_test(&self) -> Entity<EditorState> {
         self.url.clone()
     }
@@ -704,6 +736,13 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// The auth an inheriting request uses, and where it's set, from the workspace.
+    pub fn set_inherited_auth(&mut self, auth: Auth, source: String, cx: &mut Context<Self>) {
+        self.inherited_auth = auth.clone();
+        self.auth
+            .update(cx, |form, cx| form.set_inherited(Some((auth, source)), cx));
+    }
+
     pub fn set_secret_store(&mut self, store: SecretStore) {
         self.secret_store = Some(store);
     }
@@ -754,6 +793,7 @@ impl RequestEditor {
         self.headers
             .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
         self.disabled_params = request.disabled_params.clone();
+        self.auth.update(cx, |form, cx| form.set(&request.auth, window, cx));
         let params = params_to_text(&request.url, &request.disabled_params);
         self.params.update(cx, |s, cx| s.set_value(params, window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
@@ -830,6 +870,7 @@ impl RequestEditor {
                 order: saved.order,
                 messages: saved.messages,
                 disabled_params: self.disabled_params.clone(),
+                auth: self.auth.read(cx).value(cx),
                 graphql: Some(Graphql {
                     query: self.graphql_query.read(cx).value().to_string(),
                     variables: self.graphql_variables.read(cx).value().to_string(),
@@ -867,6 +908,7 @@ impl RequestEditor {
             messages: saved.messages,
             graphql: None,
             disabled_params: self.disabled_params.clone(),
+            auth: self.auth.read(cx).value(cx),
         }
     }
 
@@ -912,7 +954,10 @@ impl RequestEditor {
     /// Resolves `file` with the active variables and secrets, off the UI thread. Secret
     /// values are fetched only now, used for this one request, and dropped. Also returns the
     /// missing variable names and the variables used.
-    fn resolve_in_background(&self, file: RequestFile, cx: &App) -> Task<Result<Resolved, String>> {
+    fn resolve_in_background(&self, mut file: RequestFile, cx: &App) -> Task<Result<Resolved, String>> {
+        if file.auth.is_inherit() {
+            file.auth = self.inherited_auth.clone();
+        }
         let mut variables = self.variables.clone();
         let secrets = self.secrets.clone();
         let store = self.secret_store.clone();
@@ -1503,6 +1548,8 @@ impl Render for RequestEditor {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
+                            .child(label(t!("request.auth_label").to_string()))
+                            .child(self.auth.clone())
                             .child(label(t!("request.params_label").to_string()))
                             .child(code_editor(&self.params).h_20())
                             .child(label(t!("request.headers_label").to_string()))

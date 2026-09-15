@@ -579,3 +579,18 @@ colors.grey:
   es: Gris
   de: Grau
   fr: Gris
+ws.save_button:
+  en: Save
+  es: Guardar
+  de: Speichern
+  fr: Enregistrer
+ws.auth_ellipsis:
+  en: Auth…
+  es: Autenticación…
+  de: Authentifizierung…
+  fr: Authentification…
+ws.auth_title:
+  en: "Auth for %{name}"
+  es: "Autenticación de %{name}"
+  de: "Authentifizierung für %{name}"
+  fr: "Authentification de %{name}"

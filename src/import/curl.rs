@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 
 use crate::encoding::{base64_encode, percent_encode};
-use crate::model::{Body, BodyKind, Header, RequestFile};
+use crate::model::{Auth, Body, BodyKind, Header, RequestFile};
 
 /// Parses a curl command line (as copied from browser devtools / docs) into a request.
 pub fn parse(command: &str) -> Result<RequestFile> {
@@ -201,6 +201,7 @@ impl Parsed {
             messages: Vec::new(),
             graphql: None,
             disabled_params: Vec::new(),
+            auth: Auth::Inherit,
         })
     }
 }

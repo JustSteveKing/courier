@@ -38,6 +38,101 @@ pub struct CollectionFile {
     /// Names of secret defaults. Their values live in the secret store, never in YAML.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Auth for every request that inherits it. `Inherit` here means none.
+    #[serde(default, skip_serializing_if = "Auth::is_unset")]
+    pub auth: Auth,
+}
+
+/// How a request authenticates. Values may use `{{variables}}`, and credentials should: the
+/// editor offers to move literal ones into secrets.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Auth {
+    /// Use the folder's or collection's auth.
+    #[default]
+    Inherit,
+    None,
+    Basic {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
+    Bearer {
+        #[serde(default)]
+        token: String,
+    },
+    ApiKey {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        value: String,
+        /// Sent as a query parameter instead of a header.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        in_query: bool,
+    },
+}
+
+impl Auth {
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+
+    /// Nothing set: inherit, or explicitly none.
+    pub fn is_unset(&self) -> bool {
+        matches!(self, Self::Inherit | Self::None)
+    }
+
+    /// The credential field's value when it's written literally rather than as a
+    /// `{{variable}}`: the password, token or key value.
+    pub fn literal_credential(&self) -> Option<&str> {
+        let value = match self {
+            Self::Basic { password, .. } => password,
+            Self::Bearer { token } => token,
+            Self::ApiKey { value, .. } => value,
+            Self::Inherit | Self::None => return None,
+        };
+        (!value.trim().is_empty() && !value.contains("{{")).then_some(value.as_str())
+    }
+
+    /// Replaces the credential field (see [`Auth::literal_credential`]) with `text`.
+    pub fn set_credential(&mut self, text: String) {
+        match self {
+            Self::Basic { password, .. } => *password = text,
+            Self::Bearer { token } => *token = text,
+            Self::ApiKey { value, .. } => *value = text,
+            Self::Inherit | Self::None => {}
+        }
+    }
+
+    /// A secret name suggestion for this auth's credential.
+    pub fn credential_name(&self) -> String {
+        match self {
+            Self::Basic { .. } => "password".into(),
+            Self::ApiKey { name, .. } if !name.trim().is_empty() => {
+                let slug: String = name
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                slug.trim_matches('_').to_string()
+            }
+            Self::ApiKey { .. } => "api_key".into(),
+            _ => "token".into(),
+        }
+    }
+}
+
+/// Settings stored for a folder in its `.folder.yaml`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct FolderFile {
+    #[serde(default, skip_serializing_if = "Auth::is_inherit")]
+    pub auth: Auth,
 }
 
 impl CollectionFile {
@@ -48,6 +143,7 @@ impl CollectionFile {
             name: name.into(),
             variables: Variables::new(),
             secrets: Vec::new(),
+            auth: Auth::None,
         }
     }
 
@@ -112,6 +208,8 @@ pub struct RequestFile {
     /// Query parameters switched off in the params editor. Enabled ones live in the URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_params: Vec<QueryParam>,
+    #[serde(default, skip_serializing_if = "Auth::is_inherit")]
+    pub auth: Auth,
 }
 
 /// A `name=value` query parameter, as written (percent-encoding and `{{variables}}` kept).
@@ -196,6 +294,7 @@ impl RequestFile {
             messages: Vec::new(),
             disabled_params: Vec::new(),
             graphql: None,
+            auth: Auth::Inherit,
         }
     }
 }
@@ -461,6 +560,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auth_serializes_and_spots_literal_credentials() {
+        let yaml = serde_norway::to_string(&Auth::ApiKey {
+            name: "X-Key".into(),
+            value: "{{key}}".into(),
+            in_query: false,
+        })
+        .unwrap();
+        assert_eq!(yaml, "type: api_key\nname: X-Key\nvalue: '{{key}}'\n");
+        let mut literal = Auth::Bearer { token: "abc123".into() };
+        assert_eq!(literal.literal_credential(), Some("abc123"));
+        literal.set_credential("{{token}}".into());
+        assert_eq!(literal.literal_credential(), None);
+        let request: RequestFile = serde_norway::from_str("name: x").unwrap();
+        assert!(request.auth.is_inherit(), "missing auth inherits");
+    }
+
+    #[test]
     fn params_sync_with_the_url() {
         let url = "{{base_url}}/pets?limit=10&species={{kind}}&flag#top";
         let disabled = vec![QueryParam {
@@ -523,6 +639,9 @@ mod tests {
                 name: "debug".into(),
                 value: "1".into(),
             }],
+            auth: Auth::Bearer {
+                token: "{{token}}".into(),
+            },
         };
         let yaml = serde_norway::to_string(&request).unwrap();
         assert!(!yaml.contains("enabled: true"), "enabled headers stay terse:\n{yaml}");
