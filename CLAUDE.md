@@ -27,6 +27,7 @@ After moving the repo, `cargo clean -p courier` (tests locate files via `env!("C
 
 ## Rules
 
+- **Secret values never touch YAML, logs, the response cache or any plain file.** Cookie jars count as secrets: they're saved in the secret store (`cookies.rs`).
 - **Secret values never touch YAML, logs or the response cache.** Collections store secret names; values go through `SecretStore` (`SecretWrite` + `apply`). Imports hoist literal credentials into secrets.
 - **Every user-visible string is `t!("key")`** with an entry in `locales/*.yml` for `en`, `es`, `de` and `fr` (same `%{placeholders}`). Tests fail on missing keys. Keep low-level error details (`anyhow` context) in English.
 - **Build inputs, editors and dialog footers with `crate::ui`** (`text_input`, `secret_input`, `code_editor`, `readonly_editor`, `textarea`, `dialog_footer`); bare `Input::new`/`Editor::new`/`Textarea::new` fail a test because GPUI Kit's own menus aren't translated.

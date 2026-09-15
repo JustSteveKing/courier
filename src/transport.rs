@@ -156,14 +156,26 @@ fn headers_of(map: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
 }
 
 /// Sends an HTTP request. `last_event_id` resumes a Server-Sent Events stream.
+/// A client that stores response cookies in `store` and sends them with matching requests.
+pub fn client_with_cookies(store: std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>) -> reqwest::Client {
+    let _runtime = runtime().enter();
+    reqwest::Client::builder()
+        .cookie_provider(store)
+        .build()
+        .expect("could not create the HTTP client")
+}
+
+/// Sends an HTTP request, with `client` (e.g. one with a cookie jar) or the shared one.
 pub fn start_http(
     request: Request,
     head_timeout: Duration,
     last_event_id: Option<String>,
+    client: Option<reqwest::Client>,
 ) -> (Handle, async_channel::Receiver<Event>) {
     spawn(None, move |events| async move {
         let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut builder = client().request(method, &request.url);
+        let client = client.unwrap_or_else(|| self::client().clone());
+        let mut builder = client.request(method, &request.url);
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
@@ -400,7 +412,12 @@ mod tests {
             }
             stream.write_all(b"0\r\n\r\n").unwrap();
         });
-        let (_handle, events) = start_http(get(&format!("http://127.0.0.1:{port}/")), Duration::from_secs(5), None);
+        let (_handle, events) = start_http(
+            get(&format!("http://127.0.0.1:{port}/")),
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let events = collect(&events, Duration::from_secs(5));
 
         assert!(
@@ -444,6 +461,7 @@ mod tests {
             get(&format!("http://127.0.0.1:{port}/stream")),
             Duration::from_secs(5),
             Some("41".into()),
+            None,
         );
         let events = collect(&events, Duration::from_secs(5));
 
@@ -483,6 +501,7 @@ mod tests {
             get(&format!("http://127.0.0.1:{port}/")),
             Duration::from_millis(200),
             None,
+            None,
         );
         let events = collect(&events, Duration::from_secs(5));
         assert!(
@@ -507,7 +526,12 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
-        let (handle, events) = start_http(get(&format!("http://127.0.0.1:{port}/")), Duration::from_secs(5), None);
+        let (handle, events) = start_http(
+            get(&format!("http://127.0.0.1:{port}/")),
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let first = collect(&events, Duration::from_millis(300));
         assert!(first.iter().any(|e| matches!(e, Event::Sse(_))), "{first:?}");
 

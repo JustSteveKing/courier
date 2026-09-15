@@ -21,6 +21,7 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
+use crate::cookies::Cookies;
 use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
 use crate::http::{self, Request};
@@ -197,6 +198,8 @@ pub struct RequestEditor {
     variables: Variables,
     secrets: IndexMap<String, SecretRef>,
     secret_store: Option<SecretStore>,
+    /// The request's collection's cookie jar.
+    cookies: Option<Cookies>,
 
     name: Entity<InputState>,
     method: Entity<SelectState<SearchableVec<&'static str>>>,
@@ -422,6 +425,7 @@ impl RequestEditor {
             variables: Variables::new(),
             secrets: IndexMap::new(),
             secret_store: None,
+            cookies: None,
             name,
             method,
             url,
@@ -743,6 +747,10 @@ impl RequestEditor {
             .update(cx, |form, cx| form.set_inherited(Some((auth, source)), cx));
     }
 
+    pub fn set_cookies(&mut self, cookies: Option<Cookies>) {
+        self.cookies = cookies;
+    }
+
     pub fn set_secret_store(&mut self, store: SecretStore) {
         self.secret_store = Some(store);
     }
@@ -1013,10 +1021,12 @@ impl RequestEditor {
         }
         let resolving = self.resolve_in_background(file, cx);
         let timeout = self.timeout(cx);
+        let cookies = self.cookies.clone();
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
             let resolved = resolving.await;
+            let jar = cookies.clone();
             let events = this.update(cx, |this, cx| {
                 let state = this.responses.entry(path.clone()).or_default();
                 let (request, missing, variables) = match resolved {
@@ -1033,9 +1043,16 @@ impl RequestEditor {
                 let live = state.live(id)?; // cancelled while resolving
                 let (handle, events) = if live.websocket {
                     live.variables = variables;
+                    let mut request = request;
+                    // The HTTP client sends cookies itself; the WebSocket handshake needs them added.
+                    if let Some(cookie) = jar.as_ref().and_then(|jar| jar.header_for(&request.url))
+                        && !request.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("cookie"))
+                    {
+                        request.headers.push(("Cookie".into(), cookie));
+                    }
                     transport::start_websocket(request, timeout)
                 } else {
-                    transport::start_http(request, timeout, last_event_id)
+                    transport::start_http(request, timeout, last_event_id, jar.map(|jar| jar.client().clone()))
                 };
                 live.handle = Some(handle);
                 Some(events)
@@ -1043,6 +1060,7 @@ impl RequestEditor {
             let Ok(Some(events)) = events else {
                 return;
             };
+            let mut finished = false;
             while let Ok(event) = events.recv().await {
                 let keep_going = this
                     .update_in(cx, |this, window, cx| {
@@ -1050,15 +1068,27 @@ impl RequestEditor {
                     })
                     .unwrap_or(false);
                 if !keep_going {
-                    return;
+                    finished = true;
+                    break;
                 }
             }
-            // The channel closed without a result: the connection went away.
-            this.update_in(cx, |this, window, cx| {
-                let message = t!("request.connection_closed").to_string();
-                this.on_transport_event(&path, id, transport::Event::Failed(message), window, cx)
-            })
-            .ok();
+            if !finished {
+                // The channel closed without a result: the connection went away.
+                this.update_in(cx, |this, window, cx| {
+                    let message = t!("request.connection_closed").to_string();
+                    this.on_transport_event(&path, id, transport::Event::Failed(message), window, cx)
+                })
+                .ok();
+            }
+            if let Some(cookies) = cookies {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = cookies.save().await {
+                            eprintln!("could not save cookies: {e:#}");
+                        }
+                    })
+                    .detach();
+            }
         })
         .detach();
     }

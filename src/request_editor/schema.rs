@@ -157,6 +157,7 @@ impl RequestEditor {
         });
         let resolving = self.resolve_in_background(file, cx);
         let timeout = self.timeout(cx);
+        let client = self.cookies.as_ref().map(|jar| jar.client().clone());
         let state = self.schemas.entry(key.clone()).or_default();
         state.loading = true;
         state.error = None;
@@ -170,7 +171,7 @@ impl RequestEditor {
                 let (request, _, _) = resolving.await?;
                 let events = this
                     .update(cx, |this, _| {
-                        let (handle, events) = transport::start_http(request, timeout, None);
+                        let (handle, events) = transport::start_http(request, timeout, None, client);
                         if let Some(state) = this.schemas.get_mut(&key)
                             && state.generation == generation
                         {

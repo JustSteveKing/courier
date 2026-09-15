@@ -594,3 +594,38 @@ ws.auth_title:
   es: "Autenticación de %{name}"
   de: "Authentifizierung für %{name}"
   fr: "Authentification de %{name}"
+cookies.menu:
+  en: Cookies…
+  es: Cookies…
+  de: Cookies…
+  fr: Cookies…
+cookies.title:
+  en: "Cookies for %{name}"
+  es: "Cookies de %{name}"
+  de: "Cookies für %{name}"
+  fr: "Cookies de %{name}"
+cookies.empty:
+  en: No cookies yet. Responses that set cookies add them here, and they're sent with later requests.
+  es: Aún no hay cookies. Las respuestas que envían cookies las añaden aquí y se envían en solicitudes posteriores.
+  de: Noch keine Cookies. Antworten, die Cookies setzen, fügen sie hier hinzu; sie werden bei späteren Anfragen mitgesendet.
+  fr: Pas encore de cookies. Les réponses qui en définissent les ajoutent ici, et ils sont envoyés avec les requêtes suivantes.
+cookies.hint:
+  en: Kept on this machine only, never in the project.
+  es: Solo se guardan en esta máquina, nunca en el proyecto.
+  de: Nur auf diesem Rechner gespeichert, nie im Projekt.
+  fr: Conservés sur cette machine uniquement, jamais dans le projet.
+cookies.session:
+  en: session
+  es: sesión
+  de: Sitzung
+  fr: session
+cookies.delete:
+  en: Delete cookie
+  es: Eliminar cookie
+  de: Cookie löschen
+  fr: Supprimer le cookie
+cookies.clear:
+  en: Clear all
+  es: Borrar todas
+  de: Alle löschen
+  fr: Tout effacer

@@ -1,4 +1,5 @@
 mod auth_form;
+mod cookies;
 mod credentials;
 mod encoding;
 mod environment_editor;

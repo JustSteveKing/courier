@@ -3,7 +3,7 @@
 pub mod palette;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -23,6 +23,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
+use crate::cookies::Cookies;
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
 use crate::graphql::SchemaCache;
@@ -80,6 +81,8 @@ pub struct Workspace {
     main_view: MainView,
     focus_handle: FocusHandle,
     secret_store: Option<SecretStore>,
+    /// Cookie jars of collections, by root, opened when first needed.
+    cookies: HashMap<PathBuf, Cookies>,
 }
 
 impl Workspace {
@@ -144,6 +147,7 @@ impl Workspace {
             main_view: MainView::Request,
             focus_handle: cx.focus_handle(),
             secret_store: None,
+            cookies: HashMap::new(),
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
@@ -417,7 +421,9 @@ impl Workspace {
         let fresh = storage::read_yaml::<RequestFile>(path).ok();
         if let Some(request) = fresh.or_else(|| self.find_request(path).cloned()) {
             let key = self.response_key(path);
+            let jar = self.cookies_for(path, cx);
             self.editor.update(cx, |editor, cx| {
+                editor.set_cookies(jar);
                 editor.load(path.to_path_buf(), request, key, window, cx)
             });
             self.refresh_inherited_auth(cx);
@@ -1342,6 +1348,9 @@ impl Workspace {
                     this.environment_editor
                         .update(cx, |editor, cx| editor.set_store(store.clone(), window, cx));
                     this.secret_store = Some(store);
+                    for (root, jar) in this.cookies.clone() {
+                        this.persist_cookies(&root, &jar, cx);
+                    }
                 }
                 Err(e) => notify_error(
                     t!("ws.secrets_unavailable", error = format!("{e:#}")).to_string(),
@@ -1514,6 +1523,139 @@ impl Workspace {
             ),
             None => (collection.file.auth.clone(), self.collection_label(collection)),
         })
+    }
+
+    /// The cookie jar of the collection holding `path`.
+    fn cookies_for(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<Cookies> {
+        let collection = &self.collections[self.collection_index_for(path)?];
+        let root = collection.root.clone();
+        if let Some(jar) = self.cookies.get(&root) {
+            return Some(jar.clone());
+        }
+        let jar = Cookies::default();
+        self.cookies.insert(root.clone(), jar.clone());
+        self.persist_cookies(&root, &jar, cx);
+        Some(jar)
+    }
+
+    /// Loads a jar's saved cookies and keeps saving it, once the secret store is available
+    /// (otherwise it's done when the store connects).
+    fn persist_cookies(&self, root: &Path, jar: &Cookies, cx: &mut Context<Self>) {
+        let (Some(store), Some(ix)) = (self.secret_store.clone(), self.collection_index_for(root)) else {
+            return;
+        };
+        let collection = &self.collections[ix];
+        let Some(id) = collection.file.id.clone() else {
+            return;
+        };
+        let label = format!("Courier · {} · cookies", self.collection_label(collection));
+        let jar = jar.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = jar.persist_in(store, Cookies::secret(&id), label).await {
+                    eprintln!("could not load saved cookies: {e:#}");
+                }
+            })
+            .detach();
+    }
+
+    /// Lists a collection's cookies, to delete one or clear them all.
+    fn manage_cookies(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(jar) = self.cookies_for(&root, cx) else {
+            return;
+        };
+        let name = self
+            .collection_index_for(&root)
+            .map(|ix| self.collection_label(&self.collections[ix]))
+            .unwrap_or_default();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let jar = jar.clone();
+            dialog
+                .title(t!("cookies.title", name = name).to_string())
+                .w(px(640.))
+                .content(move |content, _, cx| {
+                    let theme = cx.theme().clone();
+                    let cookies = jar.list();
+                    let save = |jar: &Cookies, cx: &mut App| {
+                        let jar = jar.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                if let Err(e) = jar.save().await {
+                                    eprintln!("could not save cookies: {e:#}");
+                                }
+                            })
+                            .detach();
+                    };
+                    let mut rows = v_flex().id("cookie-rows").max_h(px(360.)).overflow_y_scroll().gap_px();
+                    if cookies.is_empty() {
+                        rows = rows.child(
+                            div()
+                                .py_2()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(t!("cookies.empty").to_string()),
+                        );
+                    }
+                    for (ix, cookie) in cookies.into_iter().enumerate() {
+                        let value: String = cookie.value.chars().take(40).collect();
+                        let expires = cookie
+                            .expires
+                            .clone()
+                            .unwrap_or_else(|| t!("cookies.session").to_string());
+                        rows = rows.child(
+                            h_flex()
+                                .gap_2()
+                                .py_1()
+                                .text_sm()
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().truncate().child(format!("{}={value}", cookie.name)))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("{}{} · {expires}", cookie.domain, cookie.path)),
+                                        ),
+                                )
+                                .child({
+                                    let jar = jar.clone();
+                                    Button::new(("cookie-delete", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Delete)
+                                        .tooltip(t!("cookies.delete").to_string())
+                                        .on_click(move |_, window, cx| {
+                                            jar.remove(&cookie);
+                                            save(&jar, cx);
+                                            window.refresh();
+                                        })
+                                }),
+                        );
+                    }
+                    content
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(t!("cookies.hint").to_string())
+                                .child({
+                                    let jar = jar.clone();
+                                    Button::new("cookies-clear")
+                                        .xsmall()
+                                        .label(t!("cookies.clear").to_string())
+                                        .on_click(move |_, window, cx| {
+                                            jar.clear();
+                                            save(&jar, cx);
+                                            window.refresh();
+                                        })
+                                }),
+                        )
+                        .child(rows)
+                })
+        });
     }
 
     /// Tells the editor what its request inherits, after loading it or changing auth above it.
@@ -2240,6 +2382,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.auth_ellipsis", Workspace::edit_auth))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
+        .item(item("cookies.menu", Workspace::manage_cookies))
         .separator()
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
         .item(item("ws.import_file_here", Workspace::import_file_into))
@@ -3366,6 +3509,83 @@ components:
         .unwrap();
         cx.run_until_parked();
         assert_eq!(storage::read_folder(&public).auth, Auth::None, "kept as it was");
+    }
+
+    #[gpui_kit::test]
+    async fn cookies_from_responses_are_sent_back_and_saved(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let send = |cx: &mut TestAppContext, response: &'static str| {
+            let (port, received) = one_shot_server(response);
+            let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+            request.url = format!("http://127.0.0.1:{port}/app");
+            storage::write_yaml(&get_json, &request).unwrap();
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(get_json.clone(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            let mut head = None;
+            for _ in 0..500 {
+                cx.run_until_parked();
+                if head.is_none() {
+                    head = received.try_recv().ok();
+                }
+                if head.is_some() && !cx.update(|cx| editor.read(cx).is_sending()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            head.expect("the server got the request").to_ascii_lowercase()
+        };
+
+        let first = send(
+            cx,
+            "HTTP/1.1 200 OK\r\nSet-Cookie: session=s1; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert!(!first.contains("cookie:"), "{first}");
+        let second = send(cx, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        assert!(second.contains("cookie: session=s1"), "sent back: {second}");
+
+        let jar = cx.update(|cx| workspace.update(cx, |this, cx| this.cookies_for(&root, cx).unwrap()));
+        assert_eq!(jar.list()[0].name, "session");
+        let id = storage::read_yaml::<CollectionFile>(&root.join("collection.yaml"))
+            .unwrap()
+            .id
+            .unwrap();
+        let saved = stored_secret(cx, &workspace, &Cookies::secret(&id)).expect("saved in the secret store");
+        assert!(saved.contains("session"));
+
+        // The dialog lists them; clearing empties the jar and its file.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.manage_cookies(root.clone(), window, cx));
+        })
+        .unwrap();
+        // Let the dialog finish animating in, so clicks land where the buttons end up.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("cookie-delete", 0usize)).is_some());
+            window.click("cookies-clear", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(jar.list().is_empty());
+        assert_eq!(
+            stored_secret(cx, &workspace, &Cookies::secret(&id)),
+            None,
+            "saved jar removed"
+        );
+        assert!(jar.list().is_empty());
     }
 
     #[gpui_kit::test]
