@@ -270,15 +270,10 @@ ws.open_project_ellipsis:
   de: Projekt öffnen…
   fr: Ouvrir un projet…
 ws.init_project_title:
-  en: Create a Courier collection?
-  es: ¿Crear una colección de Courier?
-  de: Courier-Sammlung anlegen?
-  fr: Créer une collection Courier ?
-ws.init_project_message:
-  en: "%{path} has no %{dir} folder yet. Create one, named “%{name}”? Its requests and environments are plain files you can commit with the project."
-  es: "%{path} todavía no tiene una carpeta %{dir}. ¿Crear una llamada «%{name}»? Sus solicitudes y entornos son archivos normales que puedes versionar con el proyecto."
-  de: "%{path} hat noch keinen Ordner %{dir}. Einen mit dem Namen „%{name}“ anlegen? Anfragen und Umgebungen sind normale Dateien, die mit dem Projekt eingecheckt werden können."
-  fr: "%{path} n'a pas encore de dossier %{dir}. En créer un, nommé « %{name} » ? Ses requêtes et environnements sont de simples fichiers à versionner avec le projet."
+  en: New project
+  es: Nuevo proyecto
+  de: Neues Projekt
+  fr: Nouveau projet
 ws.create:
   en: Create
   es: Crear
@@ -290,12 +285,37 @@ ws.project_has_collection:
   de: "%{path} hat bereits eine Courier-Sammlung. Öffne sie und nutze „Postman-Sammlung hierher importieren…“."
   fr: "%{path} a déjà une collection Courier. Ouvrez-la, puis utilisez « Importer une collection Postman ici… »."
 ws.empty_title:
-  en: Open a project to get started
-  es: Abre un proyecto para empezar
-  de: Öffne ein Projekt, um loszulegen
-  fr: Ouvrez un projet pour commencer
+  en: Create or open a project to get started
+  es: Crea o abre un proyecto para empezar
+  de: Erstelle oder öffne ein Projekt, um loszulegen
+  fr: Créez ou ouvrez un projet pour commencer
 ws.empty_hint:
   en: "Courier keeps a project's requests and environments in a %{dir} folder inside it, so they live in git with the code. Secret values stay in your keyring."
   es: "Courier guarda las solicitudes y entornos de un proyecto en una carpeta %{dir} dentro de él, para que vivan en git junto al código. Los valores secretos se quedan en tu llavero."
   de: "Courier speichert Anfragen und Umgebungen eines Projekts in einem Ordner %{dir} darin, sodass sie mit dem Code in git liegen. Secret-Werte bleiben in deinem Schlüsselbund."
   fr: "Courier range les requêtes et environnements d'un projet dans un dossier %{dir} à l'intérieur, pour qu'ils vivent dans git avec le code. Les valeurs secrètes restent dans votre trousseau."
+ws.new_project_ellipsis:
+  en: New project…
+  es: Nuevo proyecto…
+  de: Neues Projekt…
+  fr: Nouveau projet…
+ws.new_project_prompt:
+  en: Choose a folder for the new project
+  es: Elige una carpeta para el nuevo proyecto
+  de: Ordner für das neue Projekt wählen
+  fr: Choisissez un dossier pour le nouveau projet
+ws.project_name:
+  en: Name
+  es: Nombre
+  de: Name
+  fr: Nom
+ws.init_project_hint:
+  en: "Creates a %{dir} folder in %{path}. Its requests and environments are plain files you can commit with the project."
+  es: "Crea una carpeta %{dir} en %{path}. Sus solicitudes y entornos son archivos normales que puedes versionar con el proyecto."
+  de: "Legt einen Ordner %{dir} in %{path} an. Anfragen und Umgebungen sind normale Dateien, die mit dem Projekt eingecheckt werden können."
+  fr: "Crée un dossier %{dir} dans %{path}. Ses requêtes et environnements sont de simples fichiers à versionner avec le projet."
+ws.already_a_project:
+  en: "%{path} is already a project, so it was opened"
+  es: "%{path} ya es un proyecto, así que se ha abierto"
+  de: "%{path} ist bereits ein Projekt und wurde geöffnet"
+  fr: "%{path} est déjà un projet, il a donc été ouvert"

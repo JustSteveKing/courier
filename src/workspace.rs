@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::TextareaState;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -25,7 +25,7 @@ use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Targe
 use crate::graphql::SchemaCache;
 use crate::import::postman::ImportItem;
 use crate::import::{curl, postman};
-use crate::model::{RequestFile, Variables, placeholder};
+use crate::model::{CollectionFile, RequestFile, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
@@ -33,7 +33,7 @@ use crate::response_cache::{CacheKey, Liveness, ResponseCache};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
-use crate::ui::{dialog_footer, textarea};
+use crate::ui::{dialog_footer, text_input, textarea};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
 
@@ -545,6 +545,29 @@ impl Workspace {
         self.pick_path(true, t!("ws.open_project").to_string(), window, cx, apply);
     }
 
+    /// Picks a folder for a new project and names its collection. A folder that is already
+    /// a project just opens.
+    fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_path(
+            true,
+            t!("ws.new_project_prompt").to_string(),
+            window,
+            cx,
+            |this, dir, window, cx| match project::find(&dir) {
+                Some(root) => {
+                    window.push_notification(
+                        Notification::info(
+                            t!("ws.already_a_project", path = project::project_dir(&root).display()).to_string(),
+                        ),
+                        cx,
+                    );
+                    this.open_collection(root, window, cx);
+                }
+                None => this.offer_init_project(dir, window, cx),
+            },
+        );
+    }
+
     fn open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_project_folder(window, cx, |this, dir, window, cx| match project::find(&dir) {
             Some(root) => this.open_collection(root, window, cx),
@@ -552,31 +575,49 @@ impl Workspace {
         });
     }
 
-    /// Confirms, then creates `.courier/` in a folder that has no collection yet.
+    /// Asks for a name, then creates `.courier/` in a folder that has no collection yet and
+    /// opens a first request.
     fn offer_init_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(project::default_name(&dir)));
+        name.focus_handle(cx).focus(window, cx);
         let weak = cx.entity().downgrade();
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (weak, dir) = (weak.clone(), dir.clone());
-            let message = t!(
-                "ws.init_project_message",
-                path = dir.display(),
-                dir = project::DOT_DIR,
-                name = name
-            )
-            .to_string();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let (weak, dir, name) = (weak.clone(), dir.clone(), name.clone());
+            let hint = t!("ws.init_project_hint", path = dir.display(), dir = project::DOT_DIR).to_string();
+            let muted = cx.theme().muted_foreground;
             dialog
                 .title(t!("ws.init_project_title").to_string())
                 .w(px(480.))
-                .content(move |content, _, _| content.child(message.clone()))
+                .content({
+                    let name = name.clone();
+                    move |content, _, _| {
+                        content
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(t!("ws.project_name").to_string()),
+                                    )
+                                    .child(text_input(&name)),
+                            )
+                            .child(div().pt_2().text_sm().text_color(muted).child(hint.clone()))
+                    }
+                })
                 .footer(dialog_footer(Some(t!("ws.create").to_string()), ButtonVariant::Primary))
                 .on_ok(move |_, window, cx| {
-                    let result = project::init(&dir);
+                    let collection_name = name.read(cx).value().trim().to_string();
+                    if collection_name.is_empty() {
+                        return false;
+                    }
+                    let result = project::init_with(&dir, &CollectionFile::new(collection_name));
                     weak.update(cx, |this, cx| match result {
-                        Ok(root) => this.open_collection(root, window, cx),
+                        Ok(root) => {
+                            this.open_collection(root.clone(), window, cx);
+                            this.new_request(root, window, cx);
+                        }
                         Err(e) => notify_error(format!("{e:#}"), window, cx),
                     })
                     .ok();
@@ -971,7 +1012,10 @@ impl Workspace {
                             .icon(IconName::Plus)
                             .tooltip(t!("ws.new_or_import").to_string())
                             .dropdown_menu(move |menu, _, _| {
-                                menu.item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
+                                menu.item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                                    this.new_project(window, cx)
+                                }))
+                                .item(menu_item(t!("ws.open_project_ellipsis"), &weak, |this, window, cx| {
                                     this.open_project(window, cx)
                                 }))
                                 .separator()
@@ -1014,14 +1058,21 @@ impl Workspace {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("empty-open-project")
+                        Button::new("empty-new-project")
                             .primary()
+                            .icon(IconName::Plus)
+                            .label(t!("ws.new_project_ellipsis").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| this.new_project(window, cx))),
+                    )
+                    .child(
+                        Button::new("empty-open-project")
                             .icon(IconName::FolderOpen)
                             .label(t!("ws.open_project_ellipsis").to_string())
                             .on_click(cx.listener(|this, _, window, cx| this.open_project(window, cx))),
                     )
                     .child(
                         Button::new("empty-import-postman")
+                            .ghost()
                             .label(t!("ws.new_collection_from_postman").to_string())
                             .on_click(cx.listener(|this, _, window, cx| this.import_postman_as_new(window, cx))),
                     ),
@@ -1626,6 +1677,10 @@ mod tests {
             assert!(workspace.read(cx).collections.is_empty());
             window.render_frame(cx);
             assert!(
+                window.try_find("empty-new-project").is_some(),
+                "empty state offers New project"
+            );
+            assert!(
                 window.try_find("empty-open-project").is_some(),
                 "empty state offers Open project"
             );
@@ -1655,6 +1710,9 @@ mod tests {
         cx.update(|cx| {
             let ws = workspace.read(cx);
             assert_eq!(ws.collections.len(), 1);
+            let opened = ws.editor.read(cx).path().cloned().expect("a first request is open");
+            assert!(opened.starts_with(&root), "{}", opened.display());
+            assert_eq!(ws.collections[0].requests().len(), 1);
             assert_eq!(
                 ws.state.open_projects,
                 vec![einvoicing.clone()],

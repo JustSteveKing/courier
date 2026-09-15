@@ -46,13 +46,18 @@ pub fn find(start: &Path) -> Option<PathBuf> {
 }
 
 /// Creates `project/.courier/collection.yaml`, named after the project folder.
+#[cfg(test)]
 pub fn init(project: &Path) -> Result<PathBuf> {
-    let name = project
+    init_with(project, &CollectionFile::new(default_name(project)))
+}
+
+/// A collection name for `project`: its folder name.
+pub fn default_name(project: &Path) -> String {
+    project
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Project".into());
-    init_with(project, &CollectionFile::new(name))
+        .unwrap_or_else(|| "Project".into())
 }
 
 /// Creates the collection directory for `project` from an existing collection file.

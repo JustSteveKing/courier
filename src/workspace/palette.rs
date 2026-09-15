@@ -167,6 +167,12 @@ impl Workspace {
 
     fn action_group(&self, cx: &App) -> Group {
         let mut entries = vec![
+            Entry::new(t!("ws.new_project_ellipsis"), |this, window, cx| {
+                this.new_project(window, cx)
+            })
+            .english("ws.new_project_ellipsis")
+            .keywords(["create".into(), "collection".into(), "folder".into()])
+            .icon(IconName::Plus),
             Entry::new(t!("ws.open_project_ellipsis"), |this, window, cx| {
                 this.open_project(window, cx)
             })
