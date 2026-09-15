@@ -6,7 +6,7 @@ mod sse;
 mod ws;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -369,6 +369,21 @@ impl RequestEditor {
 
     pub fn path(&self) -> Option<&PathBuf> {
         self.path.as_ref()
+    }
+
+    /// After a request file or a folder of them moved on disk: keeps responses, and the open
+    /// request, with their new paths.
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        let remap = |path: &Path| path.strip_prefix(from).ok().map(|rest| to.join(rest));
+        let moved: Vec<PathBuf> = self.responses.keys().filter(|p| p.starts_with(from)).cloned().collect();
+        for old in moved {
+            if let (Some(state), Some(new)) = (self.responses.remove(&old), remap(&old)) {
+                self.responses.insert(new, state);
+            }
+        }
+        if let Some(new) = self.path.as_deref().and_then(remap) {
+            self.path = Some(new);
+        }
     }
 
     #[cfg(test)]

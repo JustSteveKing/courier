@@ -18,7 +18,7 @@ use crate::http;
 use crate::model::{MessageTemplate, interpolate, is_websocket_url};
 use crate::storage::write_yaml;
 use crate::transport::{WsMessage, WsPayload};
-use crate::ui::{dialog_footer, readonly_editor, text_input};
+use crate::ui::{dialog_footer, focus_in_dialog, readonly_editor, text_input};
 
 const MAX_MESSAGES: usize = 5_000;
 const MAX_ROWS: usize = 500;
@@ -160,7 +160,7 @@ impl RequestEditor {
     /// Asks for a name, then saves the composer's text as a template in the request file.
     pub(super) fn save_template_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("request.ws_template_name").to_string()));
-        name.focus_handle(cx).focus(window, cx);
+        focus_in_dialog(&name, window, cx);
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let (name, weak) = (name.clone(), weak.clone());

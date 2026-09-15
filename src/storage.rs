@@ -226,9 +226,122 @@ pub fn delete_file(path: &Path) -> Result<()> {
     fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))
 }
 
+/// Deletes a request file or a folder with everything in it.
+pub fn delete_item(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).with_context(|| format!("deleting {}", path.display()))
+    } else {
+        delete_file(path)
+    }
+}
+
+/// A folder name as typed, checked for use as a directory inside `parent`.
+fn folder_name(parent: &Path, name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('.') || name.contains(['/', '\\', '\0']) {
+        anyhow::bail!("“{name}” can't be used as a folder name");
+    }
+    if is_collection(parent) && slugify(name) == ENVIRONMENTS_DIR {
+        anyhow::bail!("“{name}” is reserved for environments");
+    }
+    Ok(name.to_string())
+}
+
+/// Creates a folder named `name` (as typed) inside `parent`.
+pub fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
+    let path = parent.join(folder_name(parent, name)?);
+    if path.exists() {
+        anyhow::bail!("{} already exists", path.display());
+    }
+    fs::create_dir(&path).with_context(|| format!("creating {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn rename_folder(path: &Path, name: &str) -> Result<PathBuf> {
+    let parent = path.parent().context("a folder has a parent")?;
+    let target = parent.join(folder_name(parent, name)?);
+    if target == path {
+        return Ok(target);
+    }
+    if target.exists() {
+        anyhow::bail!("{} already exists", target.display());
+    }
+    fs::rename(path, &target).with_context(|| format!("renaming {}", path.display()))?;
+    Ok(target)
+}
+
+/// Renames a request, moving its file to match the new name. Returns the new path.
+pub fn rename_request(path: &Path, name: &str) -> Result<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("a request needs a name");
+    }
+    let mut request: RequestFile = read_yaml(path)?;
+    request.name = name.to_string();
+    let dir = path.parent().context("a request is in a folder")?;
+    let same_slug = path
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy() == slugify(name));
+    let target = if same_slug {
+        path.to_path_buf()
+    } else {
+        unique_path(dir, name, ".yaml")
+    };
+    write_yaml(&target, &request)?;
+    if target != path {
+        delete_file(path)?;
+    }
+    Ok(target)
+}
+
+/// Copies a request next to itself as “<name> copy”, just after it in the list.
+pub fn duplicate_request(path: &Path, copy_name: &str) -> Result<PathBuf> {
+    let mut request: RequestFile = read_yaml(path)?;
+    request.name = copy_name.to_string();
+    let dir = path.parent().context("a request is in a folder")?;
+    create_request(dir, &request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creates_renames_duplicates_and_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::project::init_with(tmp.path(), &CollectionFile::new("API")).unwrap();
+
+        let folder = create_folder(&root, " Pet store ").unwrap();
+        assert_eq!(folder, root.join("Pet store"), "kept as typed");
+        assert!(create_folder(&root, "Pet store").is_err(), "already exists");
+        for bad in ["", "..", ".hidden", "a/b", "environments"] {
+            assert!(create_folder(&root, bad).is_err(), "rejects {bad:?}");
+        }
+        assert!(
+            create_folder(&folder, "environments").is_ok(),
+            "only reserved at the root"
+        );
+
+        let request = create_request(&folder, &RequestFile::new("List pets")).unwrap();
+        let renamed = rename_request(&request, "Search pets").unwrap();
+        assert_eq!(renamed, folder.join("search-pets.yaml"));
+        assert!(!request.exists());
+        assert_eq!(read_yaml::<RequestFile>(&renamed).unwrap().name, "Search pets");
+        let same = rename_request(&renamed, "search pets").unwrap();
+        assert_eq!(same, renamed, "same slug keeps the file");
+        assert!(rename_request(&renamed, "  ").is_err());
+
+        let copy = duplicate_request(&renamed, "search pets copy").unwrap();
+        assert_eq!(copy, folder.join("search-pets-copy.yaml"));
+
+        let moved = rename_folder(&folder, "Pets").unwrap();
+        assert!(moved.join("search-pets.yaml").exists());
+        assert!(rename_folder(&moved, "environments").is_err());
+
+        delete_item(&moved.join("search-pets-copy.yaml")).unwrap();
+        delete_item(&moved).unwrap();
+        assert!(!moved.exists());
+    }
 
     #[test]
     fn creates_and_loads_a_collection() {

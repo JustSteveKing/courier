@@ -394,3 +394,78 @@ ws.project_has_collection:
   es: "%{path} ya tiene una colección de Courier. Ábrela y usa «Importar Postman, OpenAPI o AsyncAPI aquí…»."
   de: "%{path} hat bereits eine Courier-Sammlung. Öffne sie und nutze „Postman, OpenAPI oder AsyncAPI hierher importieren…“."
   fr: "%{path} a déjà une collection Courier. Ouvrez-la, puis utilisez « Importer Postman, OpenAPI ou AsyncAPI ici… »."
+ws.new_folder_ellipsis:
+  en: New folder…
+  es: Nueva carpeta…
+  de: Neuer Ordner…
+  fr: Nouveau dossier…
+ws.new_folder_title:
+  en: New folder
+  es: Nueva carpeta
+  de: Neuer Ordner
+  fr: Nouveau dossier
+ws.new_request_beside:
+  en: New request beside
+  es: Nueva solicitud al lado
+  de: Neue Anfrage daneben
+  fr: Nouvelle requête à côté
+ws.open:
+  en: Open
+  es: Abrir
+  de: Öffnen
+  fr: Ouvrir
+ws.rename:
+  en: Rename
+  es: Renombrar
+  de: Umbenennen
+  fr: Renommer
+ws.rename_ellipsis:
+  en: Rename…
+  es: Renombrar…
+  de: Umbenennen…
+  fr: Renommer…
+ws.rename_request_title:
+  en: Rename request
+  es: Renombrar solicitud
+  de: Anfrage umbenennen
+  fr: Renommer la requête
+ws.rename_folder_title:
+  en: Rename folder
+  es: Renombrar carpeta
+  de: Ordner umbenennen
+  fr: Renommer le dossier
+ws.duplicate:
+  en: Duplicate
+  es: Duplicar
+  de: Duplizieren
+  fr: Dupliquer
+ws.copy_name:
+  en: "%{name} copy"
+  es: "%{name} copia"
+  de: "%{name} Kopie"
+  fr: "%{name} copie"
+ws.delete:
+  en: Delete
+  es: Eliminar
+  de: Löschen
+  fr: Supprimer
+ws.delete_ellipsis:
+  en: Delete…
+  es: Eliminar…
+  de: Löschen…
+  fr: Supprimer…
+ws.delete_title:
+  en: Delete?
+  es: ¿Eliminar?
+  de: Löschen?
+  fr: Supprimer ?
+ws.delete_request_message:
+  en: "Delete the request “%{name}”? Its file is removed from the project."
+  es: "¿Eliminar la solicitud «%{name}»? Su archivo se quita del proyecto."
+  de: "Anfrage „%{name}“ löschen? Ihre Datei wird aus dem Projekt entfernt."
+  fr: "Supprimer la requête « %{name} » ? Son fichier est retiré du projet."
+ws.delete_folder_message:
+  en: "Delete the folder “%{name}” and the %{count} requests in it?"
+  es: "¿Eliminar la carpeta «%{name}» y las %{count} solicitudes que contiene?"
+  de: "Ordner „%{name}“ und die %{count} Anfragen darin löschen?"
+  fr: "Supprimer le dossier « %{name} » et les %{count} requêtes qu’il contient ?"

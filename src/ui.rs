@@ -9,7 +9,7 @@ use gpui_kit::component::input::{
     Copy, Cut, Editor, EditorState, Input, InputState, Paste, SelectAll, Textarea, TextareaState,
 };
 use gpui_kit::component::native_menu::NativeMenu;
-use gpui_kit::{App, Entity, IntoElement, ParentElement as _, Window};
+use gpui_kit::{App, Entity, Focusable, IntoElement, ParentElement as _, Window};
 use rust_i18n::t;
 
 /// A single-line text input.
@@ -83,6 +83,12 @@ fn edit_menu(kind: EditMenu) -> impl Fn(NativeMenu, &mut Window, &mut App) -> Na
         }
         menu.separator().menu(t!("edit.select_all"), Box::new(SelectAll))
     }
+}
+
+/// Focuses `input` once a dialog that was just opened has taken focus itself.
+pub fn focus_in_dialog<T: Focusable>(input: &Entity<T>, window: &mut Window, cx: &mut App) {
+    let input = input.clone();
+    window.defer(cx, move |window, cx| input.focus_handle(cx).focus(window, cx));
 }
 
 #[cfg(test)]

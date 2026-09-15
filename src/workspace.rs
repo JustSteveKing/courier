@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{InputState, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::{
@@ -35,7 +35,7 @@ use crate::response_cache::{CacheKey, Liveness, ResponseCache};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::AppSettings;
 use crate::storage::{self, Collection, Item};
-use crate::ui::{dialog_footer, text_input, textarea};
+use crate::ui::{dialog_footer, focus_in_dialog, text_input, textarea};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
 
@@ -364,6 +364,218 @@ impl Workspace {
             }
             Err(e) => notify_error(format!("{e:#}"), window, cx),
         }
+    }
+
+    fn new_folder(&mut self, parent: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_name(
+            t!("ws.new_folder_title").to_string(),
+            String::new(),
+            t!("ws.create").to_string(),
+            window,
+            cx,
+            move |this, name, window, cx| {
+                let folder = storage::create_folder(&parent, &name)?;
+                this.collapsed.remove(&parent);
+                this.reload_containing(&folder, window, cx);
+                Ok(())
+            },
+        );
+    }
+
+    /// Renames a request or folder, moving its file or directory to match.
+    fn rename_item(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, current) = match self.find_request(&path) {
+            Some(request) => (t!("ws.rename_request_title"), request.name.clone()),
+            None => (
+                t!("ws.rename_folder_title"),
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+        };
+        self.prompt_name(
+            title.to_string(),
+            current,
+            t!("ws.rename").to_string(),
+            window,
+            cx,
+            move |this, name, window, cx| {
+                // Unsaved edits go with the request rather than being left behind.
+                this.editor.update(cx, |editor, cx| editor.save(cx));
+                let target = if path.is_dir() {
+                    storage::rename_folder(&path, &name)?
+                } else {
+                    storage::rename_request(&path, &name)?
+                };
+                this.after_move(&path, &target, window, cx);
+                Ok(())
+            },
+        );
+    }
+
+    /// Updates everything that remembers paths after `from` moved to `to`: the sidebar, saved
+    /// responses, the open request and the saved state.
+    fn after_move(&mut self, from: &Path, to: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let remap = |path: &Path| path.strip_prefix(from).ok().map(|rest| to.join(rest));
+        let old_keys: Vec<(CacheKey, PathBuf)> = self
+            .collection_index_for(from)
+            .map(|ix| {
+                let collection = &self.collections[ix];
+                collection
+                    .requests()
+                    .into_iter()
+                    .filter_map(|entry| Some((collection.response_key(entry.path), remap(entry.path)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.reload_containing(to, window, cx);
+        let cache = ResponseCache::new(&self.paths.cache_dir);
+        for (old_key, new_path) in old_keys {
+            if let (Some(response), Some(new_key)) = (cache.load(&old_key), self.response_key(&new_path))
+                && let Err(e) = cache.save(&new_key, &response)
+            {
+                eprintln!("could not move saved response: {e:#}");
+            }
+        }
+        self.collapsed = self
+            .collapsed
+            .drain()
+            .map(|path| remap(&path).unwrap_or(path))
+            .collect();
+        if let Some(last) = self.state.last_request.as_deref().and_then(remap) {
+            self.state.last_request = Some(last);
+            self.save_state();
+        }
+        let open = self.editor.read(cx).path().cloned();
+        self.editor.update(cx, |editor, _| editor.moved(from, to));
+        if let Some(new) = open.as_deref().and_then(remap) {
+            self.load_in_editor(&new, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn duplicate_request(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.find_request(&path).map(|r| r.name.clone()) else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| editor.save(cx));
+        match storage::duplicate_request(&path, &t!("ws.copy_name", name = name)) {
+            Ok(copy) => {
+                self.reload_containing(&copy, window, cx);
+                self.select_request(copy, window, cx);
+            }
+            Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
+    /// Asks, then deletes a request or a folder with its contents.
+    fn delete_item(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let message = match self.find_request(&path) {
+            Some(request) => t!("ws.delete_request_message", name = request.name).to_string(),
+            None => {
+                let inside = self
+                    .collection_index_for(&path)
+                    .map(|ix| {
+                        self.collections[ix]
+                            .requests()
+                            .iter()
+                            .filter(|entry| entry.path.starts_with(&path))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                t!("ws.delete_folder_message", name = name, count = inside).to_string()
+            }
+        };
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (weak, path, message) = (weak.clone(), path.clone(), message.clone());
+            dialog
+                .title(t!("ws.delete_title").to_string())
+                .w(px(420.))
+                .content(move |content, _, _| content.child(message.clone()))
+                .footer(dialog_footer(Some(t!("ws.delete").to_string()), ButtonVariant::Danger))
+                .on_ok(move |_, window, cx| {
+                    weak.update(cx, |this, cx| {
+                        let open = this.editor.read(cx).path().is_some_and(|p| p.starts_with(&path));
+                        if open {
+                            this.editor.update(cx, |editor, cx| editor.unload(window, cx));
+                        }
+                        match storage::delete_item(&path) {
+                            Ok(()) => {
+                                if this.state.last_request.as_ref().is_some_and(|p| p.starts_with(&path)) {
+                                    this.state.last_request = None;
+                                    this.save_state();
+                                }
+                                this.collapsed.retain(|p| !p.starts_with(&path));
+                                this.reload_containing(&path, window, cx);
+                            }
+                            Err(e) => notify_error(format!("{e:#}"), window, cx),
+                        }
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
+    /// A small dialog asking for a name. `apply` errors are shown and keep the dialog open.
+    fn prompt_name(
+        &mut self,
+        title: String,
+        initial: String,
+        ok_label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        apply: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) -> Result<()> + 'static,
+    ) {
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+        // Opening the dialog moves focus, so focus the name (selected, ready to retype) after.
+        window.defer(cx, {
+            let name = name.clone();
+            move |window, cx| {
+                name.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                    state.select_all(window, cx);
+                })
+            }
+        });
+        let weak = cx.entity().downgrade();
+        let apply = Rc::new(apply);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (weak, name, apply, title, ok_label) = (
+                weak.clone(),
+                name.clone(),
+                apply.clone(),
+                title.clone(),
+                ok_label.clone(),
+            );
+            dialog
+                .title(title)
+                .w(px(420.))
+                .content({
+                    let name = name.clone();
+                    move |content, _, _| content.child(text_input(&name))
+                })
+                .footer(dialog_footer(Some(ok_label), ButtonVariant::Primary))
+                .on_ok(move |_, window, cx| {
+                    let value = name.read(cx).value().trim().to_string();
+                    if value.is_empty() {
+                        return false;
+                    }
+                    let result = weak.update(cx, |this, cx| apply(this, value, window, cx));
+                    match result {
+                        Ok(Err(e)) => {
+                            notify_error(format!("{e:#}"), window, cx);
+                            false
+                        }
+                        _ => true,
+                    }
+                })
+        });
     }
 
     // MARK: Environments
@@ -728,7 +940,7 @@ impl Workspace {
         });
         let import = Rc::new(RefCell::new(import));
         let name = cx.new(|cx| InputState::new(window, cx).default_value(default_name));
-        name.focus_handle(cx).focus(window, cx);
+        focus_in_dialog(&name, window, cx);
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             let (weak, dir, name, import) = (weak.clone(), dir.clone(), name.clone(), import.clone());
@@ -813,7 +1025,7 @@ impl Workspace {
                 .rows(8)
                 .placeholder(t!("ws.curl_placeholder").to_string())
         });
-        command.focus_handle(cx).focus(window, cx);
+        focus_in_dialog(&command, window, cx);
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let command = command.clone();
@@ -1243,7 +1455,21 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_1()
-                    .children(rows),
+                    .children(rows)
+                    // Right-clicking the empty space below the rows.
+                    .child(div().id("sidebar-space").flex_1().min_h(px(48.)).context_menu({
+                        let weak = cx.entity().downgrade();
+                        move |menu, _, _| {
+                            menu.item(menu_item(t!("ws.new_project_ellipsis"), &weak, |this, window, cx| {
+                                this.new_project(window, cx)
+                            }))
+                            .item(menu_item(
+                                t!("ws.open_project_ellipsis"),
+                                &weak,
+                                |this, window, cx| this.open_project(window, cx),
+                            ))
+                        }
+                    })),
             )
     }
 
@@ -1330,6 +1556,10 @@ impl Workspace {
                         cx.notify();
                     }
                 }))
+                .context_menu({
+                    let (weak, root) = (cx.entity().downgrade(), root.clone());
+                    move |menu, _, _| collection_menu(menu, &weak, &root)
+                })
                 .into_any_element(),
         );
 
@@ -1349,6 +1579,8 @@ impl Workspace {
                 Item::Folder { name, path, children } => {
                     let collapsed = self.collapsed.contains(path);
                     let path = path.clone();
+                    let menu_path = path.clone();
+                    let weak = cx.entity().downgrade();
                     rows.push(
                         h_flex()
                             .id(("folder", row_id))
@@ -1377,6 +1609,7 @@ impl Workspace {
                                 }
                                 cx.notify();
                             }))
+                            .context_menu(move |menu, _, _| folder_menu(menu, &weak, &menu_path))
                             .into_any_element(),
                     );
                     if !collapsed {
@@ -1386,6 +1619,8 @@ impl Workspace {
                 Item::Request { path, request } => {
                     let is_selected = selected.as_ref() == Some(path);
                     let path = path.clone();
+                    let menu_path = path.clone();
+                    let weak = cx.entity().downgrade();
                     rows.push(
                         h_flex()
                             .id(("request", row_id))
@@ -1413,6 +1648,7 @@ impl Workspace {
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
                             )
+                            .context_menu(move |menu, _, _| request_menu(menu, &weak, &menu_path))
                             .into_any_element(),
                     );
                 }
@@ -1518,6 +1754,43 @@ fn menu_item(
     })
 }
 
+fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> PopupMenu {
+    let item = |key: &str, action: RootAction| {
+        let folder = folder.to_path_buf();
+        menu_item(t!(key), weak, move |this, window, cx| {
+            action(this, folder.clone(), window, cx)
+        })
+    };
+    menu.item(item("ws.new_request", Workspace::new_request))
+        .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
+        .separator()
+        .item(item("ws.rename_ellipsis", Workspace::rename_item))
+        .item(item("ws.delete_ellipsis", Workspace::delete_item))
+        .separator()
+        .item(item("ws.show_in_file_manager", |_, path, _, cx| cx.reveal_path(&path)))
+}
+
+fn request_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, request: &Path) -> PopupMenu {
+    let item = |key: &str, action: RootAction| {
+        let request = request.to_path_buf();
+        menu_item(t!(key), weak, move |this, window, cx| {
+            action(this, request.clone(), window, cx)
+        })
+    };
+    menu.item(item("ws.open", Workspace::select_request))
+        .item(item("ws.rename_ellipsis", Workspace::rename_item))
+        .item(item("ws.duplicate", Workspace::duplicate_request))
+        .separator()
+        .item(item("ws.new_request_beside", |this, path, window, cx| {
+            if let Some(dir) = path.parent() {
+                this.new_request(dir.to_path_buf(), window, cx)
+            }
+        }))
+        .separator()
+        .item(item("ws.delete_ellipsis", Workspace::delete_item))
+        .item(item("ws.show_in_file_manager", |_, path, _, cx| cx.reveal_path(&path)))
+}
+
 /// A collection action, as used by the collection menu and the command palette.
 pub(super) type RootAction = fn(&mut Workspace, PathBuf, &mut Window, &mut Context<Workspace>);
 
@@ -1529,6 +1802,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path) -
         })
     };
     menu.item(item("ws.new_request", Workspace::new_request))
+        .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .separator()
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
@@ -2138,6 +2412,110 @@ components:
         let head = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(head.starts_with("GET /entered "), "{head}");
         assert!(!cx.update(|cx| url.read(cx).value().contains('\n')));
+    }
+
+    #[gpui_kit::test]
+    async fn requests_and_folders_are_created_renamed_duplicated_and_deleted(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let type_and_confirm = |cx: &mut TestAppContext, text: &str| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.input(text, cx);
+            })
+            .unwrap();
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("dialog-ok", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+
+        // New folder, named in a dialog.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.new_folder(root.clone(), window, cx));
+        })
+        .unwrap();
+        type_and_confirm(cx, "Pets");
+        let pets = root.join("Pets");
+        assert!(pets.is_dir());
+
+        // Renaming the open request keeps its unsaved edits, its saved response and the selection.
+        let old_key = cx.update(|cx| workspace.read(cx).response_key(&get_json).unwrap());
+        let cache = ResponseCache::new(&paths.cache_dir);
+        cache
+            .save(&old_key, &crate::response_cache::StoredResponse::failed(1, "earlier"))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+            let url = editor.read(cx).url_for_test();
+            url.update(cx, |s, cx| s.replace_all("{{base_url}}/edited", window, cx));
+            workspace.update(cx, |this, cx| this.rename_item(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        type_and_confirm(cx, "Fetch JSON");
+        let fetch = root.join("fetch-json.yaml");
+        assert!(fetch.exists() && !get_json.exists());
+        let saved: RequestFile = storage::read_yaml(&fetch).unwrap();
+        assert_eq!(
+            (saved.name.as_str(), saved.url.as_str()),
+            ("Fetch JSON", "{{base_url}}/edited")
+        );
+        cx.update(|cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.editor.read(cx).path(), Some(&fetch));
+            assert_eq!(ws.state.last_request.as_ref(), Some(&fetch));
+            let key = ws.response_key(&fetch).unwrap();
+            assert!(cache.load(&key).is_some(), "saved response moved with it");
+        });
+
+        // Duplicate opens the copy.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.duplicate_request(fetch.clone(), window, cx));
+        })
+        .unwrap();
+        let copy = root.join("fetch-json-copy.yaml");
+        assert_eq!(
+            storage::read_yaml::<RequestFile>(&copy).unwrap().name,
+            "Fetch JSON copy"
+        );
+        cx.update(|cx| assert_eq!(editor.read(cx).path(), Some(&copy)));
+
+        // Renaming a folder carries the open request inside it along.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.new_request(pets.clone(), window, cx));
+            workspace.update(cx, |this, cx| this.rename_item(pets.clone(), window, cx));
+        })
+        .unwrap();
+        type_and_confirm(cx, "Animals");
+        let animals = root.join("Animals");
+        let inside = animals.join("new-request.yaml");
+        assert!(inside.exists() && !pets.exists());
+        cx.update(|cx| assert_eq!(editor.read(cx).path(), Some(&inside)));
+
+        // Deleting asks first, then closes the request that was inside.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.delete_item(animals.clone(), window, cx));
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            assert!(window.has_active_dialog(cx), "asks first");
+            assert!(animals.exists());
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!animals.exists());
+        cx.update(|cx| {
+            assert_eq!(editor.read(cx).path(), None);
+            assert_eq!(workspace.read(cx).state.last_request, None);
+        });
     }
 
     #[gpui_kit::test]
