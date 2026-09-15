@@ -3,7 +3,7 @@
 use rust_i18n::t;
 
 use crate::encoding::{base64_encode, percent_encode};
-use crate::model::{Auth, BodyKind, Graphql, RequestFile, Variables, interpolate};
+use crate::model::{Auth, BodyKind, EffectiveSettings, Graphql, ProxySetting, RequestFile, Variables, interpolate};
 
 /// A request with variables already substituted, ready to go on the wire.
 #[derive(Debug, PartialEq)]
@@ -131,12 +131,44 @@ fn graphql_body(graphql: &Graphql, sub: &mut impl FnMut(&str) -> String) -> Resu
 
 impl Request {
     /// The request as a `curl` command, quoted for POSIX shells.
-    pub fn to_curl(&self) -> String {
+    /// With `settings`, adds the flags that make curl send it the same way (redirects, TLS,
+    /// proxy, Unix socket).
+    pub fn to_curl(&self, settings: Option<&EffectiveSettings>) -> String {
         let method = self.method.to_ascii_uppercase();
         let implied = if self.body.is_empty() { "GET" } else { "POST" };
         let mut command = String::from("curl");
         if method != implied {
             command.push_str(&format!(" -X {method}"));
+        }
+        if let Some(settings) = settings {
+            // Courier follows redirects by default; curl doesn't.
+            if settings.follow_redirects {
+                command.push_str(" -L");
+                if settings.max_redirects != 10 {
+                    command.push_str(&format!(" --max-redirs {}", settings.max_redirects));
+                }
+            }
+            if !settings.verify_tls {
+                command.push_str(" -k");
+            }
+            let path = |p: &std::path::Path| shell_quote(&p.display().to_string());
+            if let Some(ca) = &settings.ca_certificate {
+                command.push_str(&format!(" --cacert {}", path(ca)));
+            }
+            if let Some(cert) = &settings.client_certificate {
+                command.push_str(&format!(" --cert {}", path(cert)));
+            }
+            if let Some(key) = &settings.client_key {
+                command.push_str(&format!(" --key {}", path(key)));
+            }
+            match &settings.proxy {
+                ProxySetting::System => {}
+                ProxySetting::None => command.push_str(" --noproxy '*'"),
+                ProxySetting::Url(url) => command.push_str(&format!(" --proxy {}", shell_quote(url))),
+            }
+            if let Some(socket) = &settings.unix_socket {
+                command.push_str(&format!(" --unix-socket {}", path(socket)));
+            }
         }
         command.push(' ');
         command.push_str(&shell_quote(&self.url));
@@ -216,7 +248,7 @@ mod tests {
             body: "{\"name\": \"Rex\"}".into(),
         };
         assert_eq!(
-            request.to_curl(),
+            request.to_curl(None),
             "curl 'https://api.test/pets?q=it'\\''s' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '{\"name\": \"Rex\"}'"
         );
         let get = Request {
@@ -225,10 +257,22 @@ mod tests {
             headers: Vec::new(),
             body: String::new(),
         };
-        assert_eq!(get.to_curl(), "curl -X DELETE 'https://api.test/pets/1'");
+        assert_eq!(get.to_curl(None), "curl -X DELETE 'https://api.test/pets/1'");
+        let settings = crate::model::RequestSettings {
+            verify_tls: Some(false),
+            proxy: Some(ProxySetting::None),
+            unix_socket: Some("/run/docker.sock".into()),
+            ca_certificate: Some("certs/ca.pem".into()),
+            ..Default::default()
+        }
+        .resolve(std::path::Path::new("/work/api"), 30);
+        assert_eq!(
+            get.to_curl(Some(&settings)),
+            "curl -X DELETE -L -k --cacert '/work/api/certs/ca.pem' --noproxy '*' --unix-socket '/run/docker.sock' 'https://api.test/pets/1'"
+        );
 
         // What we export, we can import again.
-        let file = crate::import::curl::parse(&request.to_curl()).unwrap();
+        let file = crate::import::curl::parse(&request.to_curl(None)).unwrap();
         assert_eq!(
             (file.method.as_str(), file.url.as_str()),
             ("POST", "https://api.test/pets?q=it's")

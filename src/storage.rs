@@ -8,7 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::model::{
-    Auth, COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, FolderFile, RequestFile, slugify,
+    Auth, COLLECTION_FILE, CollectionFile, ENVIRONMENTS_DIR, EnvironmentFile, FolderFile, RequestFile, RequestSettings,
+    slugify,
 };
 use crate::response_cache::{CacheKey, cache_key};
 
@@ -273,6 +274,25 @@ pub fn folder_auths(root: &Path, request: &Path) -> Vec<(PathBuf, Auth)> {
             (dir.clone(), read_folder(&dir).auth)
         })
         .collect()
+}
+
+/// Settings a request at `request` inherits: the collection's, then each folder's on the way
+/// down (the request's own are not included).
+pub fn inherited_settings(root: &Path, request: &Path) -> RequestSettings {
+    let collection = read_yaml::<CollectionFile>(&root.join(COLLECTION_FILE))
+        .map(|file| file.settings)
+        .unwrap_or_default();
+    let Some(parent) = request.parent() else {
+        return collection;
+    };
+    let Ok(relative) = parent.strip_prefix(root) else {
+        return collection;
+    };
+    let mut dir = root.to_path_buf();
+    relative.components().fold(collection, |settings, part| {
+        dir.push(part);
+        settings.overlay(&read_folder(&dir).settings)
+    })
 }
 
 /// Deletes a request file or a folder with everything in it.

@@ -33,5 +33,8 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 futures-lite = "2.6.1"
+rcgen = "0.14"
+rustls = "0.23"
+tokio-rustls = "0.26"
 gpui-kit = { version = "0.6.1", features = ["test-support", "tree-sitter", "tree-sitter-graphql"] }
 tempfile = "3.27.0"

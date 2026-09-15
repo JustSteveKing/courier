@@ -14,6 +14,8 @@
 
 use indexmap::IndexMap;
 use rust_i18n::t;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_FILE: &str = "collection.yaml";
@@ -41,6 +43,8 @@ pub struct CollectionFile {
     /// Auth for every request that inherits it. `Inherit` here means none.
     #[serde(default, skip_serializing_if = "Auth::is_unset")]
     pub auth: Auth,
+    #[serde(default, skip_serializing_if = "RequestSettings::is_empty")]
+    pub settings: RequestSettings,
 }
 
 /// How a request authenticates. Values may use `{{variables}}`, and credentials should: the
@@ -128,11 +132,135 @@ impl Auth {
     }
 }
 
+/// How requests are sent: redirects, timeouts, TLS, proxy and Unix sockets. Every field is
+/// optional; unset ones come from the folder, then the collection, then the app defaults.
+/// File paths are relative to the project folder.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RequestSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_redirects: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_redirects: Option<u32>,
+    /// Seconds to wait for a response to start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_tls: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxySetting>,
+    /// A PEM file with extra certificate authorities to trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_certificate: Option<String>,
+    /// A PEM client certificate for mutual TLS, with its key in `client_key` or in the same file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_certificate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<String>,
+    /// Send over this Unix socket (e.g. `/run/docker.sock`) instead of TCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_socket: Option<String>,
+}
+
+/// Which proxy to use: the system's (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`), none, or a URL.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[serde(from = "String", into = "String")]
+pub enum ProxySetting {
+    System,
+    None,
+    Url(String),
+}
+
+impl From<String> for ProxySetting {
+    fn from(text: String) -> Self {
+        match text.trim() {
+            "system" => Self::System,
+            "none" | "" => Self::None,
+            url => Self::Url(url.to_string()),
+        }
+    }
+}
+
+impl From<ProxySetting> for String {
+    fn from(proxy: ProxySetting) -> Self {
+        match proxy {
+            ProxySetting::System => "system".into(),
+            ProxySetting::None => "none".into(),
+            ProxySetting::Url(url) => url,
+        }
+    }
+}
+
+impl RequestSettings {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// These settings with `over`'s set fields taking their place.
+    pub fn overlay(&self, over: &RequestSettings) -> RequestSettings {
+        RequestSettings {
+            follow_redirects: over.follow_redirects.or(self.follow_redirects),
+            max_redirects: over.max_redirects.or(self.max_redirects),
+            timeout_secs: over.timeout_secs.or(self.timeout_secs),
+            verify_tls: over.verify_tls.or(self.verify_tls),
+            proxy: over.proxy.clone().or_else(|| self.proxy.clone()),
+            ca_certificate: over.ca_certificate.clone().or_else(|| self.ca_certificate.clone()),
+            client_certificate: over
+                .client_certificate
+                .clone()
+                .or_else(|| self.client_certificate.clone()),
+            client_key: over.client_key.clone().or_else(|| self.client_key.clone()),
+            unix_socket: over.unix_socket.clone().or_else(|| self.unix_socket.clone()),
+        }
+    }
+
+    /// Fills in defaults and makes file paths absolute against `project_dir`.
+    pub fn resolve(&self, project_dir: &Path, default_timeout_secs: u64) -> EffectiveSettings {
+        let path = |p: &Option<String>| {
+            p.as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| project_dir.join(p))
+        };
+        EffectiveSettings {
+            follow_redirects: self.follow_redirects.unwrap_or(true),
+            max_redirects: self.max_redirects.unwrap_or(10),
+            timeout_secs: self.timeout_secs.unwrap_or(default_timeout_secs).max(1),
+            verify_tls: self.verify_tls.unwrap_or(true),
+            proxy: self.proxy.clone().unwrap_or(ProxySetting::System),
+            ca_certificate: path(&self.ca_certificate),
+            client_certificate: path(&self.client_certificate),
+            client_key: path(&self.client_key),
+            unix_socket: self
+                .unix_socket
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from),
+        }
+    }
+}
+
+/// Request settings with everything decided.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EffectiveSettings {
+    pub follow_redirects: bool,
+    pub max_redirects: u32,
+    pub timeout_secs: u64,
+    pub verify_tls: bool,
+    pub proxy: ProxySetting,
+    pub ca_certificate: Option<PathBuf>,
+    pub client_certificate: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+    pub unix_socket: Option<PathBuf>,
+}
+
 /// Settings stored for a folder in its `.folder.yaml`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct FolderFile {
     #[serde(default, skip_serializing_if = "Auth::is_inherit")]
     pub auth: Auth,
+    #[serde(default, skip_serializing_if = "RequestSettings::is_empty")]
+    pub settings: RequestSettings,
 }
 
 impl CollectionFile {
@@ -144,6 +272,7 @@ impl CollectionFile {
             variables: Variables::new(),
             secrets: Vec::new(),
             auth: Auth::None,
+            settings: RequestSettings::default(),
         }
     }
 
@@ -210,6 +339,8 @@ pub struct RequestFile {
     pub disabled_params: Vec<QueryParam>,
     #[serde(default, skip_serializing_if = "Auth::is_inherit")]
     pub auth: Auth,
+    #[serde(default, skip_serializing_if = "RequestSettings::is_empty")]
+    pub settings: RequestSettings,
 }
 
 /// A `name=value` query parameter, as written (percent-encoding and `{{variables}}` kept).
@@ -295,6 +426,7 @@ impl RequestFile {
             disabled_params: Vec::new(),
             graphql: None,
             auth: Auth::Inherit,
+            settings: RequestSettings::default(),
         }
     }
 }
@@ -560,6 +692,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_inherit_field_by_field() {
+        let collection = RequestSettings {
+            verify_tls: Some(false),
+            timeout_secs: Some(60),
+            ca_certificate: Some("certs/ca.pem".into()),
+            ..Default::default()
+        };
+        let folder = RequestSettings {
+            timeout_secs: Some(5),
+            proxy: Some(ProxySetting::None),
+            ..Default::default()
+        };
+        let request = RequestSettings {
+            follow_redirects: Some(false),
+            ..Default::default()
+        };
+        let merged = collection.overlay(&folder).overlay(&request);
+        assert_eq!(merged.verify_tls, Some(false));
+        assert_eq!(merged.timeout_secs, Some(5));
+        assert_eq!(merged.follow_redirects, Some(false));
+
+        let effective = merged.resolve(Path::new("/work/api"), 30);
+        assert!(!effective.follow_redirects && !effective.verify_tls);
+        assert_eq!((effective.max_redirects, effective.timeout_secs), (10, 5));
+        assert_eq!(effective.proxy, ProxySetting::None);
+        assert_eq!(effective.ca_certificate, Some(PathBuf::from("/work/api/certs/ca.pem")));
+        assert_eq!(
+            RequestSettings::default().resolve(Path::new("/x"), 30).proxy,
+            ProxySetting::System
+        );
+
+        let yaml = serde_norway::to_string(&RequestSettings {
+            proxy: Some(ProxySetting::Url("http://proxy.test:3128".into())),
+            unix_socket: Some("/run/docker.sock".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(yaml, "proxy: http://proxy.test:3128\nunix_socket: /run/docker.sock\n");
+        let back: RequestSettings = serde_norway::from_str("proxy: system\n").unwrap();
+        assert_eq!(back.proxy, Some(ProxySetting::System));
+    }
+
+    #[test]
     fn auth_serializes_and_spots_literal_credentials() {
         let yaml = serde_norway::to_string(&Auth::ApiKey {
             name: "X-Key".into(),
@@ -641,6 +816,10 @@ mod tests {
             }],
             auth: Auth::Bearer {
                 token: "{{token}}".into(),
+            },
+            settings: RequestSettings {
+                verify_tls: Some(false),
+                ..Default::default()
             },
         };
         let yaml = serde_norway::to_string(&request).unwrap();

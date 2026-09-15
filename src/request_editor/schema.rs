@@ -156,8 +156,6 @@ impl RequestEditor {
             operation_name: Some(INTROSPECTION_OPERATION.into()),
         });
         let resolving = self.resolve_in_background(file, cx);
-        let timeout = self.timeout(cx);
-        let client = self.cookies.as_ref().map(|jar| jar.client().clone());
         let state = self.schemas.entry(key.clone()).or_default();
         state.loading = true;
         state.error = None;
@@ -168,10 +166,12 @@ impl RequestEditor {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = async {
-                let (request, _, _, _) = resolving.await?;
+                let resolved = resolving.await?;
+                let timeout = std::time::Duration::from_secs(resolved.settings.timeout_secs);
                 let events = this
                     .update(cx, |this, _| {
-                        let (handle, events) = transport::start_http(request, timeout, None, client);
+                        let (handle, events) =
+                            transport::start_http(resolved.request, timeout, None, Some(resolved.client));
                         if let Some(state) = this.schemas.get_mut(&key)
                             && state.generation == generation
                         {

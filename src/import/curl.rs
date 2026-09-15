@@ -202,6 +202,7 @@ impl Parsed {
             graphql: None,
             disabled_params: Vec::new(),
             auth: Auth::Inherit,
+            settings: Default::default(),
         })
     }
 }

@@ -8,7 +8,9 @@
 //! Timeouts cover connecting and waiting for the response head; once a response starts it
 //! may stream for as long as the server keeps it open.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use eventsource_stream::Eventsource as _;
@@ -19,6 +21,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::http::Request;
+use crate::model::{EffectiveSettings, ProxySetting};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -157,12 +160,118 @@ fn headers_of(map: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
 
 /// Sends an HTTP request. `last_event_id` resumes a Server-Sent Events stream.
 /// A client that stores response cookies in `store` and sends them with matching requests.
-pub fn client_with_cookies(store: std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>) -> reqwest::Client {
+/// Everything an HTTP client is built from. Clients are cached per distinct value, so requests
+/// with the same settings share connections.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientOptions {
+    pub follow_redirects: bool,
+    pub max_redirects: u32,
+    pub verify_tls: bool,
+    pub proxy: ProxySetting,
+    /// Extra trusted certificate authorities (PEM).
+    pub ca_pem: Option<Vec<u8>>,
+    /// Client certificate and key for mutual TLS (PEM).
+    pub identity_pem: Option<Vec<u8>>,
+    pub unix_socket: Option<PathBuf>,
+}
+
+impl ClientOptions {
+    /// Reads any certificate files the settings name.
+    pub fn load(settings: &EffectiveSettings) -> Result<Self, String> {
+        let read = |path: &PathBuf, what: &str| {
+            std::fs::read(path).map_err(|e| format!("could not read the {what} {}: {e}", path.display()))
+        };
+        let ca_pem = settings
+            .ca_certificate
+            .as_ref()
+            .map(|p| read(p, "CA certificate"))
+            .transpose()?;
+        let identity_pem = match (&settings.client_certificate, &settings.client_key) {
+            (Some(cert), key) => {
+                let mut pem = read(cert, "client certificate")?;
+                if let Some(key) = key {
+                    pem.push(b'\n');
+                    pem.extend(read(key, "client key")?);
+                }
+                Some(pem)
+            }
+            (None, Some(_)) => return Err("a client key needs a client certificate too".into()),
+            (None, None) => None,
+        };
+        Ok(Self {
+            follow_redirects: settings.follow_redirects,
+            max_redirects: settings.max_redirects,
+            verify_tls: settings.verify_tls,
+            proxy: settings.proxy.clone(),
+            ca_pem,
+            identity_pem,
+            unix_socket: settings.unix_socket.clone(),
+        })
+    }
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            follow_redirects: true,
+            max_redirects: 10,
+            verify_tls: true,
+            proxy: ProxySetting::System,
+            ca_pem: None,
+            identity_pem: None,
+            unix_socket: None,
+        }
+    }
+}
+
+type Cookies = Arc<reqwest_cookie_store::CookieStoreMutex>;
+
+/// A client for `options`, storing and sending cookies in `cookies` when given.
+pub fn client_for(options: &ClientOptions, cookies: Option<&Cookies>) -> Result<reqwest::Client, String> {
+    static CLIENTS: OnceLock<Mutex<HashMap<(ClientOptions, usize), reqwest::Client>>> = OnceLock::new();
+    let key = (options.clone(), cookies.map_or(0, |c| Arc::as_ptr(c) as usize));
+    let clients = CLIENTS.get_or_init(Default::default);
+    if let Some(client) = clients.lock().unwrap().get(&key) {
+        return Ok(client.clone());
+    }
     let _runtime = runtime().enter();
-    reqwest::Client::builder()
-        .cookie_provider(store)
+    let mut builder = reqwest::Client::builder()
+        .redirect(if options.follow_redirects {
+            reqwest::redirect::Policy::limited(options.max_redirects as usize)
+        } else {
+            reqwest::redirect::Policy::none()
+        })
+        .danger_accept_invalid_certs(!options.verify_tls);
+    builder = match &options.proxy {
+        ProxySetting::System => builder,
+        ProxySetting::None => builder.no_proxy(),
+        ProxySetting::Url(url) => {
+            builder.proxy(reqwest::Proxy::all(url).map_err(|e| format!("invalid proxy {url}: {e}"))?)
+        }
+    };
+    if let Some(pem) = &options.ca_pem {
+        for certificate in
+            reqwest::Certificate::from_pem_bundle(pem).map_err(|e| format!("invalid CA certificate: {e}"))?
+        {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    if let Some(pem) = &options.identity_pem {
+        builder = builder
+            .identity(reqwest::Identity::from_pem(pem).map_err(|e| format!("invalid client certificate or key: {e}"))?);
+    }
+    #[cfg(unix)]
+    if let Some(socket) = &options.unix_socket {
+        builder = builder.unix_socket(socket.clone());
+    }
+    if let Some(cookies) = cookies {
+        builder = builder.cookie_provider(cookies.clone());
+    }
+    let client = builder
         .build()
-        .expect("could not create the HTTP client")
+        .map_err(|e| format!("could not set up the connection: {}", describe(&e)))?;
+    clients.lock().unwrap().insert(key, client.clone());
+    Ok(client)
 }
 
 /// Sends an HTTP request, with `client` (e.g. one with a cookie jar) or the shared one.
@@ -357,6 +466,168 @@ mod tests {
             headers: vec![],
             body: String::new(),
         }
+    }
+
+    /// A self-signed certificate authority and a server certificate for 127.0.0.1 it signed,
+    /// plus a client certificate it signed: (ca pem, server cert, server key, client pem).
+    fn test_pki() -> (String, rcgen::CertifiedKey<rcgen::KeyPair>, String) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let mut server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        server_params.subject_alt_names = vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())];
+        let server = server_params.signed_by(&server_key, &issuer).unwrap();
+
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params = rcgen::CertificateParams::new(vec!["client".to_string()]).unwrap();
+        client_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let client = client_params.signed_by(&client_key, &issuer).unwrap();
+        let client_pem = format!("{}{}", client.pem(), client_key.serialize_pem());
+        (
+            ca.pem(),
+            rcgen::CertifiedKey {
+                cert: server,
+                signing_key: server_key,
+            },
+            client_pem,
+        )
+    }
+
+    /// A TLS server on 127.0.0.1 answering every request with 204, requiring a client
+    /// certificate signed by `client_ca` when given.
+    fn tls_server(server: &rcgen::CertifiedKey<rcgen::KeyPair>, client_ca: Option<&str>) -> u16 {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let cert = CertificateDer::from(server.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server.signing_key.serialize_der()));
+        let builder = rustls::ServerConfig::builder();
+        let config = match client_ca {
+            Some(pem) => {
+                let mut roots = rustls::RootCertStore::empty();
+                for cert in rustls::pki_types::pem::PemObject::pem_slice_iter(pem.as_bytes()) {
+                    roots.add(cert.unwrap()).unwrap();
+                }
+                let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                    .build()
+                    .unwrap();
+                builder.with_client_cert_verifier(verifier)
+            }
+            None => builder.with_no_client_auth(),
+        }
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        runtime().spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut buf = [0u8; 2048];
+                    let _ = tls.read(&mut buf).await;
+                    let _ = tls
+                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    fn send_with(options: &ClientOptions, url: &str) -> Vec<Event> {
+        let client = client_for(options, None).unwrap();
+        let (_handle, events) = start_http(get(url), Duration::from_secs(5), None, Some(client));
+        collect(&events, Duration::from_secs(5))
+    }
+
+    #[test]
+    fn tls_verification_custom_cas_and_client_certificates() {
+        let (ca_pem, server, client_pem) = test_pki();
+        let port = tls_server(&server, None);
+        let url = format!("https://127.0.0.1:{port}/");
+        let ok = |events: &[Event]| matches!(events.first(), Some(Event::Head { status: 204, .. }));
+
+        let events = send_with(&ClientOptions::default(), &url);
+        assert!(
+            matches!(events.last(), Some(Event::Failed(_))),
+            "untrusted by default: {events:?}"
+        );
+        let insecure = ClientOptions {
+            verify_tls: false,
+            ..Default::default()
+        };
+        assert!(ok(&send_with(&insecure, &url)), "verification off");
+        let trusted = ClientOptions {
+            ca_pem: Some(ca_pem.clone().into_bytes()),
+            ..Default::default()
+        };
+        assert!(ok(&send_with(&trusted, &url)), "with the CA");
+
+        let mtls_port = tls_server(&server, Some(&ca_pem));
+        let mtls_url = format!("https://127.0.0.1:{mtls_port}/");
+        let events = send_with(&trusted, &mtls_url);
+        assert!(!ok(&events), "a client certificate is required: {events:?}");
+        let with_identity = ClientOptions {
+            identity_pem: Some(client_pem.into_bytes()),
+            ..trusted
+        };
+        assert!(ok(&send_with(&with_identity, &mtls_url)), "with a client certificate");
+    }
+
+    #[test]
+    fn redirects_can_be_left_alone() {
+        let port = serve_once(|mut stream, _| {
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let options = ClientOptions {
+            follow_redirects: false,
+            ..Default::default()
+        };
+        let events = send_with(&options, &format!("http://127.0.0.1:{port}/"));
+        assert!(
+            matches!(events.first(), Some(Event::Head { status: 302, .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn sends_over_unix_sockets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("api.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let options = ClientOptions {
+            unix_socket: Some(socket),
+            ..Default::default()
+        };
+        let events = send_with(&options, "http://localhost/v1/containers");
+        assert!(
+            matches!(events.first(), Some(Event::Head { status: 200, .. })),
+            "{events:?}"
+        );
     }
 
     /// Collects events until the channel closes or `timeout` passes.

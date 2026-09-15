@@ -32,17 +32,13 @@ struct Saved {
 #[derive(Clone)]
 pub struct Cookies {
     store: Arc<CookieStoreMutex>,
-    client: reqwest::Client,
     saved: Arc<Mutex<Option<Saved>>>,
 }
 
 impl Default for Cookies {
     fn default() -> Self {
-        let store = Arc::new(CookieStoreMutex::new(CookieStore::default()));
-        let client = crate::transport::client_with_cookies(store.clone());
         Self {
-            store,
-            client,
+            store: Arc::new(CookieStoreMutex::new(CookieStore::default())),
             saved: Default::default(),
         }
     }
@@ -78,9 +74,9 @@ impl Cookies {
         }
     }
 
-    /// An HTTP client that sends and stores this jar's cookies.
-    pub fn client(&self) -> &reqwest::Client {
-        &self.client
+    /// The jar itself, for HTTP clients that send and store its cookies.
+    pub fn store(&self) -> &Arc<CookieStoreMutex> {
+        &self.store
     }
 
     /// The `Cookie` header value for `url`, for requests the client doesn't send (WebSockets).

@@ -16,7 +16,7 @@ use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use indexmap::IndexMap;
@@ -29,8 +29,8 @@ use crate::credentials::is_literal_credential;
 use crate::graphql::SchemaCache;
 use crate::http::{self, Request};
 use crate::model::{
-    Auth, Body, BodyKind, Graphql, QueryParam, RequestFile, Variables, apply_params_text, headers_from_text,
-    headers_to_text, params_to_text,
+    Auth, Body, BodyKind, EffectiveSettings, Graphql, QueryParam, RequestFile, RequestSettings, Variables,
+    apply_params_text, headers_from_text, headers_to_text, params_to_text,
 };
 use crate::response_cache::{self, CacheKey, Outcome, ResponseCache, StoredResponse};
 use crate::secret_store::{SecretRef, SecretStore};
@@ -71,6 +71,8 @@ pub enum RequestEditorEvent {
     },
     Error(String),
     Notice(String),
+    /// The user asked to edit the open request's settings. It has already been saved.
+    EditSettings(PathBuf),
 }
 
 impl EventEmitter<RequestEditorEvent> for RequestEditor {}
@@ -104,7 +106,15 @@ struct ResponseState {
 /// A request ready to send, the variables it lacked, and the variables (with secrets) used.
 /// A request ready to send, the variables it lacked, the variables (with secrets) used, and
 /// responses of other requests sent to evaluate its `response()` calls.
-type Resolved = (Request, Vec<String>, Variables, chain::Sent);
+pub(super) struct Resolved {
+    request: Request,
+    missing: Vec<String>,
+    variables: Variables,
+    sent: chain::Sent,
+    /// A client set up for the request's settings (and its collection's cookies).
+    client: reqwest::Client,
+    settings: EffectiveSettings,
+}
 
 /// Status code, reason phrase and headers of a response.
 type Head = (u16, String, Vec<(String, String)>);
@@ -239,6 +249,8 @@ pub struct RequestEditor {
     auth: Entity<AuthForm>,
     /// What the request's `Inherit` auth resolves to, from its folders and collection.
     inherited_auth: Auth,
+    /// Settings from the request's collection and folders, before its own.
+    inherited_settings: RequestSettings,
     /// The URL's query parameters as `name=value` lines, kept in sync with the URL.
     params: Entity<EditorState>,
     disabled_params: Vec<QueryParam>,
@@ -474,6 +486,7 @@ impl RequestEditor {
             headers,
             auth,
             inherited_auth: Auth::None,
+            inherited_settings: RequestSettings::default(),
             params,
             disabled_params: Vec::new(),
             params_to_url: false,
@@ -787,6 +800,22 @@ impl RequestEditor {
         cx.notify();
     }
 
+    pub fn set_inherited_settings(&mut self, settings: RequestSettings) {
+        self.inherited_settings = settings;
+    }
+
+    /// The settings `file` is sent with: inherited, then its own, then the app defaults.
+    fn effective_settings(&self, file: &RequestFile, cx: &App) -> EffectiveSettings {
+        let project = self
+            .collection_root
+            .as_deref()
+            .map(crate::project::project_dir)
+            .unwrap_or(Path::new("."));
+        self.inherited_settings
+            .overlay(&file.settings)
+            .resolve(project, AppSettings::get(cx).request_timeout_secs)
+    }
+
     /// The auth an inheriting request uses, and where it's set, from the workspace.
     pub fn set_inherited_auth(&mut self, auth: Auth, source: String, cx: &mut Context<Self>) {
         self.inherited_auth = auth.clone();
@@ -821,9 +850,10 @@ impl RequestEditor {
         if file.auth.is_inherit() {
             file.auth = self.inherited_auth.clone();
         }
-        let copied = move |result: Result<(Request, Vec<String>), String>, cx: &mut Context<Self>| match result {
-            Ok((request, _)) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(request.to_curl()));
+        let settings = self.effective_settings(&file, cx);
+        let copied = move |result: Result<(Request, EffectiveSettings), String>, cx: &mut Context<Self>| match result {
+            Ok((request, settings)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(request.to_curl(Some(&settings))));
                 let notice = if include_secrets {
                     t!("request.copied_curl_with_secrets")
                 } else {
@@ -834,12 +864,15 @@ impl RequestEditor {
             Err(message) => cx.emit(RequestEditorEvent::Error(message)),
         };
         if !include_secrets {
-            copied(Request::resolve(&file, &self.variables), cx);
+            copied(
+                Request::resolve(&file, &self.variables).map(|(request, _)| (request, settings)),
+                cx,
+            );
             return;
         }
         let resolving = self.resolve_in_background(file, cx);
         cx.spawn(async move |this, cx| {
-            let result = resolving.await.map(|(request, missing, _, _)| (request, missing));
+            let result = resolving.await.map(|resolved| (resolved.request, resolved.settings));
             this.update(cx, |_, cx| copied(result, cx)).ok();
         })
         .detach();
@@ -973,6 +1006,7 @@ impl RequestEditor {
                 messages: saved.messages,
                 disabled_params: self.disabled_params.clone(),
                 auth: self.auth.read(cx).value(cx),
+                settings: saved.settings.clone(),
                 graphql: Some(Graphql {
                     query: self.graphql_query.read(cx).value().to_string(),
                     variables: self.graphql_variables.read(cx).value().to_string(),
@@ -1011,6 +1045,7 @@ impl RequestEditor {
             graphql: None,
             disabled_params: self.disabled_params.clone(),
             auth: self.auth.read(cx).value(cx),
+            settings: saved.settings.clone(),
         }
     }
 
@@ -1049,10 +1084,6 @@ impl RequestEditor {
         cx.notify();
     }
 
-    fn timeout(&self, cx: &App) -> Duration {
-        Duration::from_secs(AppSettings::get(cx).request_timeout_secs.max(1))
-    }
-
     /// Resolves `file` with the active variables and secrets, off the UI thread. Secret
     /// values are fetched only now, used for this one request, and dropped. Also returns the
     /// missing variable names and the variables used.
@@ -1066,6 +1097,8 @@ impl RequestEditor {
         // Only requests that call functions need the chaining context (and its copies of the
         // latest responses).
         let chaining = (!chain::calls_in(&file).is_empty()).then(|| self.chain_context(cx));
+        let settings = self.effective_settings(&file, cx);
+        let cookies = self.cookies.as_ref().map(|jar| jar.store().clone());
         cx.background_executor().spawn(async move {
             if !secrets.is_empty() {
                 let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
@@ -1083,7 +1116,15 @@ impl RequestEditor {
                 sent = chained;
             }
             let (request, missing) = Request::resolve(&file, &variables)?;
-            Ok((request, missing, variables, sent))
+            let client = transport::client_for(&transport::ClientOptions::load(&settings)?, cookies.as_ref())?;
+            Ok(Resolved {
+                request,
+                missing,
+                variables,
+                sent,
+                client,
+                settings,
+            })
         })
     }
 
@@ -1106,8 +1147,8 @@ impl RequestEditor {
                 .state()
                 .and_then(|s| s.cache_key.as_ref())
                 .and_then(|k| k.collection_id.clone()),
-            timeout: self.timeout(cx),
-            client: self.cookies.as_ref().map(|jar| jar.client().clone()),
+            default_timeout_secs: AppSettings::get(cx).request_timeout_secs,
+            cookies: self.cookies.as_ref().map(|jar| jar.store().clone()),
         }
     }
 
@@ -1171,7 +1212,6 @@ impl RequestEditor {
             file.graphql = None;
         }
         let resolving = self.resolve_in_background(file, cx);
-        let timeout = self.timeout(cx);
         let cookies = self.cookies.clone();
         cx.notify();
 
@@ -1179,12 +1219,18 @@ impl RequestEditor {
             let resolved = resolving.await;
             let jar = cookies.clone();
             let events = this.update(cx, |this, cx| {
-                if let Ok((_, _, _, sent)) = &resolved {
-                    this.take_chained(sent.clone(), cx);
+                if let Ok(resolved) = &resolved {
+                    this.take_chained(resolved.sent.clone(), cx);
                 }
                 let state = this.responses.entry(path.clone()).or_default();
-                let (request, missing, variables) = match resolved {
-                    Ok((request, missing, variables, _)) => (request, missing, variables),
+                let (request, missing, variables, client, timeout_secs) = match resolved {
+                    Ok(resolved) => (
+                        resolved.request,
+                        resolved.missing,
+                        resolved.variables,
+                        resolved.client,
+                        resolved.settings.timeout_secs,
+                    ),
                     Err(message) => {
                         if state.live(id).is_some() {
                             state.finish(StoredResponse::failed(response_cache::now(), message));
@@ -1204,9 +1250,9 @@ impl RequestEditor {
                     {
                         request.headers.push(("Cookie".into(), cookie));
                     }
-                    transport::start_websocket(request, timeout)
+                    transport::start_websocket(request, Duration::from_secs(timeout_secs))
                 } else {
-                    transport::start_http(request, timeout, last_event_id, jar.map(|jar| jar.client().clone()))
+                    transport::start_http(request, Duration::from_secs(timeout_secs), last_event_id, Some(client))
                 };
                 live.handle = Some(handle);
                 Some(events)
@@ -1728,6 +1774,19 @@ impl Render for RequestEditor {
                         row.child(div().w_32().child(Select::new(&self.method)))
                     })
                     .child(div().flex_1().min_w_0().child(single_line_editor(&self.url)))
+                    .child(
+                        Button::new("request-settings")
+                            .ghost()
+                            .icon(IconName::Settings)
+                            .selected(self.saved.as_ref().is_some_and(|r| !r.settings.is_empty()))
+                            .tooltip(t!("settings_form.request_tooltip").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(path) = this.path.clone() {
+                                    this.save(cx);
+                                    cx.emit(RequestEditorEvent::EditSettings(path));
+                                }
+                            })),
+                    )
                     .child(
                         Button::new("send")
                             .when(!sending, |button| {

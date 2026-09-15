@@ -214,8 +214,9 @@ pub struct Context {
     pub latest: HashMap<PathBuf, StoredResponse>,
     pub cache: Option<ResponseCache>,
     pub collection_id: Option<String>,
-    pub timeout: Duration,
-    pub client: Option<reqwest::Client>,
+    /// The app's default timeout, for requests whose settings don't set one.
+    pub default_timeout_secs: u64,
+    pub cookies: Option<std::sync::Arc<reqwest_cookie_store::CookieStoreMutex>>,
 }
 
 /// Responses sent while evaluating, to show and save as those requests' latest.
@@ -363,7 +364,12 @@ async fn send(
     }
 
     let started = std::time::Instant::now();
-    let (_handle, events) = transport::start_http(request, context.timeout, None, context.client.clone());
+    let settings = storage::inherited_settings(&context.root, path)
+        .overlay(&file.settings)
+        .resolve(crate::project::project_dir(&context.root), context.default_timeout_secs);
+    let client = transport::client_for(&transport::ClientOptions::load(&settings)?, context.cookies.as_ref())?;
+    let timeout = Duration::from_secs(settings.timeout_secs);
+    let (_handle, events) = transport::start_http(request, timeout, None, Some(client));
     let (mut head, mut body) = ((0, String::new(), Vec::new()), Vec::new());
     let mut bytes = 0;
     loop {

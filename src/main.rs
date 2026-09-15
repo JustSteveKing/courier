@@ -16,6 +16,7 @@ mod request_editor;
 mod response_cache;
 mod secret_store;
 mod settings;
+mod settings_form;
 mod storage;
 mod template_assist;
 mod transport;

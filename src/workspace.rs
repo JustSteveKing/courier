@@ -29,13 +29,14 @@ use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Targe
 use crate::graphql::SchemaCache;
 use crate::import::{self, CollectionImport, ImportFormat, ImportItem};
 use crate::import::{curl, postman};
-use crate::model::{Auth, CollectionFile, RequestFile, RequestKind, Variables, placeholder};
+use crate::model::{Auth, CollectionFile, RequestFile, RequestKind, RequestSettings, Variables, placeholder};
 use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
 use crate::response_cache::{CacheKey, Liveness, ResponseCache};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::{AppSettings, LabelColor};
+use crate::settings_form::{PathField, SettingsForm, SettingsFormEvent};
 use crate::storage::{self, Collection, Item};
 use crate::ui::{dialog_footer, focus_in_dialog, text_input, textarea};
 
@@ -112,6 +113,7 @@ impl Workspace {
             RequestEditorEvent::MoveAuthToSecret { path } => this.move_auth_to_secret(path.clone(), window, cx),
             RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
             RequestEditorEvent::Notice(message) => window.push_notification(Notification::success(message.clone()), cx),
+            RequestEditorEvent::EditSettings(path) => this.edit_settings(path.clone(), window, cx),
         })
         .detach();
         let environment_editor = cx.new(|cx| EnvironmentEditor::new(window, cx));
@@ -447,10 +449,15 @@ impl Workspace {
                 .collection_index_for(path)
                 .map(|ix| self.collections[ix].root.clone());
             let requests = self.request_index(path);
+            let inherited_settings = root
+                .as_deref()
+                .map(|root| storage::inherited_settings(root, path))
+                .unwrap_or_default();
             self.editor.update(cx, |editor, cx| {
                 editor.set_cookies(jar);
                 editor.set_collection_root(root);
                 editor.set_collection_requests(requests);
+                editor.set_inherited_settings(inherited_settings);
                 editor.load(path.to_path_buf(), request, key, window, cx)
             });
             self.refresh_inherited_auth(cx);
@@ -1742,6 +1749,136 @@ impl Workspace {
         }
     }
 
+    /// Edits the request settings of a collection (at its root), a folder, or a request.
+    fn edit_settings(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.collection_index_for(&path) else {
+            return;
+        };
+        let root = self.collections[ix].root.clone();
+        let project = project::project_dir(&root).to_path_buf();
+        enum Target {
+            Collection,
+            Folder,
+            Request,
+        }
+        let target = if path == root {
+            Target::Collection
+        } else if path.is_dir() {
+            Target::Folder
+        } else {
+            Target::Request
+        };
+        let (current, name, inherited) = match target {
+            Target::Collection => (
+                self.collections[ix].file.settings.clone(),
+                self.collection_label(&self.collections[ix]),
+                RequestSettings::default(),
+            ),
+            Target::Folder => (
+                storage::read_folder(&path).settings,
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                storage::inherited_settings(&root, &path),
+            ),
+            Target::Request => {
+                let Some(request) = self.find_request(&path).cloned() else {
+                    return;
+                };
+                (
+                    request.settings,
+                    request.name,
+                    storage::inherited_settings(&root, &path),
+                )
+            }
+        };
+        let inherited = inherited.resolve(&project, AppSettings::get(cx).request_timeout_secs);
+        let form = cx.new(|cx| SettingsForm::new(&current, inherited, window, cx));
+        cx.subscribe_in(&form, window, {
+            let project = project.clone();
+            move |this, form, event: &SettingsFormEvent, window, cx| {
+                let SettingsFormEvent::Browse(field) = *event;
+                let (form, project) = (form.clone(), project.clone());
+                this.pick_path(
+                    false,
+                    t!("settings_form.browse").to_string(),
+                    window,
+                    cx,
+                    move |_, file, window, cx| {
+                        // Files inside the project are stored relative to it, so the collection
+                        // works on other machines; others keep their full path, with a warning.
+                        let stored = match file.strip_prefix(&project) {
+                            Ok(relative) if field != PathField::UnixSocket => relative.display().to_string(),
+                            _ => {
+                                if field != PathField::UnixSocket {
+                                    window.push_notification(
+                                        Notification::warning(
+                                            t!("settings_form.outside_project", path = file.display()).to_string(),
+                                        ),
+                                        cx,
+                                    );
+                                }
+                                file.display().to_string()
+                            }
+                        };
+                        form.update(cx, |form, cx| form.set_path(field, stored, window, cx));
+                    },
+                );
+            }
+        })
+        .detach();
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (weak, form, path, root, name) = (weak.clone(), form.clone(), path.clone(), root.clone(), name.clone());
+            dialog
+                .title(t!("settings_form.title", name = name).to_string())
+                .w(px(620.))
+                .content({
+                    let form = form.clone();
+                    move |content, _, _| content.child(form.clone())
+                })
+                .footer(dialog_footer(
+                    Some(t!("ws.save_button").to_string()),
+                    ButtonVariant::Primary,
+                ))
+                .on_ok(move |_, window, cx| {
+                    let Ok(settings) = form.read(cx).value(cx) else {
+                        return false;
+                    };
+                    let result = if path == root {
+                        storage::read_yaml::<CollectionFile>(&root.join(crate::model::COLLECTION_FILE)).and_then(
+                            |mut file| {
+                                file.settings = settings;
+                                storage::save_collection_file(&root, &file)
+                            },
+                        )
+                    } else if path.is_dir() {
+                        let mut folder = storage::read_folder(&path);
+                        folder.settings = settings;
+                        storage::write_folder(&path, &folder)
+                    } else {
+                        storage::read_yaml::<RequestFile>(&path).and_then(|mut request| {
+                            request.settings = settings;
+                            storage::write_yaml(&path, &request)
+                        })
+                    };
+                    weak.update(cx, |this, cx| match result {
+                        Ok(()) => {
+                            this.reload_collection(&root, window, cx);
+                            if let Some(open) = this.editor.read(cx).path().cloned()
+                                && open.starts_with(&path)
+                            {
+                                this.load_in_editor(&open, window, cx);
+                            }
+                        }
+                        Err(e) => notify_error(format!("{e:#}"), window, cx),
+                    })
+                    .ok();
+                    true
+                })
+        });
+    }
+
     /// Edits the auth of a collection (at its root) or a folder.
     fn edit_auth(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.collection_index_for(&path) else {
@@ -2368,6 +2505,7 @@ fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> 
         .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.auth_ellipsis", Workspace::edit_auth))
+        .item(item("settings_form.menu", Workspace::edit_settings))
         .separator()
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.delete_ellipsis", Workspace::delete_item))
@@ -2399,6 +2537,7 @@ fn request_menu(
     menu.item(item("ws.open", Workspace::select_request))
         .item(item("ws.rename_ellipsis", Workspace::rename_item))
         .item(item("ws.duplicate", Workspace::duplicate_request))
+        .item(item("settings_form.menu", Workspace::edit_settings))
         .separator()
         .item(item("ws.copy_response_reference", Workspace::copy_response_reference))
         .item(item("ws.copy_as_curl", |this, path, window, cx| {
@@ -2462,6 +2601,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
         .separator()
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.auth_ellipsis", Workspace::edit_auth))
+        .item(item("settings_form.menu", Workspace::edit_settings))
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .item(item("cookies.menu", Workspace::manage_cookies))
         .separator()
@@ -3520,7 +3660,14 @@ components:
         };
         storage::save_collection_file(&root, &file).unwrap();
         let public = storage::create_folder(&root, "Public").unwrap();
-        storage::write_folder(&public, &crate::model::FolderFile { auth: Auth::None }).unwrap();
+        storage::write_folder(
+            &public,
+            &crate::model::FolderFile {
+                auth: Auth::None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let open_request = storage::create_request(&public, &RequestFile::new("Status")).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
@@ -3714,7 +3861,7 @@ components:
         cx.run_until_parked();
         let clipboard = |cx: &mut TestAppContext| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
         let shared = clipboard(cx);
-        assert!(shared.starts_with("curl 'https://httpbin.org/json'"), "{shared}");
+        assert!(shared.starts_with("curl -L 'https://httpbin.org/json'"), "{shared}");
         assert!(shared.contains("-H 'Authorization: Bearer {{token}}'"), "{shared}");
         assert!(!shared.contains("t0p-secret"));
 
@@ -3943,6 +4090,110 @@ components:
             let url = editor.read(cx).url_for_test();
             assert!(url.read(cx).lsp().completion_provider.is_some());
         });
+    }
+
+    #[gpui_kit::test]
+    async fn request_settings_inherit_and_change_how_requests_are_sent(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+
+        // The collection doesn't follow redirects.
+        let mut file: CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        file.settings.follow_redirects = Some(false);
+        storage::save_collection_file(&root, &file).unwrap();
+        let (port, _received) = one_shot_server(
+            "HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/start");
+        storage::write_yaml(&get_json, &request).unwrap();
+
+        // A Docker folder sends over a Unix socket.
+        let docker = storage::create_folder(&root, "Docker").unwrap();
+        let socket = tmp.path().join("docker.sock");
+        storage::write_folder(
+            &docker,
+            &crate::model::FolderFile {
+                settings: RequestSettings {
+                    unix_socket: Some(socket.display().to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+                .unwrap();
+        });
+        let mut containers = RequestFile::new("Containers");
+        containers.url = "http://localhost/v1.45/containers/json".into();
+        let containers = storage::create_request(&docker, &containers).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let send = |cx: &mut TestAppContext, path: &Path| -> u16 {
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(path.to_path_buf(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            cx.update(|cx| match &editor.read(cx).shown_response().unwrap().0.outcome {
+                crate::response_cache::Outcome::Response { status, .. } => *status,
+                crate::response_cache::Outcome::Error { message } => panic!("{message}"),
+            })
+        };
+        assert_eq!(send(cx, &get_json), 302, "redirect not followed");
+        assert_eq!(send(cx, &containers), 200, "sent over the socket");
+
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.copy_as_curl(containers.clone(), false, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let curl = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(
+            curl.contains(&format!("--unix-socket '{}'", socket.display())),
+            "{curl}"
+        );
+
+        // The dialog edits a request's own settings.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.edit_settings(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.render_frame(cx);
+            window.click("dialog-ok", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| assert!(!window.has_active_dialog(cx)))
+            .unwrap();
+        let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
+        assert!(saved.settings.is_empty(), "nothing changed, nothing written");
     }
 
     #[gpui_kit::test]

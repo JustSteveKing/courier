@@ -831,3 +831,148 @@ request.history:
   es: "Historial (%{count})"
   de: "Verlauf (%{count})"
   fr: "Historique (%{count})"
+settings_form.menu:
+  en: Settings…
+  es: Ajustes…
+  de: Einstellungen…
+  fr: Réglages…
+settings_form.title:
+  en: "Settings for %{name}"
+  es: "Ajustes de %{name}"
+  de: "Einstellungen für %{name}"
+  fr: "Réglages de %{name}"
+settings_form.request_tooltip:
+  en: Request settings (redirects, TLS, proxy, Unix socket)
+  es: Ajustes de la solicitud (redirecciones, TLS, proxy, socket Unix)
+  de: Anfrage-Einstellungen (Weiterleitungen, TLS, Proxy, Unix-Socket)
+  fr: Réglages de la requête (redirections, TLS, proxy, socket Unix)
+settings_form.inherit:
+  en: "Inherit (%{value})"
+  es: "Heredar (%{value})"
+  de: "Erben (%{value})"
+  fr: "Hériter (%{value})"
+settings_form.heading_sending:
+  en: Sending
+  es: Envío
+  de: Senden
+  fr: Envoi
+settings_form.heading_tls:
+  en: TLS
+  es: TLS
+  de: TLS
+  fr: TLS
+settings_form.heading_connection:
+  en: Connection
+  es: Conexión
+  de: Verbindung
+  fr: Connexion
+settings_form.redirects:
+  en: Redirects
+  es: Redirecciones
+  de: Weiterleitungen
+  fr: Redirections
+settings_form.follow:
+  en: Follow
+  es: Seguir
+  de: Folgen
+  fr: Suivre
+settings_form.dont_follow:
+  en: Don't follow
+  es: No seguir
+  de: Nicht folgen
+  fr: Ne pas suivre
+settings_form.max_redirects:
+  en: Maximum redirects
+  es: Redirecciones máximas
+  de: Maximale Weiterleitungen
+  fr: Redirections maximales
+settings_form.timeout:
+  en: Timeout
+  es: Tiempo de espera
+  de: Zeitlimit
+  fr: Délai d’attente
+settings_form.seconds:
+  en: "seconds (default %{default})"
+  es: "segundos (predeterminado %{default})"
+  de: "Sekunden (Standard %{default})"
+  fr: "secondes (par défaut %{default})"
+settings_form.certificates:
+  en: Certificates
+  es: Certificados
+  de: Zertifikate
+  fr: Certificats
+settings_form.verify:
+  en: Verify
+  es: Verificar
+  de: Prüfen
+  fr: Vérifier
+settings_form.dont_verify:
+  en: Don't verify
+  es: No verificar
+  de: Nicht prüfen
+  fr: Ne pas vérifier
+settings_form.ca_certificate:
+  en: Extra CA certificate
+  es: Certificado de CA adicional
+  de: Zusätzliches CA-Zertifikat
+  fr: Certificat d’AC supplémentaire
+settings_form.client_certificate:
+  en: Client certificate
+  es: Certificado de cliente
+  de: Client-Zertifikat
+  fr: Certificat client
+settings_form.client_key:
+  en: Client key
+  es: Clave de cliente
+  de: Client-Schlüssel
+  fr: Clé client
+settings_form.proxy:
+  en: Proxy
+  es: Proxy
+  de: Proxy
+  fr: Proxy
+settings_form.proxy_system:
+  en: System (HTTP_PROXY)
+  es: Del sistema (HTTP_PROXY)
+  de: System (HTTP_PROXY)
+  fr: Système (HTTP_PROXY)
+settings_form.proxy_none:
+  en: No proxy
+  es: Sin proxy
+  de: Kein Proxy
+  fr: Aucun proxy
+settings_form.proxy_custom:
+  en: Custom
+  es: Personalizado
+  de: Eigener
+  fr: Personnalisé
+settings_form.proxy_url_missing:
+  en: Enter the proxy URL, or pick another proxy option.
+  es: Introduce la URL del proxy o elige otra opción.
+  de: Gib die Proxy-URL ein oder wähle eine andere Option.
+  fr: Saisissez l’URL du proxy ou choisissez une autre option.
+settings_form.unix_socket:
+  en: Unix socket
+  es: Socket Unix
+  de: Unix-Socket
+  fr: Socket Unix
+settings_form.browse:
+  en: Choose a file
+  es: Elegir un archivo
+  de: Datei wählen
+  fr: Choisir un fichier
+settings_form.paths_hint:
+  en: Certificate paths are relative to the project folder. A Unix socket sends every request to it instead of over the network; use http://localhost in the URL.
+  es: Las rutas de certificados son relativas a la carpeta del proyecto. Un socket Unix recibe todas las solicitudes en lugar de la red; usa http://localhost en la URL.
+  de: Zertifikatspfade sind relativ zum Projektordner. Mit einem Unix-Socket gehen alle Anfragen dorthin statt übers Netz; nutze http://localhost in der URL.
+  fr: Les chemins des certificats sont relatifs au dossier du projet. Un socket Unix reçoit toutes les requêtes au lieu du réseau ; utilisez http://localhost dans l’URL.
+settings_form.not_a_number:
+  en: "%{field} must be a whole number."
+  es: "%{field} debe ser un número entero."
+  de: "%{field} muss eine ganze Zahl sein."
+  fr: "%{field} doit être un nombre entier."
+settings_form.outside_project:
+  en: "%{path} is outside the project, so its full path is saved and the collection won't find it on other machines."
+  es: "%{path} está fuera del proyecto, así que se guarda su ruta completa y la colección no lo encontrará en otras máquinas."
+  de: "%{path} liegt außerhalb des Projekts; der volle Pfad wird gespeichert, auf anderen Rechnern findet die Sammlung die Datei nicht."
+  fr: "%{path} est hors du projet : son chemin complet est enregistré et la collection ne le trouvera pas sur d’autres machines."
