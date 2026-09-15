@@ -126,10 +126,39 @@ impl RequestEditor {
         let Some(live) = self.state().and_then(|s| s.live.as_ref()) else {
             return;
         };
-        let (text, _) = interpolate(&text, &live.variables);
-        if let Some(handle) = &live.handle {
-            handle.send(WsPayload::Text(text));
+        if crate::chain::calls_in_texts(&[&text]).is_empty() {
+            let (text, _) = interpolate(&text, &live.variables);
+            if let Some(handle) = &live.handle {
+                handle.send(WsPayload::Text(text));
+            }
+            return;
         }
+        // `{{ response(…) }}` and other calls are evaluated when the message is sent.
+        let mut context = self.chain_context(cx);
+        context.variables = live.variables.clone();
+        let evaluating = cx
+            .background_executor()
+            .spawn(async move { crate::chain::evaluate_text(&text, &context).await.map(|r| (text, r)) });
+        cx.spawn(async move |this, cx| {
+            let result = evaluating.await;
+            this.update(cx, |this, cx| match result {
+                Ok((text, (values, sent))) => {
+                    this.take_chained(sent, cx);
+                    let Some(live) = this.state().and_then(|s| s.live.as_ref()) else {
+                        return;
+                    };
+                    let mut variables = live.variables.clone();
+                    variables.extend(values);
+                    let (text, _) = interpolate(&text, &variables);
+                    if let Some(handle) = &live.handle {
+                        handle.send(WsPayload::Text(text));
+                    }
+                }
+                Err(message) => cx.emit(super::RequestEditorEvent::Error(message)),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn select_ws_message(&mut self, seq: usize, window: &mut Window, cx: &mut Context<Self>) {

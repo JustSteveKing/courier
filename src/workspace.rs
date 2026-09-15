@@ -4295,7 +4295,7 @@ components:
         request.headers = crate::model::headers_from_text("Authorization: Bearer abc");
         request.body = Some(crate::model::Body {
             kind: crate::model::BodyKind::Json,
-            content: "{\"hello\": \"{{base_url}}\"}".into(),
+            content: "{\"hello\": \"{{base_url}}\", \"id\": \"{{ uuid() }}\"}".into(),
         });
         storage::write_yaml(&get_json, &request).unwrap();
 
@@ -4338,8 +4338,12 @@ components:
         cx.update(|cx| {
             let detail = editor.read(cx).stream_detail_text(cx);
             assert!(
-                detail.contains("echo: {\"hello\": \"https://httpbin.org\"}"),
+                detail.contains("echo: {\"hello\": \"https://httpbin.org\", \"id\": \""),
                 "{detail}"
+            );
+            assert!(
+                !detail.contains("uuid()"),
+                "functions in messages are evaluated: {detail}"
             );
         });
 

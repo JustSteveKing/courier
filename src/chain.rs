@@ -3,7 +3,8 @@
 //!
 //! - `{{ response("Login", "$.token") }}`: the first JSONPath match in the latest response of
 //!   the request named "Login" (or at that path in the collection). Sends it first if it has
-//!   no response yet; add `"always"` to send it every time.
+//!   no response yet. A third argument changes when it's sent: `"always"`, or a maximum age
+//!   such as `"30s"`, `"5m"`, `"1h"` or `"1d"`.
 //! - `{{ response_header("Login", "Location") }}`: a header from that response.
 //! - `{{ uuid() }}`, `{{ timestamp() }}` (Unix seconds), `{{ now() }}` (RFC 3339, UTC).
 //!
@@ -26,17 +27,58 @@ use crate::transport;
 /// How deep one request's dependencies may go.
 const MAX_DEPTH: usize = 5;
 
+/// When a referenced request is sent rather than its latest response used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Freshness {
+    /// Only when it has no response yet.
+    Latest,
+    /// Every time.
+    Always,
+    /// When its latest response is older than this many seconds.
+    MaxAge(u64),
+}
+
+impl Freshness {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "latest" => return Some(Self::Latest),
+            "always" => return Some(Self::Always),
+            _ => {}
+        }
+        let text = text.trim();
+        let unit = text.chars().last()?;
+        let amount: u64 = text[..text.len() - unit.len_utf8()].trim().parse().ok()?;
+        let seconds = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86_400,
+            _ => return None,
+        };
+        Some(Self::MaxAge(amount * seconds))
+    }
+
+    /// Whether a response received at `received_at` can be used at `now`.
+    pub fn allows(self, received_at: u64, now: u64) -> bool {
+        match self {
+            Self::Latest => true,
+            Self::Always => false,
+            Self::MaxAge(max) => now.saturating_sub(received_at) <= max,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Call {
     Response {
         request: String,
         path: String,
-        always: bool,
+        freshness: Freshness,
     },
     ResponseHeader {
         request: String,
         header: String,
-        always: bool,
+        freshness: Freshness,
     },
     Uuid,
     Timestamp,
@@ -62,24 +104,24 @@ pub fn parse_call(inner: &str) -> Option<Result<Call, String>> {
             Ok(())
         }
     };
-    let always = |ix: usize| match args.get(ix).map(String::as_str) {
-        None | Some("latest") => Ok(false),
-        Some("always") => Ok(true),
-        Some(other) => Err(format!("{name}(): \"{other}\" should be \"latest\" or \"always\"")),
+    let freshness = |ix: usize| match args.get(ix) {
+        None => Ok(Freshness::Latest),
+        Some(text) => Freshness::parse(text)
+            .ok_or_else(|| format!("{name}(): \"{text}\" should be \"latest\", \"always\" or an age like \"5m\"")),
     };
     Some(match name {
         "response" => arity(2, 3).and_then(|_| {
             Ok(Call::Response {
                 request: args[0].clone(),
                 path: args[1].clone(),
-                always: always(2)?,
+                freshness: freshness(2)?,
             })
         }),
         "response_header" => arity(2, 3).and_then(|_| {
             Ok(Call::ResponseHeader {
                 request: args[0].clone(),
                 header: args[1].clone(),
-                always: always(2)?,
+                freshness: freshness(2)?,
             })
         }),
         "uuid" => arity(0, 0).map(|_| Call::Uuid),
@@ -116,8 +158,30 @@ fn parse_args(text: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-/// Every `{{ … }}` call in the text of a request, by the exact inner text interpolation
-/// will look up.
+/// Every `{{ … }}` call in `texts`, once each, by the exact inner text interpolation will
+/// look up.
+pub fn calls_in_texts(texts: &[&str]) -> Vec<(String, Result<Call, String>)> {
+    let mut seen = HashSet::new();
+    let mut calls = Vec::new();
+    for text in texts {
+        let mut rest = *text;
+        while let Some(start) = rest.find("{{") {
+            let Some(len) = rest[start + 2..].find("}}") else {
+                break;
+            };
+            let inner = rest[start + 2..start + 2 + len].trim();
+            if let Some(call) = parse_call(inner)
+                && seen.insert(inner.to_string())
+            {
+                calls.push((inner.to_string(), call));
+            }
+            rest = &rest[start + 2 + len + 2..];
+        }
+    }
+    calls
+}
+
+/// Every `{{ … }}` call in the text of a request.
 pub fn calls_in(file: &RequestFile) -> Vec<(String, Result<Call, String>)> {
     let mut texts: Vec<&str> = vec![&file.url];
     for header in file.headers.iter().filter(|h| h.enabled) {
@@ -137,24 +201,7 @@ pub fn calls_in(file: &RequestFile) -> Vec<(String, Result<Call, String>)> {
         Auth::ApiKey { name, value, .. } => texts.extend([name.as_str(), value.as_str()]),
         Auth::Inherit | Auth::None => {}
     }
-    let mut seen = HashSet::new();
-    let mut calls = Vec::new();
-    for text in texts {
-        let mut rest = text;
-        while let Some(start) = rest.find("{{") {
-            let Some(len) = rest[start + 2..].find("}}") else {
-                break;
-            };
-            let inner = rest[start + 2..start + 2 + len].trim();
-            if let Some(call) = parse_call(inner)
-                && seen.insert(inner.to_string())
-            {
-                calls.push((inner.to_string(), call));
-            }
-            rest = &rest[start + 2 + len + 2..];
-        }
-    }
-    calls
+    calls_in_texts(&texts)
 }
 
 /// What evaluating calls needs: the collection, the variables (secret values included), the
@@ -178,7 +225,14 @@ pub type Sent = Vec<(PathBuf, StoredResponse)>;
 /// call text (to add to the variables) and the responses it sent.
 pub async fn evaluate(file: &RequestFile, context: &Context) -> Result<(Variables, Sent), String> {
     let mut sent = Sent::new();
-    let values = evaluate_in(file, context, &mut Vec::new(), &mut sent).await?;
+    let values = evaluate_calls(calls_in(file), context, &mut Vec::new(), &mut sent).await?;
+    Ok((values, sent))
+}
+
+/// Evaluates the calls in a piece of text, such as a WebSocket message.
+pub async fn evaluate_text(text: &str, context: &Context) -> Result<(Variables, Sent), String> {
+    let mut sent = Sent::new();
+    let values = evaluate_calls(calls_in_texts(&[text]), context, &mut Vec::new(), &mut sent).await?;
     Ok((values, sent))
 }
 
@@ -188,22 +242,35 @@ async fn evaluate_in(
     visiting: &mut Vec<PathBuf>,
     sent: &mut Sent,
 ) -> Result<Variables, String> {
+    evaluate_calls(calls_in(file), context, visiting, sent).await
+}
+
+async fn evaluate_calls(
+    calls: Vec<(String, Result<Call, String>)>,
+    context: &Context,
+    visiting: &mut Vec<PathBuf>,
+    sent: &mut Sent,
+) -> Result<Variables, String> {
     let mut values = Variables::new();
-    for (text, call) in calls_in(file) {
+    for (text, call) in calls {
         let value = match call? {
             Call::Uuid => uuid::Uuid::new_v4().to_string(),
             Call::Timestamp => response_cache::now().to_string(),
             Call::Now => now_rfc3339(),
-            Call::Response { request, path, always } => {
-                let response = response_of(&request, always, context, visiting, sent).await?;
+            Call::Response {
+                request,
+                path,
+                freshness,
+            } => {
+                let response = response_of(&request, freshness, context, visiting, sent).await?;
                 json_value(&response, &path).map_err(|e| format!("response(\"{request}\"): {e}"))?
             }
             Call::ResponseHeader {
                 request,
                 header,
-                always,
+                freshness,
             } => {
-                let response = response_of(&request, always, context, visiting, sent).await?;
+                let response = response_of(&request, freshness, context, visiting, sent).await?;
                 let Outcome::Response { headers, .. } = &response.outcome else {
                     return Err(format!("response_header(\"{request}\"): its last send failed"));
                 };
@@ -219,29 +286,31 @@ async fn evaluate_in(
     Ok(values)
 }
 
-/// The latest response of the request `reference`, sending it when asked to or when it has
-/// never been sent.
+/// The latest response of the request `reference`, sending it when it has none or when
+/// `freshness` rules the latest out.
 async fn response_of(
     reference: &str,
-    always: bool,
+    freshness: Freshness,
     context: &Context,
     visiting: &mut Vec<PathBuf>,
     sent: &mut Sent,
 ) -> Result<StoredResponse, String> {
     let path = find_request(&context.root, reference)?;
-    if !always {
-        if let Some((_, response)) = sent.iter().find(|(p, _)| *p == path) {
-            return Ok(response.clone());
-        }
-        if let Some(response) = context.latest.get(&path) {
-            return Ok(response.clone());
-        }
-        if let Some(cache) = &context.cache {
-            let key = response_cache::cache_key(context.collection_id.as_deref(), &context.root, &path);
-            if let Some(response) = cache.load(&key) {
-                return Ok(response);
-            }
-        }
+    // Sent during this evaluation: always fresh enough, and never sent twice.
+    if let Some((_, response)) = sent.iter().find(|(p, _)| *p == path) {
+        return Ok(response.clone());
+    }
+    let now = response_cache::now();
+    let latest = context.latest.get(&path).cloned().or_else(|| {
+        let cache = context.cache.as_ref()?;
+        cache.load(&response_cache::cache_key(
+            context.collection_id.as_deref(),
+            &context.root,
+            &path,
+        ))
+    });
+    if let Some(response) = latest.filter(|r| freshness.allows(r.received_at, now)) {
+        return Ok(response);
     }
     if visiting.contains(&path) {
         return Err(format!("\"{reference}\" depends on itself"));
@@ -422,7 +491,7 @@ mod tests {
             Some(Ok(Call::Response {
                 request: "Login".into(),
                 path: "$.data[\"token\"]".into(),
-                always: false
+                freshness: Freshness::Latest
             }))
         );
         assert_eq!(
@@ -430,7 +499,7 @@ mod tests {
             Some(Ok(Call::ResponseHeader {
                 request: "auth/login.yaml".into(),
                 header: "Location".into(),
-                always: true
+                freshness: Freshness::Always
             }))
         );
         assert_eq!(parse_call("uuid()"), Some(Ok(Call::Uuid)));
@@ -462,6 +531,26 @@ mod tests {
             ["response(\"Login\", \"$.id\")", "uuid()"],
             "each once, disabled headers skipped"
         );
+    }
+
+    #[test]
+    fn freshness_decides_when_to_resend() {
+        assert_eq!(Freshness::parse("5m"), Some(Freshness::MaxAge(300)));
+        assert_eq!(Freshness::parse(" 2h "), Some(Freshness::MaxAge(7200)));
+        assert_eq!(Freshness::parse("latest"), Some(Freshness::Latest));
+        assert_eq!(Freshness::parse("5 minutes"), None);
+        assert_eq!(Freshness::parse("m"), None);
+        assert!(Freshness::MaxAge(60).allows(1_000, 1_060));
+        assert!(!Freshness::MaxAge(60).allows(1_000, 1_061));
+        assert!(Freshness::Latest.allows(0, u64::MAX));
+        assert!(!Freshness::Always.allows(10, 10));
+        assert!(matches!(
+            parse_call("response(\"Login\", \"$.token\", \"10m\")"),
+            Some(Ok(Call::Response {
+                freshness: Freshness::MaxAge(600),
+                ..
+            }))
+        ));
     }
 
     #[test]

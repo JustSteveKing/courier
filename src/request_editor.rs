@@ -1051,22 +1051,7 @@ impl RequestEditor {
         let store = self.secret_store.clone();
         // Only requests that call functions need the chaining context (and its copies of the
         // latest responses).
-        let chaining = (!chain::calls_in(&file).is_empty()).then(|| chain::Context {
-            root: self.collection_root.clone().unwrap_or_default(),
-            variables: Variables::new(),
-            latest: self
-                .responses
-                .iter()
-                .filter_map(|(path, state)| Some((path.clone(), state.response.clone()?)))
-                .collect(),
-            cache: self.cache(cx).cloned(),
-            collection_id: self
-                .state()
-                .and_then(|s| s.cache_key.as_ref())
-                .and_then(|k| k.collection_id.clone()),
-            timeout: self.timeout(cx),
-            client: self.cookies.as_ref().map(|jar| jar.client().clone()),
-        });
+        let chaining = (!chain::calls_in(&file).is_empty()).then(|| self.chain_context(cx));
         cx.background_executor().spawn(async move {
             if !secrets.is_empty() {
                 let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
@@ -1092,9 +1077,29 @@ impl RequestEditor {
         self.send_with(false, window, cx);
     }
 
+    /// What evaluating `{{ function() }}` calls needs; its variables are filled in later.
+    pub(super) fn chain_context(&self, cx: &App) -> chain::Context {
+        chain::Context {
+            root: self.collection_root.clone().unwrap_or_default(),
+            variables: Variables::new(),
+            latest: self
+                .responses
+                .iter()
+                .filter_map(|(path, state)| Some((path.clone(), state.response.clone()?)))
+                .collect(),
+            cache: self.cache(cx).cloned(),
+            collection_id: self
+                .state()
+                .and_then(|s| s.cache_key.as_ref())
+                .and_then(|k| k.collection_id.clone()),
+            timeout: self.timeout(cx),
+            client: self.cookies.as_ref().map(|jar| jar.client().clone()),
+        }
+    }
+
     /// Keeps responses sent while chaining as those requests' latest, saving them like any
     /// other response.
-    fn take_chained(&mut self, sent: chain::Sent, cx: &mut Context<Self>) {
+    pub(super) fn take_chained(&mut self, sent: chain::Sent, cx: &mut Context<Self>) {
         let (Some(root), cache) = (self.collection_root.clone(), self.cache(cx).cloned()) else {
             return;
         };
