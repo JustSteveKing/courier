@@ -3663,6 +3663,67 @@ components:
     }
 
     #[gpui_kit::test]
+    async fn earlier_responses_stay_in_the_history(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let get_json = root.join("get-json.yaml");
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let send = |cx: &mut TestAppContext, body: &'static str, history: usize| {
+            let (port, _received) = http_server(body);
+            let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
+            request.url = format!("http://127.0.0.1:{port}/");
+            storage::write_yaml(&get_json, &request).unwrap();
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(get_json.clone(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            for _ in 0..300 {
+                cx.run_until_parked();
+                let done = cx.update(|cx| {
+                    let editor = editor.read(cx);
+                    !editor.is_sending() && editor.shown_response().is_some() && editor.history_len() == history
+                });
+                if done {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        send(cx, "{\"version\":1}", 0);
+        send(cx, "{\"version\":2}", 1);
+        let body = |cx: &mut TestAppContext| cx.update(|cx| editor.read(cx).response_body_text(cx));
+        assert_eq!(cx.update(|cx| editor.read(cx).history_len()), 1);
+        assert!(body(cx).contains("2"));
+
+        cx.update_window(window, |_, window, cx| {
+            editor.update(cx, |editor, cx| editor.view_history(Some(0), window, cx));
+        })
+        .unwrap();
+        assert!(body(cx).contains("\"version\": 1"), "{}", body(cx));
+        cx.update_window(window, |_, window, cx| {
+            editor.update(cx, |editor, cx| editor.view_history(None, window, cx));
+        })
+        .unwrap();
+        assert!(body(cx).contains("\"version\": 2"));
+
+        // The history is saved with the response and comes back after a restart.
+        let (restarted, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
+        })
+        .unwrap();
+        let editor = cx.update(|cx| restarted.read(cx).editor.clone());
+        assert_eq!(cx.update(|cx| editor.read(cx).history_len()), 1);
+    }
+
+    #[gpui_kit::test]
     async fn command_palette_jumps_to_a_request(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let paths = setup(cx, tmp.path());

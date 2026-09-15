@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{EditorState, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use indexmap::IndexMap;
@@ -82,6 +83,10 @@ const PROGRESS_REPAINT: Duration = Duration::from_millis(100);
 #[derive(Default)]
 struct ResponseState {
     response: Option<StoredResponse>,
+    /// Earlier responses, newest first.
+    history: Vec<StoredResponse>,
+    /// An earlier response being looked at instead of the latest, by index into `history`.
+    viewing: Option<usize>,
     /// Loaded from the cache rather than received in this session.
     restored: bool,
     missing_variables: Vec<String>,
@@ -157,12 +162,21 @@ impl Live {
 }
 
 impl ResponseState {
+    /// The response on screen: the latest, or an earlier one picked from the history.
+    fn shown(&self) -> Option<&StoredResponse> {
+        self.viewing
+            .and_then(|ix| self.history.get(ix))
+            .or(self.response.as_ref())
+    }
+
     fn outcome(&self) -> Option<&Outcome> {
-        self.response.as_ref().map(|r| &r.outcome)
+        self.shown().map(|r| &r.outcome)
     }
 
     fn clear(&mut self) {
         self.response = None;
+        self.history.clear();
+        self.viewing = None;
         self.restored = false;
         self.missing_variables.clear();
     }
@@ -172,15 +186,22 @@ impl ResponseState {
         if self.response.is_none()
             && self.live.is_none()
             && let Some(key) = &self.cache_key
-            && let Some(response) = cache.load(key)
         {
-            self.response = Some(response);
-            self.restored = true;
+            let mut saved = cache.load_history(key).into_iter();
+            if let Some(response) = saved.next() {
+                self.response = Some(response);
+                self.history = saved.collect();
+                self.restored = true;
+            }
         }
     }
 
     fn finish(&mut self, response: StoredResponse) {
-        self.response = Some(response);
+        if let Some(previous) = self.response.replace(response) {
+            self.history.insert(0, previous);
+            self.history.truncate(response_cache::HISTORY_LEN);
+        }
+        self.viewing = None;
         self.restored = false;
         self.live = None;
     }
@@ -518,7 +539,7 @@ impl RequestEditor {
 
     #[cfg(test)]
     pub fn shown_response(&self) -> Option<(&StoredResponse, bool)> {
-        self.state().and_then(|s| s.response.as_ref().map(|r| (r, s.restored)))
+        self.state().and_then(|s| s.shown().map(|r| (r, s.restored)))
     }
 
     /// Events received and whether the stream has ended, when showing an event stream.
@@ -611,6 +632,11 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn history_len(&self) -> usize {
+        self.state().map_or(0, |s| s.history.len())
+    }
+
+    #[cfg(test)]
     pub fn url_for_test(&self) -> Entity<EditorState> {
         self.url.clone()
     }
@@ -686,7 +712,7 @@ impl RequestEditor {
     /// The response body narrowed by `expression`, updating the filter status. Falls back to
     /// the whole body when the expression doesn't apply.
     fn filtered_body(&mut self, expression: &str) -> String {
-        let (Some(path), Some(response)) = (self.path.clone(), self.state().and_then(|s| s.response.as_ref())) else {
+        let (Some(path), Some(response)) = (self.path.clone(), self.state().and_then(ResponseState::shown)) else {
             return String::new();
         };
         let Outcome::Response { body, .. } = &response.outcome else {
@@ -1357,6 +1383,15 @@ impl RequestEditor {
 
     /// The status line above the response. Event streams show their own status in their view,
     /// so this shows only warnings for them.
+    /// Shows the latest response (`None`) or an earlier one from the history.
+    pub fn view_history(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.state_mut() {
+            state.viewing = index.filter(|ix| *ix < state.history.len());
+        }
+        self.parsed_body = None;
+        self.show_response(window, cx);
+    }
+
     fn render_filter_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (status, color) = match &self.filter_status {
@@ -1399,7 +1434,7 @@ impl RequestEditor {
         let state = self.state();
         let live = state.and_then(|s| s.live.as_ref());
         let sending = live.is_some();
-        let response = state.and_then(|s| s.response.as_ref());
+        let response = state.and_then(ResponseState::shown);
         let (line, color) = match response.map(|r| (r, &r.outcome)) {
             _ if let Some(live) = live => match &live.head {
                 Some((status, reason, _)) => (
@@ -1433,7 +1468,18 @@ impl RequestEditor {
                 if *status < 400 { theme.success } else { theme.danger },
             ),
         };
-        let restored = state.filter(|s| s.restored && !sending).and(response);
+        let restored = state
+            .filter(|s| (s.restored || s.viewing.is_some()) && !sending)
+            .and(response);
+        let history = state.filter(|s| !s.history.is_empty() && !sending).map(|s| {
+            std::iter::once(s.response.as_ref())
+                .flatten()
+                .chain(&s.history)
+                .map(history_label)
+                .collect::<Vec<_>>()
+        });
+        let viewing = state.and_then(|s| s.viewing);
+        let weak = cx.entity().downgrade();
         let truncated = matches!(
             response.map(|r| &r.outcome),
             Some(Outcome::Response { truncated: true, .. })
@@ -1447,6 +1493,27 @@ impl RequestEditor {
             .gap_x_3()
             .text_sm()
             .when(!event_stream, |this| this.child(div().text_color(color).child(line)))
+            .when_some(history, |this, labels| {
+                this.child(
+                    Button::new("response-history")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Undo2)
+                        .label(t!("request.history", count = labels.len() - 1).to_string())
+                        .dropdown_menu(move |menu, _, _| {
+                            labels.iter().enumerate().fold(menu, |menu, (ix, label)| {
+                                let weak = weak.clone();
+                                // Index 0 is the latest; earlier ones are history[ix - 1].
+                                let index = ix.checked_sub(1);
+                                menu.item(PopupMenuItem::new(label.clone()).checked(index == viewing).on_click(
+                                    move |_, window, cx| {
+                                        weak.update(cx, |this, cx| this.view_history(index, window, cx)).ok();
+                                    },
+                                ))
+                            })
+                        }),
+                )
+            })
             .when_some(restored, |this, response| {
                 this.child(
                     div()
@@ -1702,6 +1769,16 @@ fn saved_age(seconds: u64) -> String {
         3600..86400 => t!("request.saved_hours_ago", count = seconds / 3600).to_string(),
         _ => t!("request.saved_days_ago", count = seconds / 86400).to_string(),
     }
+}
+
+/// "200 OK · 34 ms · saved 5 min ago", for the history menu.
+fn history_label(response: &StoredResponse) -> String {
+    let status = match &response.outcome {
+        Outcome::Response { status, reason, .. } => format!("{status} {reason}"),
+        Outcome::Error { .. } => t!("request.status_failed").to_string(),
+    };
+    let age = saved_age(response_cache::now().saturating_sub(response.received_at));
+    format!("{status}  ·  {}  ·  {age}", format_duration(response.elapsed_ms))
 }
 
 fn format_size(bytes: usize) -> String {

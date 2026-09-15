@@ -24,6 +24,10 @@ use crate::credentials::looks_sensitive_name;
 
 /// Bodies beyond this are cut before saving to disk (the in-memory copy stays whole).
 pub const MAX_SAVED_BODY: usize = 2 * 1024 * 1024;
+/// Responses kept per request: the latest plus this many earlier ones.
+pub const HISTORY_LEN: usize = 10;
+/// Earlier responses keep less of their body than the latest.
+const MAX_HISTORY_BODY: usize = 256 * 1024;
 pub const MASK: &str = "••••••";
 
 /// Files this recent are never tidied, so a response saved for a request created moments
@@ -80,6 +84,11 @@ impl StoredResponse {
 
     /// The copy that is safe to write to disk: sensitive headers masked, body capped.
     pub fn for_disk(&self) -> Self {
+        self.truncated_to(MAX_SAVED_BODY)
+    }
+
+    /// Masks sensitive headers and cuts the body to `max` bytes.
+    fn truncated_to(&self, max: usize) -> Self {
         let mut copy = self.clone();
         if let Outcome::Response {
             headers,
@@ -93,8 +102,8 @@ impl StoredResponse {
                     *value = MASK.to_string();
                 }
             }
-            if body.len() > MAX_SAVED_BODY {
-                let mut end = MAX_SAVED_BODY;
+            if body.len() > max {
+                let mut end = max;
                 while !body.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -134,6 +143,9 @@ struct CacheFile {
     collection_id: Option<String>,
     request: String,
     response: StoredResponse,
+    /// Earlier responses, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history: Vec<StoredResponse>,
 }
 
 /// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
@@ -201,10 +213,21 @@ impl ResponseCache {
             .mode(0o700)
             .create(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
+        // The response it replaces moves into the history.
+        let mut history = self
+            .read(&key.key)
+            .map(|previous| {
+                std::iter::once(previous.response)
+                    .chain(previous.history)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        history.truncate(HISTORY_LEN);
         let file = CacheFile {
             collection_id: key.collection_id.clone(),
             request: key.request.clone(),
             response: response.for_disk(),
+            history: history.iter().map(|r| r.truncated_to(MAX_HISTORY_BODY)).collect(),
         };
         let json = serde_json::to_vec(&file)?;
         let path = self.file(&key.key);
@@ -222,13 +245,23 @@ impl ResponseCache {
         Ok(())
     }
 
+    fn read(&self, key: &str) -> Option<CacheFile> {
+        let bytes = fs::read(self.file(key)).ok()?;
+        serde_json::from_slice::<CacheFile>(&bytes)
+            .inspect_err(|e| eprintln!("ignoring unreadable cached response {key}: {e}"))
+            .ok()
+    }
+
     /// A missing or unreadable entry is simply no saved response.
     pub fn load(&self, key: &CacheKey) -> Option<StoredResponse> {
-        let bytes = fs::read(self.file(&key.key)).ok()?;
-        serde_json::from_slice::<CacheFile>(&bytes)
-            .inspect_err(|e| eprintln!("ignoring unreadable cached response {}: {e}", key.key))
-            .ok()
-            .map(|file| file.response)
+        self.read(&key.key).map(|file| file.response)
+    }
+
+    /// The saved response and the earlier ones, newest first.
+    pub fn load_history(&self, key: &CacheKey) -> Vec<StoredResponse> {
+        self.read(&key.key)
+            .map(|file| std::iter::once(file.response).chain(file.history).collect())
+            .unwrap_or_default()
     }
 
     /// Deletes responses that no longer belong to anything:
@@ -324,6 +357,33 @@ mod tests {
                 truncated: false,
             },
         }
+    }
+
+    #[test]
+    fn keeps_earlier_responses_as_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ResponseCache::new(tmp.path());
+        let key = cache_key(Some("c1"), Path::new("/api"), Path::new("/api/users.yaml"));
+        assert!(cache.load_history(&key).is_empty());
+        for n in 0..(HISTORY_LEN + 5) {
+            cache.save(&key, &response(&"x".repeat(300 * 1024), n as u64)).unwrap();
+        }
+        let history = cache.load_history(&key);
+        assert_eq!(history.len(), HISTORY_LEN + 1, "the latest plus {HISTORY_LEN} earlier");
+        let times: Vec<u64> = history.iter().map(|r| r.received_at).take(3).collect();
+        assert_eq!(times, [14, 13, 12], "newest first");
+        assert_eq!(cache.load(&key).unwrap().received_at, 14);
+        let Outcome::Response { body, truncated, .. } = &history[1].outcome else {
+            panic!()
+        };
+        assert!(
+            body.len() <= MAX_HISTORY_BODY && *truncated,
+            "earlier bodies are trimmed"
+        );
+        let Outcome::Response { body, .. } = &history[0].outcome else {
+            panic!()
+        };
+        assert_eq!(body.len(), 300 * 1024, "the latest keeps its body");
     }
 
     #[test]

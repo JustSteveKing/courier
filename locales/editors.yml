@@ -826,3 +826,8 @@ request.curl_no_websocket:
   es: curl no puede abrir WebSockets
   de: curl kann keine WebSockets öffnen
   fr: curl ne peut pas ouvrir de WebSockets
+request.history:
+  en: "History (%{count})"
+  es: "Historial (%{count})"
+  de: "Verlauf (%{count})"
+  fr: "Historique (%{count})"
