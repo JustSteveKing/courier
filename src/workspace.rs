@@ -128,6 +128,9 @@ pub struct Workspace {
     env_watchers: HashMap<PathBuf, notify::RecommendedWatcher>,
     /// What git makes of each collection, by root. Read in the background, never blocking.
     git: HashMap<PathBuf, crate::git::Status>,
+    /// Keyboard focus for the sidebar, and the row the arrow keys are on.
+    sidebar_focus: FocusHandle,
+    cursor: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -216,6 +219,8 @@ impl Workspace {
             cookies: HashMap::new(),
             env_watchers: HashMap::new(),
             git: HashMap::new(),
+            sidebar_focus: cx.focus_handle(),
+            cursor: None,
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
@@ -1186,6 +1191,129 @@ impl Workspace {
         match crate::keymap::write_example(&self.paths) {
             Ok(path) => cx.open_url(&format!("file://{}", path.display())),
             Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
+    // MARK: Moving around
+
+    /// Every row the arrow keys can land on, in the order they're drawn: collections,
+    /// their open folders, and the requests inside.
+    fn navigable_rows(&self, cx: &App) -> Vec<PathBuf> {
+        fn walk(this: &Workspace, items: &[Item], query: Option<&str>, rows: &mut Vec<PathBuf>) {
+            for item in items {
+                match item {
+                    Item::Folder { name, path, children } => {
+                        let matches = query.is_none_or(|query| {
+                            name.to_lowercase().contains(query) || Workspace::folder_matches(children, query)
+                        });
+                        if !matches {
+                            continue;
+                        }
+                        rows.push(path.clone());
+                        if query.is_some() || !this.collapsed.contains(path) {
+                            walk(this, children, query, rows);
+                        }
+                    }
+                    Item::Request { path, request } => {
+                        if query.is_none_or(|query| Workspace::request_matches(request, query)) {
+                            rows.push(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let query = self.search_query(cx);
+        let mut rows = Vec::new();
+        for collection in &self.collections {
+            let query = query.as_deref();
+            if query.is_some_and(|query| {
+                !Self::folder_matches(&collection.items, query) && !collection.file.name.to_lowercase().contains(query)
+            }) {
+                continue;
+            }
+            rows.push(collection.root.clone());
+            if query.is_some() || !self.collapsed.contains(&collection.root) {
+                walk(self, &collection.items, query, &mut rows);
+            }
+        }
+        rows
+    }
+
+    fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor.is_none() {
+            self.cursor = self
+                .editor()
+                .read(cx)
+                .path()
+                .cloned()
+                .or_else(|| self.navigable_rows(cx).first().cloned());
+        }
+        self.sidebar_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Moves the cursor `by` rows, starting from the open request when it has nowhere to be.
+    fn move_cursor(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.navigable_rows(cx);
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .cursor
+            .as_ref()
+            .and_then(|cursor| rows.iter().position(|row| row == cursor));
+        let next = match current {
+            Some(index) => (index as isize + by).clamp(0, rows.len() as isize - 1) as usize,
+            None if by > 0 => 0,
+            None => rows.len() - 1,
+        };
+        self.cursor = Some(rows[next].clone());
+        self.sidebar_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Enter on a request opens it; on a folder or collection it opens or closes it.
+    fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        if self.find_request(&cursor).is_some() {
+            self.select_request(cursor, window, cx);
+            // Opening a request hands the keyboard to the editor, which is where you were going.
+            self.editor().update(cx, |editor, cx| editor.focus_url(window, cx));
+            return;
+        }
+        if !self.collapsed.remove(&cursor) {
+            self.collapsed.insert(cursor);
+        }
+        cx.notify();
+    }
+
+    /// Left closes a folder, or steps out to the folder holding this row.
+    fn collapse_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        let is_folder = self.find_request(&cursor).is_none();
+        if is_folder && !self.collapsed.contains(&cursor) {
+            self.collapsed.insert(cursor);
+        } else if let Some(parent) = cursor.parent().map(Path::to_path_buf)
+            && self.navigable_rows(cx).contains(&parent)
+        {
+            self.cursor = Some(parent);
+        }
+        self.sidebar_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn expand_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        if self.find_request(&cursor).is_none() && self.collapsed.remove(&cursor) {
+            cx.notify();
+        } else {
+            self.move_cursor(1, window, cx);
         }
     }
 
@@ -2808,6 +2936,15 @@ impl Workspace {
                 }
             }));
         v_flex()
+            .key_context("Sidebar")
+            .track_focus(&self.sidebar_focus)
+            .on_action(cx.listener(|this, _: &palette::SelectNext, window, cx| this.move_cursor(1, window, cx)))
+            .on_action(cx.listener(|this, _: &palette::SelectPrevious, window, cx| this.move_cursor(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &palette::OpenSelected, window, cx| this.open_selected(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &palette::CollapseSelected, window, cx| this.collapse_selected(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &palette::ExpandSelected, window, cx| this.expand_selected(window, cx)))
             .relative()
             .w(self.sidebar_width(window))
             .h_full()
@@ -2993,6 +3130,9 @@ impl Workspace {
                 .gap_1()
                 .rounded_md()
                 .cursor_pointer()
+                .when(self.cursor.as_deref() == Some(root.as_path()), |row| {
+                    row.border_1().border_color(theme.primary)
+                })
                 .hover(|s| s.bg(theme.sidebar_accent))
                 .child(chevron(collapsed))
                 .when(scratch, |row| {
@@ -3086,6 +3226,9 @@ impl Workspace {
                             .rounded_md()
                             .cursor_pointer()
                             .text_sm()
+                            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
+                                row.border_1().border_color(theme.primary)
+                            })
                             .hover(|s| s.bg(theme.sidebar_accent))
                             .child(chevron(collapsed))
                             .child(
@@ -3146,6 +3289,9 @@ impl Workspace {
                             .when(is_selected, |s| {
                                 s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground)
                             })
+                            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
+                                row.border_1().border_color(theme.primary)
+                            })
                             .hover(|s| s.bg(theme.sidebar_accent))
                             .child(
                                 div()
@@ -3168,9 +3314,10 @@ impl Workspace {
                                     })
                                     .child(change.mark())
                             }))
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
-                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.cursor = Some(path.clone());
+                                this.select_request(path.clone(), window, cx)
+                            }))
                             .on_drag(
                                 DraggedRequest {
                                     path: menu_path.clone(),
@@ -3229,6 +3376,15 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &palette::CloseTab, window, cx| this.close_tab(this.active, window, cx)))
             .on_action(cx.listener(|this, _: &palette::PasteCurl, window, cx| this.paste_curl(window, cx)))
             .on_action(cx.listener(|this, _: &palette::ShowShortcuts, window, cx| this.show_shortcuts(window, cx)))
+            .on_action(cx.listener(|this, _: &palette::FocusSidebar, window, cx| this.focus_sidebar(window, cx)))
+            .on_action(cx.listener(|this, _: &palette::FocusUrl, window, cx| {
+                this.main_view = MainView::Request;
+                this.editor().update(cx, |editor, cx| editor.focus_url(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &palette::FocusBody, window, cx| {
+                this.main_view = MainView::Request;
+                this.editor().update(cx, |editor, cx| editor.focus_body(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &palette::NextTab, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &palette::PreviousTab, window, cx| this.step_tab(-1, window, cx)))
             .size_full()
@@ -7038,5 +7194,62 @@ workspace::NewScratchRequest: \"\"\n",
             listed.contains(&("workspace::NewScratchRequest", String::new())),
             "an unbound shortcut is left blank: {listed:?}"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn the_sidebar_can_be_driven_from_the_keyboard(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let pets = storage::create_folder(&root, "Pets").unwrap();
+        let inside = storage::create_request(&pets, &RequestFile::new("Inside")).unwrap();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                // Start from a known place: the collection row, with its folders closed.
+                this.collapsed.insert(pets.clone());
+                this.cursor = Some(root.clone());
+                this.focus_sidebar(window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.press(key, cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let cursor = |cx: &mut TestAppContext| cx.update(|cx| workspace.read(cx).cursor.clone());
+
+        // Down walks into the collection: the folder first, then the requests.
+        press(cx, "down");
+        assert_eq!(cursor(cx), Some(pets.clone()), "the folder comes first");
+        press(cx, "right");
+        assert_eq!(cursor(cx), Some(pets.clone()), "right opens it without moving");
+        press(cx, "down");
+        assert_eq!(cursor(cx), Some(inside.clone()), "and now its request is reachable");
+        press(cx, "left");
+        assert_eq!(cursor(cx), Some(pets.clone()), "left steps out to the folder");
+        press(cx, "up");
+        assert_eq!(cursor(cx), Some(root.clone()));
+
+        // Enter on a request opens it in the editor. The folder is open by now, so right
+        // steps into it rather than opening it again.
+        press(cx, "down");
+        press(cx, "right");
+        assert_eq!(cursor(cx), Some(inside.clone()), "right on an open folder steps inside");
+        press(cx, "enter");
+        cx.update(|cx| {
+            assert_eq!(
+                workspace.read(cx).editor().read(cx).path(),
+                Some(&inside),
+                "enter opens the request the cursor is on"
+            );
+        });
     }
 }

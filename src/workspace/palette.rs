@@ -24,7 +24,15 @@ gpui_kit::actions!(
         NextTab,
         PreviousTab,
         PasteCurl,
-        ShowShortcuts
+        ShowShortcuts,
+        FocusSidebar,
+        FocusUrl,
+        FocusBody,
+        SelectNext,
+        SelectPrevious,
+        OpenSelected,
+        CollapseSelected,
+        ExpandSelected
     ]
 );
 

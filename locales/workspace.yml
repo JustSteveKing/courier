@@ -924,3 +924,43 @@ keys.shortcuts:
   es: Mostrar los atajos de teclado
   de: Tastenkürzel anzeigen
   fr: Afficher les raccourcis clavier
+keys.focus_sidebar:
+  en: Move to the sidebar
+  es: Ir a la barra lateral
+  de: Zur Seitenleiste
+  fr: Aller à la barre latérale
+keys.focus_url:
+  en: Move to the URL
+  es: Ir a la URL
+  de: Zur URL
+  fr: Aller à l'URL
+keys.focus_body:
+  en: Move to the body
+  es: Ir al cuerpo
+  de: Zum Body
+  fr: Aller au corps
+keys.select_next:
+  en: Next item in the sidebar
+  es: Siguiente elemento de la barra lateral
+  de: Nächstes Element in der Seitenleiste
+  fr: Élément suivant dans la barre latérale
+keys.select_previous:
+  en: Previous item in the sidebar
+  es: Elemento anterior de la barra lateral
+  de: Vorheriges Element in der Seitenleiste
+  fr: Élément précédent dans la barre latérale
+keys.open_selected:
+  en: Open the selected item
+  es: Abrir el elemento seleccionado
+  de: Ausgewähltes Element öffnen
+  fr: Ouvrir l'élément sélectionné
+keys.collapse:
+  en: Collapse the folder, or go to it
+  es: Contraer la carpeta, o ir a ella
+  de: Ordner einklappen oder dorthin gehen
+  fr: Replier le dossier, ou y aller
+keys.expand:
+  en: Expand the folder
+  es: Expandir la carpeta
+  de: Ordner ausklappen
+  fr: Déplier le dossier

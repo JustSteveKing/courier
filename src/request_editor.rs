@@ -1576,6 +1576,21 @@ impl RequestEditor {
         })
     }
 
+    /// Puts the keyboard in the URL, for moving around without the mouse.
+    pub fn focus_url(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.url.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Puts the keyboard in the body (or the GraphQL query, for a GraphQL request).
+    pub fn focus_body(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = if self.is_graphql(cx) {
+            &self.graphql_query
+        } else {
+            &self.body
+        };
+        editor.update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// The OAuth settings on the auth row, with variables filled in.
     fn oauth_config(&self, cx: &App) -> Option<(crate::oauth::Config, String)> {
         let auth = self.auth.read(cx).value(cx);
