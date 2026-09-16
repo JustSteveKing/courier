@@ -2,16 +2,44 @@
 
 use rust_i18n::t;
 
+use std::path::{Path, PathBuf};
+
 use crate::encoding::{base64_encode, percent_encode};
-use crate::model::{Auth, BodyKind, EffectiveSettings, Graphql, ProxySetting, RequestFile, Variables, interpolate};
+use crate::model::{
+    Auth, BodyKind, EffectiveSettings, Graphql, PartValue, ProxySetting, RequestFile, Variables, content_type_for,
+    interpolate, parts_from_text,
+};
 
 /// A request with variables already substituted, ready to go on the wire.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Request {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    /// Files to send: set instead of `body` for multipart and file bodies.
+    pub upload: Option<Upload>,
+}
+
+/// A body made of files, which are read when the request is sent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Upload {
+    /// The file's bytes are the whole body.
+    File(PathBuf),
+    /// `multipart/form-data` fields, in order.
+    Multipart(Vec<UploadPart>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UploadPart {
+    pub name: String,
+    pub value: UploadValue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UploadValue {
+    Text(String),
+    File(PathBuf),
 }
 
 impl Request {
@@ -19,6 +47,11 @@ impl Request {
     /// variables that had no value, so the UI can warn before sending. Fails only when a
     /// GraphQL request's variables aren't a JSON object.
     pub fn resolve(file: &RequestFile, variables: &Variables) -> Result<(Self, Vec<String>), String> {
+        Self::resolve_in(file, variables, Path::new(""))
+    }
+
+    /// Resolves a request whose upload paths are relative to `base` (the project folder).
+    pub fn resolve_in(file: &RequestFile, variables: &Variables, base: &Path) -> Result<(Self, Vec<String>), String> {
         let mut missing = Vec::new();
         let mut sub = |text: &str| {
             let (out, names) = interpolate(text, variables);
@@ -30,6 +63,8 @@ impl Request {
             out
         };
 
+        let has_header =
+            |headers: &[(String, String)], name: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
         let mut headers: Vec<(String, String)> = file
             .headers
             .iter()
@@ -44,25 +79,39 @@ impl Request {
             ),
         };
 
+        // Uploads carry their own content type: multipart's boundary is set when sending,
+        // and a file's is guessed from its name.
+        let (body, upload) = match kind {
+            Some(BodyKind::Multipart) => {
+                // The boundary is only known when sending, so a hand-written one would break.
+                headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
+                (String::new(), Some(multipart_upload(&body, base)?))
+            }
+            Some(BodyKind::File) if !body.trim().is_empty() => {
+                let path = body.trim();
+                if !has_header(&headers, "content-type") {
+                    headers.push(("Content-Type".into(), content_type_for(path).into()));
+                }
+                (String::new(), Some(Upload::File(in_base(path, base))))
+            }
+            _ => (body, None),
+        };
+
         if let Some(kind) = kind
             && !body.is_empty()
-            && !headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            && !has_header(&headers, "content-type")
         {
             let content_type = match kind {
                 BodyKind::Json => "application/json",
                 BodyKind::Xml => "application/xml",
-                BodyKind::Text => "text/plain",
                 BodyKind::FormUrlencoded => "application/x-www-form-urlencoded",
+                BodyKind::Text | BodyKind::Multipart | BodyKind::File => "text/plain",
             };
             headers.push(("Content-Type".into(), content_type.into()));
         }
 
         let mut url = sub(file.url.trim());
         // `file.auth` is the effective auth by now: callers resolve `Inherit` first.
-        let has_header =
-            |headers: &[(String, String)], name: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name));
         match &file.auth {
             Auth::Basic { username, password } if !has_header(&headers, "authorization") => {
                 let credentials = format!("{}:{}", sub(username), sub(password));
@@ -99,9 +148,36 @@ impl Request {
             url,
             headers,
             body,
+            upload,
         };
         Ok((request, missing))
     }
+}
+
+/// A path from a request, resolved against the project folder when it's relative.
+fn in_base(path: &str, base: &Path) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() || base.as_os_str().is_empty() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+/// The parts of a multipart body, with their files' paths resolved.
+fn multipart_upload(content: &str, base: &Path) -> Result<Upload, String> {
+    let parts = parts_from_text(content)?
+        .into_iter()
+        .filter(|part| part.enabled)
+        .map(|part| UploadPart {
+            name: part.name,
+            value: match part.value {
+                PartValue::Text(text) => UploadValue::Text(text),
+                PartValue::File(path) => UploadValue::File(in_base(&path, base)),
+            },
+        })
+        .collect();
+    Ok(Upload::Multipart(parts))
 }
 
 /// The JSON a GraphQL request posts: `{query, variables, operationName}`. Variables are
@@ -135,7 +211,11 @@ impl Request {
     /// proxy, Unix socket).
     pub fn to_curl(&self, settings: Option<&EffectiveSettings>) -> String {
         let method = self.method.to_ascii_uppercase();
-        let implied = if self.body.is_empty() { "GET" } else { "POST" };
+        let implied = if self.body.is_empty() && self.upload.is_none() {
+            "GET"
+        } else {
+            "POST"
+        };
         let mut command = String::from("curl");
         if method != implied {
             command.push_str(&format!(" -X {method}"));
@@ -177,6 +257,24 @@ impl Request {
         }
         if !self.body.is_empty() {
             command.push_str(&format!(" \\\n  --data-raw {}", shell_quote(&self.body)));
+        }
+        match &self.upload {
+            Some(Upload::File(path)) => {
+                command.push_str(&format!(
+                    " \\\n  --data-binary @{}",
+                    shell_quote(&path.display().to_string())
+                ));
+            }
+            Some(Upload::Multipart(parts)) => {
+                for part in parts {
+                    let field = match &part.value {
+                        UploadValue::Text(text) => format!("{}={text}", part.name),
+                        UploadValue::File(path) => format!("{}=@{}", part.name, path.display()),
+                    };
+                    command.push_str(&format!(" \\\n  -F {}", shell_quote(&field)));
+                }
+            }
+            None => {}
         }
         command
     }
@@ -240,12 +338,103 @@ mod tests {
     }
 
     #[test]
+    fn resolves_multipart_and_file_bodies() {
+        let base = std::path::Path::new("/projects/pets");
+        let mut file = RequestFile::new("Upload");
+        file.method = "POST".into();
+        file.url = "https://api.test/pets/{{id}}/photo".into();
+        // A hand-written content type would lose multipart's boundary, so it's dropped.
+        file.headers = crate::model::headers_from_text("Content-Type: multipart/form-data");
+        file.body = Some(crate::model::Body {
+            kind: BodyKind::Multipart,
+            content: "name: {{name}}\nphoto: @photos/rex.png\n# extra: no".into(),
+        });
+        let variables = Variables::from([
+            ("id".to_string(), "7".to_string()),
+            ("name".to_string(), "Rex".to_string()),
+        ]);
+        let (request, missing) = Request::resolve_in(&file, &variables, base).unwrap();
+        assert!(missing.is_empty());
+        assert!(request.body.is_empty() && !request.headers.iter().any(|(n, _)| n == "Content-Type"));
+        assert_eq!(
+            request.upload,
+            Some(Upload::Multipart(vec![
+                UploadPart {
+                    name: "name".into(),
+                    value: UploadValue::Text("Rex".into()),
+                },
+                UploadPart {
+                    name: "photo".into(),
+                    value: UploadValue::File(base.join("photos/rex.png")),
+                },
+            ])),
+            "disabled parts are left out and relative paths hang off the project"
+        );
+
+        file.headers.clear();
+        file.body = Some(crate::model::Body {
+            kind: BodyKind::File,
+            content: "photos/rex.png".into(),
+        });
+        let (request, _) = Request::resolve_in(&file, &variables, base).unwrap();
+        assert_eq!(request.upload, Some(Upload::File(base.join("photos/rex.png"))));
+        assert_eq!(
+            request.headers,
+            vec![("Content-Type".to_string(), "image/png".to_string())],
+            "a file body's type is guessed from its name"
+        );
+
+        file.body = Some(crate::model::Body {
+            kind: BodyKind::Multipart,
+            content: "oops".into(),
+        });
+        assert!(
+            Request::resolve_in(&file, &variables, base).is_err(),
+            "bad parts are reported"
+        );
+    }
+
+    #[test]
+    fn exports_curl_for_uploads() {
+        let request = Request {
+            method: "POST".into(),
+            url: "https://api.test/upload".into(),
+            upload: Some(Upload::Multipart(vec![
+                UploadPart {
+                    name: "name".into(),
+                    value: UploadValue::Text("Rex".into()),
+                },
+                UploadPart {
+                    name: "photo".into(),
+                    value: UploadValue::File("/pets/rex.png".into()),
+                },
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(
+            request.to_curl(None),
+            "curl 'https://api.test/upload' \\\n  -F 'name=Rex' \\\n  -F 'photo=@/pets/rex.png'"
+        );
+        let raw = Request {
+            method: "PUT".into(),
+            url: "https://api.test/raw".into(),
+            upload: Some(Upload::File("/pets/rex.png".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            raw.to_curl(None),
+            "curl -X PUT 'https://api.test/raw' \\\n  --data-binary @'/pets/rex.png'"
+        );
+    }
+
+    #[test]
     fn exports_curl() {
         let request = Request {
             method: "POST".into(),
             url: "https://api.test/pets?q=it's".into(),
             headers: vec![("Content-Type".into(), "application/json".into())],
             body: "{\"name\": \"Rex\"}".into(),
+            ..Default::default()
         };
         assert_eq!(
             request.to_curl(None),
@@ -256,6 +445,7 @@ mod tests {
             url: "https://api.test/pets/1".into(),
             headers: Vec::new(),
             body: String::new(),
+            ..Default::default()
         };
         assert_eq!(get.to_curl(None), "curl -X DELETE 'https://api.test/pets/1'");
         let settings = crate::model::RequestSettings {

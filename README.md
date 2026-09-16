@@ -45,6 +45,14 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### File uploads
+
+Pick a body kind next to **Body**: JSON, XML, text, form, **multipart form** or **file**.
+
+- Multipart takes one part per line — `name: value`, or `name: @photos/rex.png` for a file, `#` to leave one out. **Choose a file…** adds a line for you.
+- File sends that file's bytes as the whole body, with the content type guessed from its name.
+- Paths are relative to the project folder, so a collection still works on someone else's machine, and `{{variables}}` work in part values. Copy as curl gives you `-F` and `--data-binary` to match.
+
 ### Runs
 
 Right-click a collection or a folder and choose **Run**. The requests go out in sidebar order, sharing responses so `{{ response() }}` chaining works, and each one's status, time and checks appear as it finishes. **Stop on failure** stops at the first failed check, **Stop** ends a run in progress, and clicking a result opens that request with the response the run got. WebSocket and event-stream requests are skipped.

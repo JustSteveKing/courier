@@ -15,13 +15,14 @@ use std::time::{Duration, Instant};
 
 use eventsource_stream::Eventsource as _;
 use futures_util::{SinkExt as _, StreamExt as _};
+use rust_i18n::t;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use crate::http::Request;
-use crate::model::{EffectiveSettings, ProxySetting};
+use crate::http::{Request, Upload, UploadValue};
+use crate::model::{EffectiveSettings, ProxySetting, content_type_for};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -274,6 +275,18 @@ pub fn client_for(options: &ClientOptions, cookies: Option<&Cookies>) -> Result<
     Ok(client)
 }
 
+/// Reads a file to upload, saying which file is missing rather than just "not found".
+async fn read_upload(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    tokio::fs::read(path).await.map_err(|e| {
+        t!(
+            "request.upload_unreadable",
+            path = path.display(),
+            error = e.to_string()
+        )
+        .to_string()
+    })
+}
+
 /// Sends an HTTP request, with `client` (e.g. one with a cookie jar) or the shared one.
 pub fn start_http(
     request: Request,
@@ -293,6 +306,32 @@ pub fn start_http(
         }
         if !request.body.is_empty() {
             builder = builder.body(request.body.clone());
+        }
+        match &request.upload {
+            Some(Upload::File(path)) => {
+                builder = builder.body(read_upload(path).await?);
+            }
+            Some(Upload::Multipart(parts)) => {
+                let mut form = reqwest::multipart::Form::new();
+                for part in parts {
+                    form = match &part.value {
+                        UploadValue::Text(text) => form.text(part.name.clone(), text.clone()),
+                        UploadValue::File(path) => {
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| part.name.clone());
+                            let field = reqwest::multipart::Part::bytes(read_upload(path).await?)
+                                .file_name(name)
+                                .mime_str(content_type_for(&path.to_string_lossy()))
+                                .map_err(|e| e.to_string())?;
+                            form.part(part.name.clone(), field)
+                        }
+                    };
+                }
+                builder = builder.multipart(form);
+            }
+            None => {}
         }
 
         let started = Instant::now();
@@ -458,6 +497,7 @@ mod tests {
     use std::net::TcpListener;
 
     use super::*;
+    use crate::http::UploadPart;
 
     fn get(url: &str) -> Request {
         Request {
@@ -465,6 +505,7 @@ mod tests {
             url: url.into(),
             headers: vec![],
             body: String::new(),
+            ..Default::default()
         }
     }
 
@@ -668,6 +709,142 @@ mod tests {
             respond(stream, String::from_utf8_lossy(&head).into_owned());
         });
         port
+    }
+
+    /// Like `serve_once`, but reads the request body too and hands back head and body.
+    fn serve_once_reading_body(reply: &'static str) -> (u16, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = Vec::new();
+            let mut buf = [0u8; 4096];
+            let mut head_end = None;
+            let mut length = 0;
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&buf[..n]);
+                if head_end.is_none()
+                    && let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    let head = String::from_utf8_lossy(&buffer[..at]).into_owned();
+                    length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':')
+                                .filter(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                        })
+                        .map(|(_, v)| v.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    head_end = Some(at + 4);
+                }
+                if let Some(at) = head_end
+                    && buffer.len() >= at + length
+                {
+                    break;
+                }
+            }
+            let at = head_end.unwrap_or(buffer.len());
+            let head = String::from_utf8_lossy(&buffer[..at]).into_owned();
+            stream.write_all(reply.as_bytes()).unwrap();
+            sent.send((head, buffer[at..].to_vec())).unwrap();
+        });
+        (port, received)
+    }
+
+    fn post_upload(url: &str, upload: Upload) -> Request {
+        Request {
+            method: "POST".into(),
+            url: url.into(),
+            headers: vec![],
+            body: String::new(),
+            upload: Some(upload),
+        }
+    }
+
+    #[test]
+    fn sends_a_multipart_body_with_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "hi there").unwrap();
+        let (port, received) = serve_once_reading_body("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let request = post_upload(
+            &format!("http://127.0.0.1:{port}/upload"),
+            Upload::Multipart(vec![
+                UploadPart {
+                    name: "name".into(),
+                    value: UploadValue::Text("Rex".into()),
+                },
+                UploadPart {
+                    name: "photo".into(),
+                    value: UploadValue::File(file),
+                },
+            ]),
+        );
+        let (_handle, events) = start_http(request, Duration::from_secs(5), None, None);
+        collect(&events, Duration::from_secs(5));
+
+        let (head, body) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: multipart/form-data; boundary="),
+            "{head}"
+        );
+        assert!(body.contains("name=\"name\"") && body.contains("Rex"), "{body}");
+        assert!(
+            body.contains("name=\"photo\"") && body.contains("filename=\"hello.txt\"") && body.contains("hi there"),
+            "the file's name and bytes are in the part:\n{body}"
+        );
+        assert!(
+            body.contains("Content-Type: text/plain"),
+            "the part's type is guessed:\n{body}"
+        );
+    }
+
+    #[test]
+    fn sends_a_file_as_the_whole_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("payload.json");
+        std::fs::write(&file, "{\"id\":7}").unwrap();
+        let (port, received) = serve_once_reading_body("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (_handle, events) = start_http(
+            post_upload(&format!("http://127.0.0.1:{port}/raw"), Upload::File(file)),
+            Duration::from_secs(5),
+            None,
+            None,
+        );
+        collect(&events, Duration::from_secs(5));
+
+        let (_head, body) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "{\"id\":7}");
+    }
+
+    #[test]
+    fn a_missing_upload_says_which_file() {
+        let port = serve_once(|mut stream, _| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let (_handle, events) = start_http(
+            post_upload(
+                &format!("http://127.0.0.1:{port}/raw"),
+                Upload::File("/nope/missing.bin".into()),
+            ),
+            Duration::from_secs(5),
+            None,
+            None,
+        );
+        let events = collect(&events, Duration::from_secs(5));
+        assert!(
+            matches!(&events[..], [Event::Failed(message)] if message.contains("missing.bin")),
+            "{events:?}"
+        );
     }
 
     #[test]

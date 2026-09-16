@@ -26,7 +26,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
 - Request settings: `model::RequestSettings` (collection → folder `.folder.yaml` → request, merged by `overlay`, resolved with `resolve`), `transport::ClientOptions`/`client_for` (cached clients), `settings_form.rs` (dialog)
 - `chain.rs` (template functions: `response()`/`response_header()` chaining, `uuid()` etc.; evaluated in `resolve_in_background` before `Request::resolve`)
-- `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL bodies), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
+- `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL and upload bodies: `Request::resolve_in` takes the project dir, since upload paths are relative to it), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
 - `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
 - `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions, hover and validation from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)
 - `import/` (`mod.rs`: shared `CollectionImport` + writers and format detection; curl, Postman, `openapi.rs`, `asyncapi.rs`, `spec.rs` for `$ref`s and schema examples; `COURIER_IMPORT_FILES=… cargo test real_files -- --ignored --nocapture` tries real specs), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`

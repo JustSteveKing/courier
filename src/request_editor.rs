@@ -74,9 +74,36 @@ pub enum RequestEditorEvent {
     Notice(String),
     /// The user asked to edit the open request's settings. It has already been saved.
     EditSettings(PathBuf),
+    /// The user asked to pick a file to upload; the workspace opens the file dialog.
+    PickUploadFile,
 }
 
 impl EventEmitter<RequestEditorEvent> for RequestEditor {}
+
+/// The body kinds the editor offers; `None` decides from the Content-Type header, as
+/// Courier did before a request ever recorded a kind.
+const BODY_KINDS: [Option<BodyKind>; 7] = [
+    None,
+    Some(BodyKind::Json),
+    Some(BodyKind::Xml),
+    Some(BodyKind::Text),
+    Some(BodyKind::FormUrlencoded),
+    Some(BodyKind::Multipart),
+    Some(BodyKind::File),
+];
+
+fn body_kind_label(kind: Option<BodyKind>) -> String {
+    match kind {
+        None => t!("request.body_auto"),
+        Some(BodyKind::Json) => t!("request.body_json"),
+        Some(BodyKind::Xml) => t!("request.body_xml"),
+        Some(BodyKind::Text) => t!("request.body_text"),
+        Some(BodyKind::FormUrlencoded) => t!("request.body_form"),
+        Some(BodyKind::Multipart) => t!("request.body_multipart"),
+        Some(BodyKind::File) => t!("request.body_file"),
+    }
+    .to_string()
+}
 
 /// Bodies beyond this are not kept in memory (the size is still counted).
 const MAX_BODY_IN_MEMORY: usize = 50 * 1024 * 1024;
@@ -267,6 +294,8 @@ pub struct RequestEditor {
     inherited_auth: Auth,
     /// Settings from the request's collection and folders, before its own.
     inherited_settings: RequestSettings,
+    /// What kind of body to send, or `None` to decide from the Content-Type header.
+    body_kind: Entity<SelectState<SearchableVec<SharedString>>>,
     /// The URL's query parameters as `name=value` lines, kept in sync with the URL.
     params: Entity<EditorState>,
     disabled_params: Vec<QueryParam>,
@@ -496,6 +525,26 @@ impl RequestEditor {
             this.sync_schema(cx);
         })
         .detach();
+        let body_kind = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(
+                    BODY_KINDS
+                        .map(|kind| SharedString::from(body_kind_label(kind)))
+                        .to_vec(),
+                ),
+                Some(IndexPath::default()),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &body_kind,
+            |this, _, _: &SelectEvent<SearchableVec<SharedString>>, cx| {
+                this.update_dirty(cx);
+                cx.notify();
+            },
+        )
+        .detach();
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -519,6 +568,7 @@ impl RequestEditor {
             disabled_params: Vec::new(),
             params_to_url: false,
             body,
+            body_kind,
             graphql_query,
             graphql_variables,
             operation_name,
@@ -603,6 +653,11 @@ impl RequestEditor {
     /// The response cache, unless saving responses is turned off.
     fn cache(&self, cx: &App) -> Option<&ResponseCache> {
         AppSettings::get(cx).remember_responses.then_some(&self.response_cache)
+    }
+
+    #[cfg(test)]
+    pub fn current_for_test(&self, cx: &App) -> RequestFile {
+        self.current(cx)
     }
 
     #[cfg(test)]
@@ -938,13 +993,48 @@ impl RequestEditor {
         self.inherited_settings = settings;
     }
 
-    /// The settings `file` is sent with: inherited, then its own, then the app defaults.
-    fn effective_settings(&self, file: &RequestFile, cx: &App) -> EffectiveSettings {
-        let project = self
-            .collection_root
+    /// The body kind the user picked, or `None` for "decide from the Content-Type".
+    fn chosen_body_kind(&self, cx: &App) -> Option<BodyKind> {
+        let index = self.body_kind.read(cx).selected_index(cx).map_or(0, |ix| ix.row);
+        BODY_KINDS.get(index).copied().flatten()
+    }
+
+    /// Puts a picked file in the body: the whole body for a file upload, another part for
+    /// a multipart one.
+    pub fn add_upload_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        match self.chosen_body_kind(cx) {
+            Some(BodyKind::File) => self.body.update(cx, |s, cx| s.set_value(path, window, cx)),
+            Some(BodyKind::Multipart) => {
+                let name = Path::new(&path)
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".into());
+                let current = self.body.read(cx).value().to_string();
+                let separator = if current.is_empty() || current.ends_with('\n') {
+                    ""
+                } else {
+                    "\n"
+                };
+                let text = format!("{current}{separator}{name}: @{path}\n");
+                self.body.update(cx, |s, cx| s.set_value(text, window, cx));
+            }
+            _ => {}
+        }
+        self.update_dirty(cx);
+        cx.notify();
+    }
+
+    /// Where a request's file paths (uploads, certificates) are relative to.
+    fn project_dir(&self) -> &Path {
+        self.collection_root
             .as_deref()
             .map(crate::project::project_dir)
-            .unwrap_or(Path::new("."));
+            .unwrap_or(Path::new("."))
+    }
+
+    /// The settings `file` is sent with: inherited, then its own, then the app defaults.
+    fn effective_settings(&self, file: &RequestFile, cx: &App) -> EffectiveSettings {
+        let project = self.project_dir();
         self.inherited_settings
             .overlay(&file.settings)
             .resolve(project, AppSettings::get(cx).request_timeout_secs)
@@ -999,7 +1089,7 @@ impl RequestEditor {
         };
         if !include_secrets {
             copied(
-                Request::resolve(&file, &self.variables).map(|(request, _)| (request, settings)),
+                Request::resolve_in(&file, &self.variables, self.project_dir()).map(|(request, _)| (request, settings)),
                 cx,
             );
             return;
@@ -1069,6 +1159,14 @@ impl RequestEditor {
             .update(cx, |s, cx| s.set_value(request.checks.join("\n"), window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
+        let kind_index = request
+            .body
+            .as_ref()
+            .and_then(|b| BODY_KINDS.iter().position(|k| *k == Some(b.kind)))
+            .unwrap_or(0);
+        self.body_kind.update(cx, |s, cx| {
+            s.set_selected_index(Some(IndexPath::new(kind_index)), window, cx)
+        });
         let graphql = request.graphql.clone().unwrap_or_default();
         self.graphql_query
             .update(cx, |s, cx| s.set_value(graphql.query, window, cx));
@@ -1152,10 +1250,10 @@ impl RequestEditor {
             };
         }
         let content = self.body.read(cx).value().to_string();
-        let body = if content.trim().is_empty() {
+        let body = if content.trim().is_empty() && self.chosen_body_kind(cx).is_none() {
             None
         } else {
-            let kind = saved.body.as_ref().map(|b| b.kind).unwrap_or_else(|| {
+            let kind = self.chosen_body_kind(cx).unwrap_or_else(|| {
                 let content_type = headers.iter().find(|h| h.name.eq_ignore_ascii_case("content-type"));
                 match content_type {
                     Some(h) => BodyKind::from_content_type(&h.value),
@@ -1236,6 +1334,7 @@ impl RequestEditor {
         // latest responses).
         let chaining = (!chain::calls_in(&file).is_empty()).then(|| self.chain_context(cx));
         let settings = self.effective_settings(&file, cx);
+        let project = self.project_dir().to_path_buf();
         let cookies = self.cookies.as_ref().map(|jar| jar.store().clone());
         cx.background_executor().spawn(async move {
             if !secrets.is_empty() {
@@ -1253,7 +1352,7 @@ impl RequestEditor {
                 variables.extend(values);
                 sent = chained;
             }
-            let (request, missing) = Request::resolve(&file, &variables)?;
+            let (request, missing) = Request::resolve_in(&file, &variables, &project)?;
             let client = transport::client_for(&transport::ClientOptions::load(&settings)?, cookies.as_ref())?;
             Ok(Resolved {
                 request,
@@ -2029,17 +2128,50 @@ impl Render for RequestEditor {
                                     .child(code_editor(&self.graphql_variables).h_32())
                             })
                             .when(!graphql, |column| {
-                                column.child(label(
-                                    if websocket {
-                                        t!("request.ws_message")
-                                    } else {
-                                        t!("request.body")
-                                    }
-                                    .to_string(),
-                                ))
+                                let uploading =
+                                    matches!(self.chosen_body_kind(cx), Some(BodyKind::Multipart | BodyKind::File));
+                                column.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div().flex_1().child(label(
+                                                if websocket {
+                                                    t!("request.ws_message")
+                                                } else {
+                                                    t!("request.body")
+                                                }
+                                                .to_string(),
+                                            )),
+                                        )
+                                        .when(uploading, |row| {
+                                            row.child(
+                                                Button::new("choose-upload-file")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(IconName::FolderOpen)
+                                                    .label(t!("request.choose_file").to_string())
+                                                    .on_click(cx.listener(|_, _, _, cx| {
+                                                        cx.emit(RequestEditorEvent::PickUploadFile)
+                                                    })),
+                                            )
+                                        })
+                                        .when(!websocket, |row| {
+                                            row.child(div().w_40().child(Select::new(&self.body_kind).xsmall()))
+                                        }),
+                                )
                             })
                             .when(!graphql, |column| {
-                                column.child(code_editor(&self.body).flex_1().min_h_0())
+                                let hint = match self.chosen_body_kind(cx) {
+                                    Some(BodyKind::Multipart) => Some(t!("request.multipart_hint").to_string()),
+                                    Some(BodyKind::File) => Some(t!("request.file_hint").to_string()),
+                                    _ => None,
+                                };
+                                column.child(code_editor(&self.body).flex_1().min_h_0()).children(
+                                    hint.map(|hint| {
+                                        div().text_xs().text_color(cx.theme().muted_foreground).child(hint)
+                                    }),
+                                )
                             })
                             .when(!websocket, |column| {
                                 column

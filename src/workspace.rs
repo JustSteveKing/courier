@@ -119,6 +119,7 @@ impl Workspace {
             RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
             RequestEditorEvent::Notice(message) => window.push_notification(Notification::success(message.clone()), cx),
             RequestEditorEvent::EditSettings(path) => this.edit_settings(path.clone(), window, cx),
+            RequestEditorEvent::PickUploadFile => this.pick_upload_file(window, cx),
         })
         .detach();
         let environment_editor = cx.new(|cx| EnvironmentEditor::new(window, cx));
@@ -1018,6 +1019,31 @@ impl Workspace {
     // MARK: Dialogs and imports
 
     /// Shows the file chooser, then hands the chosen path to `apply`.
+    /// Picks a file for the open request's body, storing it relative to the project when
+    /// it's inside, so the collection still works on another machine.
+    fn pick_upload_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self
+            .editor
+            .read(cx)
+            .path()
+            .and_then(|path| self.collection_index_for(path))
+            .map(|ix| project::project_dir(&self.collections[ix].root).to_path_buf());
+        self.pick_path(
+            false,
+            t!("request.choose_file").to_string(),
+            window,
+            cx,
+            move |this, file, window, cx| {
+                let stored = match project.as_ref().and_then(|dir| file.strip_prefix(dir).ok()) {
+                    Some(relative) => relative.display().to_string(),
+                    None => file.display().to_string(),
+                };
+                this.editor
+                    .update(cx, |editor, cx| editor.add_upload_file(stored, window, cx));
+            },
+        );
+    }
+
     fn pick_path(
         &mut self,
         directories: bool,
@@ -3362,6 +3388,9 @@ components:
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
         let editor = cx.update(|cx| workspace.read(cx).editor.clone());
         let type_and_confirm = |cx: &mut TestAppContext, text: &str| {
+            // The dialog slides in; clicking before it settles hits where it isn't yet.
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
             cx.update_window(window, |_, window, cx| {
                 window.render_frame(cx);
                 window.input(text, cx);
@@ -3442,6 +3471,8 @@ components:
             workspace.update(cx, |this, cx| this.delete_item(animals.clone(), window, cx));
         })
         .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx), "asks first");
             assert!(animals.exists());
@@ -5258,5 +5289,62 @@ components:
             matches!(shown.map(|r| r.outcome), Some(crate::response_cache::Outcome::Response { status, .. }) if status == 200),
             "the editor shows the response from the run"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn multipart_bodies_upload_files_from_the_project(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let project = project::project_dir(&root).to_path_buf();
+        fs::write(project.join("rex.txt"), "good dog").unwrap();
+        let (port, received) = http_server("{\"ok\":true}");
+        let path = root.join("echo-post.yaml");
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/photos");
+        request.body = Some(crate::model::Body {
+            kind: crate::model::BodyKind::Multipart,
+            content: "name: Rex\nphoto: @rex.txt".into(),
+        });
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let (head, body) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            head.to_ascii_lowercase().contains("multipart/form-data; boundary="),
+            "{head}"
+        );
+        assert!(body.contains("name=\"name\"") && body.contains("Rex"), "{body}");
+        assert!(
+            body.contains("filename=\"rex.txt\"") && body.contains("good dog"),
+            "the file next to the project went up with the request:\n{body}"
+        );
+        // The editor keeps the kind, so saving doesn't turn the parts list into a text body.
+        cx.update(|cx| {
+            let saved: RequestFile = storage::read_yaml(&path).unwrap();
+            assert_eq!(
+                saved.body.as_ref().map(|b| b.kind),
+                Some(crate::model::BodyKind::Multipart)
+            );
+            assert_eq!(editor.read(cx).current_for_test(cx).body, saved.body);
+        });
     }
 }

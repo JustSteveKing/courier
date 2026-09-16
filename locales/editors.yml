@@ -1016,3 +1016,73 @@ request.add_check_tooltip:
   es: Comprobar que este valor no cambia
   de: Prüfen, dass dieser Wert gleich bleibt
   fr: Vérifier que cette valeur ne change pas
+body.part_line_expected:
+  en: "Line %{line}: a part looks like name: value, or name: @path for a file."
+  es: "Línea %{line}: una parte se escribe nombre: valor, o nombre: @ruta para un archivo."
+  de: "Zeile %{line}: ein Teil sieht so aus – name: Wert, oder name: @Pfad für eine Datei."
+  fr: "Ligne %{line} : une partie s'écrit nom : valeur, ou nom : @chemin pour un fichier."
+body.part_name_empty:
+  en: "Line %{line}: this part has no name."
+  es: "Línea %{line}: esta parte no tiene nombre."
+  de: "Zeile %{line}: dieser Teil hat keinen Namen."
+  fr: "Ligne %{line} : cette partie n'a pas de nom."
+body.part_file_missing:
+  en: "Line %{line}: @ needs a file path after it."
+  es: "Línea %{line}: después de @ hace falta la ruta de un archivo."
+  de: "Zeile %{line}: nach @ fehlt ein Dateipfad."
+  fr: "Ligne %{line} : il manque un chemin de fichier après @."
+request.upload_unreadable:
+  en: "could not read %{path}: %{error}"
+  es: "no se pudo leer %{path}: %{error}"
+  de: "%{path} konnte nicht gelesen werden: %{error}"
+  fr: "impossible de lire %{path} : %{error}"
+request.body_auto:
+  en: From Content-Type
+  es: Según Content-Type
+  de: Laut Content-Type
+  fr: D'après Content-Type
+request.body_json:
+  en: JSON
+  es: JSON
+  de: JSON
+  fr: JSON
+request.body_xml:
+  en: XML
+  es: XML
+  de: XML
+  fr: XML
+request.body_text:
+  en: Text
+  es: Texto
+  de: Text
+  fr: Texte
+request.body_form:
+  en: Form
+  es: Formulario
+  de: Formular
+  fr: Formulaire
+request.body_multipart:
+  en: Multipart form
+  es: Formulario multiparte
+  de: Multipart-Formular
+  fr: Formulaire multipart
+request.body_file:
+  en: File
+  es: Archivo
+  de: Datei
+  fr: Fichier
+request.choose_file:
+  en: Choose a file…
+  es: Elegir un archivo…
+  de: Datei wählen…
+  fr: Choisir un fichier…
+request.multipart_hint:
+  en: "One part per line: name: value, or name: @path for a file. Paths are relative to the project."
+  es: "Una parte por línea: nombre: valor, o nombre: @ruta para un archivo. Las rutas son relativas al proyecto."
+  de: "Ein Teil pro Zeile: name: Wert, oder name: @Pfad für eine Datei. Pfade sind relativ zum Projekt."
+  fr: "Une partie par ligne : nom : valeur, ou nom : @chemin pour un fichier. Les chemins sont relatifs au projet."
+request.file_hint:
+  en: The file at this path is sent as the body. Paths are relative to the project.
+  es: El archivo de esta ruta se envía como cuerpo. Las rutas son relativas al proyecto.
+  de: Die Datei unter diesem Pfad wird als Body gesendet. Pfade sind relativ zum Projekt.
+  fr: Le fichier situé à ce chemin est envoyé comme corps. Les chemins sont relatifs au projet.

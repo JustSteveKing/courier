@@ -20,7 +20,9 @@ notify = "8.2.0"
 reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate", "cookies"] }
 rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# preserve_order keeps JSON keys in the order the API sent them, in bodies and
+# in JSONPath suggestions.
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_norway = "0.9.42"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 lsp-types = { version = "0.97", features = ["proposed"] }

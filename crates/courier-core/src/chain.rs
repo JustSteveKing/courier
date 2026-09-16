@@ -354,7 +354,7 @@ async fn send(
     }
     let mut variables = context.variables.clone();
     variables.extend(Box::pin(evaluate_in(&file, context, visiting, sent)).await?);
-    let (request, missing) = Request::resolve(&file, &variables)?;
+    let (request, missing) = Request::resolve_in(&file, &variables, crate::project::project_dir(&context.root))?;
     if crate::model::is_websocket_url(&request.url) {
         return Err(format!(
             "\"{}\" is a WebSocket, which has no response to use",

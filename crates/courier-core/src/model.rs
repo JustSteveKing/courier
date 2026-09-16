@@ -539,6 +539,10 @@ pub enum BodyKind {
     Xml,
     Text,
     FormUrlencoded,
+    /// `multipart/form-data`: the content lists the parts, one per line.
+    Multipart,
+    /// The content is a path; the file's bytes are the body.
+    File,
 }
 
 impl BodyKind {
@@ -551,6 +555,8 @@ impl BodyKind {
             Self::Xml
         } else if content_type.contains("x-www-form-urlencoded") {
             Self::FormUrlencoded
+        } else if content_type.contains("multipart/form-data") {
+            Self::Multipart
         } else {
             Self::Text
         }
@@ -603,6 +609,105 @@ pub fn headers_from_text(text: &str) -> Vec<Header> {
             })
         })
         .collect()
+}
+
+/// One field of a multipart body: text, or a file to upload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Part {
+    pub name: String,
+    pub value: PartValue,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartValue {
+    Text(String),
+    /// A path as written, relative to the project folder unless absolute.
+    File(String),
+}
+
+/// Parses the multipart editor text: `name: value` a line, `name: @path` for a file,
+/// `#` for a part that isn't sent. Mistakes are errors, like variables: a part silently
+/// dropped from an upload is hard to notice.
+pub fn parts_from_text(text: &str) -> Result<Vec<Part>, String> {
+    let mut parts = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let line_no = index + 1;
+        let (enabled, line) = match line.strip_prefix('#') {
+            Some(rest) => (false, rest.trim_start()),
+            None => (true, line),
+        };
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(t!("body.part_line_expected", line = line_no).to_string());
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(t!("body.part_name_empty", line = line_no).to_string());
+        }
+        let value = value.trim();
+        let value = match value.strip_prefix('@') {
+            Some(path) if path.trim().is_empty() => {
+                return Err(t!("body.part_file_missing", line = line_no).to_string());
+            }
+            Some(path) => PartValue::File(path.trim().to_string()),
+            None => PartValue::Text(value.to_string()),
+        };
+        parts.push(Part {
+            name: name.to_string(),
+            value,
+            enabled,
+        });
+    }
+    Ok(parts)
+}
+
+/// Renders parts back to editor text.
+pub fn parts_to_text(parts: &[Part]) -> String {
+    parts
+        .iter()
+        .map(|part| {
+            let prefix = if part.enabled { "" } else { "# " };
+            match &part.value {
+                PartValue::Text(value) => format!("{prefix}{}: {value}", part.name),
+                PartValue::File(path) => format!("{prefix}{}: @{path}", part.name),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A guess at a file's media type from its extension, for uploads.
+pub fn content_type_for(path: &str) -> &'static str {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "text/javascript",
+        "yaml" | "yml" => "application/yaml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Renders variables for the text editor, one `name: value` per line.
@@ -850,6 +955,23 @@ mod tests {
             headers_to_text(&headers),
             "Accept: application/json\n# X-Debug: 1\nX-Token: abc:def"
         );
+    }
+
+    #[test]
+    fn multipart_parts_round_trip_and_report_mistakes() {
+        let text = "name: Rex\nphoto: @pets/rex.png\n# note: skipped\n";
+        let parts = parts_from_text(text).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].value, PartValue::Text("Rex".into()));
+        assert_eq!(parts[1].value, PartValue::File("pets/rex.png".into()));
+        assert!(!parts[2].enabled);
+        assert_eq!(parts_to_text(&parts), text.trim_end());
+
+        assert!(parts_from_text("just text").unwrap_err().contains("1"));
+        assert!(parts_from_text("name: ok\n: value").unwrap_err().contains("2"));
+        assert!(parts_from_text("photo: @").unwrap_err().contains("1"));
+        assert_eq!(content_type_for("pets/rex.PNG"), "image/png");
+        assert_eq!(content_type_for("blob"), "application/octet-stream");
     }
 
     #[test]

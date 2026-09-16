@@ -18,14 +18,16 @@ eventsource-stream = "0.2.3"
 futures-util = "0.3.34"
 indexmap = { version = "2.14.2", features = ["serde"] }
 oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
-reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate", "cookies"] }
+reqwest = { version = "0.13", features = ["stream", "gzip", "brotli", "deflate", "cookies", "multipart"] }
 reqwest_cookie_store = "0.10"
 rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# preserve_order keeps JSON keys in the order the API sent them, in bodies and
+# in JSONPath suggestions.
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_json_path = "0.7"
 serde_norway = "0.9.42"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "fs"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 uuid = { version = "1.26.1", features = ["v4"] }
