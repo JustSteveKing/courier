@@ -6303,4 +6303,49 @@ components:
             "the opaque value is echoed back: {signed}"
         );
     }
+
+    #[gpui_kit::test]
+    async fn auth_fields_are_not_squeezed_by_their_hint(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.auth = crate::model::Auth::Digest {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        storage::write_yaml(&path, &request).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update_window(window, |_, window, _| {
+            let username = window.find("auth-username").bounds();
+            let password = window.find("auth-password").bounds();
+            let hint = window.find("auth-hint").bounds();
+            // A hint sharing the row is what made these boxes too small to type in.
+            assert!(
+                hint.origin.y >= username.origin.y + username.size.height,
+                "the hint belongs under the fields, not beside them: fields at {:?}, hint at {:?}",
+                username.origin,
+                hint.origin
+            );
+            for (name, bounds) in [("username", username), ("password", password)] {
+                assert!(
+                    bounds.size.width >= px(140.),
+                    "the {name} field is only {:?} wide",
+                    bounds.size.width
+                );
+            }
+        })
+        .unwrap();
+    }
 }

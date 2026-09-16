@@ -349,8 +349,25 @@ impl Render for AuthForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let kind = self.selected_kind(cx);
-        let muted = |text: String| div().text_xs().text_color(theme.muted_foreground).child(text);
-        let fields = h_flex().flex_1().min_w_0().gap_2();
+        let muted = |text: String| {
+            div()
+                .id("auth-hint")
+                .test_support()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        // A field never shrinks below something you can actually type in; a row that can't
+        // fit its fields wraps instead.
+        let field = |id: &'static str, input: &Entity<InputState>| {
+            div()
+                .id(id)
+                .test_support()
+                .flex_1()
+                .min_w(px(140.))
+                .child(text_input(input).small())
+        };
+        let fields = h_flex().flex_1().min_w_0().flex_wrap().gap_2();
         let fields = match kind {
             Kind::Inherit => {
                 let description = match &self.inherited {
@@ -364,12 +381,12 @@ impl Render for AuthForm {
             }
             Kind::None => fields.child(muted(t!("auth.none_hint").to_string())),
             Kind::Basic => fields
-                .child(div().flex_1().child(text_input(&self.username).small()))
-                .child(div().flex_1().child(text_input(&self.password).small())),
-            Kind::Bearer => fields.child(div().flex_1().child(text_input(&self.token).small())),
+                .child(field("auth-username", &self.username))
+                .child(field("auth-password", &self.password)),
+            Kind::Bearer => fields.child(field("auth-token", &self.token)),
             Kind::ApiKey => fields
-                .child(div().w_32().child(text_input(&self.key_name).small()))
-                .child(div().flex_1().child(text_input(&self.key_value).small()))
+                .child(div().w_32().flex_none().child(text_input(&self.key_name).small()))
+                .child(field("auth-key-value", &self.key_value))
                 .child(
                     h_flex()
                         .child(
@@ -433,23 +450,26 @@ impl Render for AuthForm {
                     )
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().flex_1().child(text_input(&self.token_url).small()))
+                            .child(field("auth-token-url", &self.token_url))
                             .when(self.grant != OAuthGrant::ClientCredentials, |row| {
-                                row.child(div().flex_1().child(text_input(&self.auth_url).small()))
+                                row.child(field("auth-auth-url", &self.auth_url))
                             }),
                     )
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().flex_1().child(text_input(&self.client_id).small()))
-                            .child(div().flex_1().child(text_input(&self.client_secret).small())),
+                            .child(field("auth-client-id", &self.client_id))
+                            .child(field("auth-client-secret", &self.client_secret)),
                     )
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().flex_1().child(text_input(&self.scope).small()))
-                            .child(div().flex_1().child(text_input(&self.audience).small())),
+                            .child(field("auth-scope", &self.scope))
+                            .child(field("auth-audience", &self.audience)),
                     )
                     .children(self.token_status.clone().map(|status| {
                         div()
@@ -461,14 +481,8 @@ impl Render for AuthForm {
                     })),
             ),
             Kind::Digest => fields
-                .child(div().flex_1().child(text_input(&self.username).small()))
-                .child(div().flex_1().child(text_input(&self.password).small()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(t!("auth.digest_hint").to_string()),
-                ),
+                .child(field("auth-username", &self.username))
+                .child(field("auth-password", &self.password)),
             Kind::Jwt => fields.child(
                 v_flex()
                     .flex_1()
@@ -491,7 +505,7 @@ impl Render for AuthForm {
                                     }))
                             }))
                             .child(div().flex_1())
-                            .child(div().w_24().child(text_input(&self.jwt_prefix).small())),
+                            .child(div().w_24().flex_none().child(text_input(&self.jwt_prefix).small())),
                     )
                     .child(text_input(&self.jwt_key).small())
                     .child(text_input(&self.jwt_claims).small())
@@ -511,16 +525,18 @@ impl Render for AuthForm {
                     .gap_2()
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().flex_1().child(text_input(&self.aws_key_id).small()))
-                            .child(div().flex_1().child(text_input(&self.aws_secret).small())),
+                            .child(field("auth-aws-key-id", &self.aws_key_id))
+                            .child(field("auth-aws-secret", &self.aws_secret)),
                     )
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().w_32().child(text_input(&self.aws_region).small()))
-                            .child(div().w_24().child(text_input(&self.aws_service).small()))
-                            .child(div().flex_1().child(text_input(&self.aws_session).small())),
+                            .child(div().w_32().flex_none().child(text_input(&self.aws_region).small()))
+                            .child(div().w_24().flex_none().child(text_input(&self.aws_service).small()))
+                            .child(field("auth-aws-session", &self.aws_session)),
                     )
                     .child(
                         div()
@@ -531,14 +547,21 @@ impl Render for AuthForm {
             ),
         };
         let literal = self.value(cx).literal_credential().is_some();
+        // Hints go on their own line: sharing the row makes the fields too small to type in.
+        let hint = match kind {
+            Kind::Digest => Some(t!("auth.digest_hint").to_string()),
+            _ => None,
+        };
         v_flex()
             .gap_1()
             .child(
                 h_flex()
+                    .items_start()
                     .gap_2()
                     .child(div().w_32().flex_none().child(Select::new(&self.kind).small()))
                     .child(fields),
             )
+            .children(hint.map(muted))
             .when(literal, |form| {
                 form.child(
                     h_flex()
