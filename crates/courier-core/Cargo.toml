@@ -7,9 +7,12 @@ license = "MIT"
 
 [features]
 # In-memory secret store, temporary app paths and fixtures for tests in other crates.
-test-support = []
+test-support = ["dep:tonic-reflection", "dep:http-body", "dep:tempfile"]
 
 [dependencies]
+tonic-reflection = { version = "0.14", optional = true }
+http-body = { version = "1", optional = true }
+tempfile = { version = "3.27.0", optional = true }
 anyhow = "1.0.104"
 async-channel = "2.5.0"
 cookie_store = "0.22"
@@ -49,12 +52,9 @@ tokio-stream = "0.1"
 
 [dev-dependencies]
 futures-lite = "2.6.1"
-http-body = "1"
 rand = "0.8"
 rcgen = "0.14"
 rustls = "0.23"
 tempfile = "3.27.0"
 tokio-rustls = "0.26"
 tonic = { version = "0.14", features = ["router", "server"] }
-tonic-reflection = "0.14"
-tower-service = "0.3"

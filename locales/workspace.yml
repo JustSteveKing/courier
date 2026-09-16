@@ -964,3 +964,18 @@ keys.expand:
   es: Expandir la carpeta
   de: Ordner ausklappen
   fr: Déplier le dossier
+run.skip_grpc:
+  en: gRPC calls aren't run yet
+  es: Las llamadas gRPC todavía no se ejecutan
+  de: gRPC-Aufrufe werden noch nicht ausgeführt
+  fr: Les appels gRPC ne sont pas encore exécutés
+ws.new_grpc_request:
+  en: New gRPC call
+  es: Nueva llamada gRPC
+  de: Neuer gRPC-Aufruf
+  fr: Nouvel appel gRPC
+colors.kind_grpc:
+  en: gRPC calls
+  es: Llamadas gRPC
+  de: gRPC-Aufrufe
+  fr: Appels gRPC

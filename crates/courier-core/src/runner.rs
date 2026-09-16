@@ -142,6 +142,7 @@ async fn run_one(path: &Path, file: &RequestFile, context: &Context, sent: &mut 
             RequestKind::Graphql => "GQL".into(),
             RequestKind::WebSocket => "WS".into(),
             RequestKind::EventStream => "SSE".into(),
+            RequestKind::Grpc => "gRPC".into(),
             RequestKind::Http => file.method.clone(),
         },
         status: RunStatus::Passed,
@@ -160,6 +161,12 @@ async fn run_one(path: &Path, file: &RequestFile, context: &Context, sent: &mut 
         RequestKind::EventStream => {
             result.status = RunStatus::Skipped {
                 reason: t!("run.skip_event_stream").to_string(),
+            };
+            return result;
+        }
+        RequestKind::Grpc => {
+            result.status = RunStatus::Skipped {
+                reason: t!("run.skip_grpc").to_string(),
             };
             return result;
         }

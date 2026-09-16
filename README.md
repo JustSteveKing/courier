@@ -65,6 +65,10 @@ Pick **OAuth 2.0** on any auth row — collection, folder or request — choose 
 
 Tokens are kept in the keyring, keyed by a fingerprint of those settings, and refreshed shortly before they expire (spending the refresh token when there is one), so a token survives a restart and never reaches a file.
 
+### gRPC
+
+New request → **New gRPC call**. Point it at `grpc://host:port` (or `grpcs://` for TLS) and Courier reads what the server offers — through the server's own reflection service, or from `.proto` files you name, one per line, relative to the project. Pick a method, write the message as JSON, and send: unary calls answer once, streaming calls fill the message timeline as replies arrive, and the closing status and trailers appear at the end. Headers are sent as metadata. Nothing is generated ahead of time and `protoc` isn't needed.
+
 ### Where the time went
 
 The **Timing** tab, beside Body and Headers, breaks each response down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, laid out as a waterfall with the total, the address it reached, the body size, and whether the connection was opened or reused. `courier send` prints the same breakdown on stderr.

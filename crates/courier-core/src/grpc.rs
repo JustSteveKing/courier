@@ -497,10 +497,7 @@ async fn reflect(endpoint: &str, service: &str, options: &CallOptions) -> Result
             .and_then(|value| value.as_array().cloned())
             .unwrap_or_default();
         for descriptor in descriptors {
-            let Some(encoded) = descriptor
-                .as_str()
-                .and_then(crate::encoding::base64_decode)
-            else {
+            let Some(encoded) = descriptor.as_str().and_then(crate::encoding::base64_decode) else {
                 continue;
             };
             let file = prost_types::FileDescriptorProto::decode(encoded.as_slice())
@@ -612,11 +609,14 @@ pub fn proto_paths(files: &str, base: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
+/// A real gRPC server, built the same dynamic way Courier calls one, so that calls can be
+/// tested end to end here and in the app.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
 
-    const PROTO: &str = r#"
+    /// The service the test server offers.
+    pub const PROTO: &str = r#"
 syntax = "proto3";
 package pets;
 
@@ -640,69 +640,10 @@ message Pet {
 }
 "#;
 
-    fn schema() -> (tempfile::TempDir, Schema) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pets.proto");
-        std::fs::write(&path, PROTO).unwrap();
-        let schema = schema_from_protos(&[path], &[]).unwrap();
-        (dir, schema)
-    }
-
-    #[test]
-    fn reads_methods_from_proto_files() {
-        let (_dir, schema) = schema();
-        let names: Vec<String> = schema.methods.iter().map(|method| method.label()).collect();
-        assert_eq!(
-            names,
-            [
-                "PetService / AddPets",
-                "PetService / GetPet",
-                "PetService / ListPets",
-                "PetService / Watch"
-            ]
-        );
-        let watch = schema.methods.iter().find(|m| m.name == "Watch").unwrap();
-        assert!(watch.client_streaming && watch.server_streaming, "both ways stream");
-        assert_eq!(watch.path(), "/pets.PetService/Watch");
-        let get = schema.methods.iter().find(|m| m.name == "GetPet").unwrap();
-        assert!(!get.streaming(), "a plain call");
-    }
-
-    #[test]
-    fn offers_an_example_message_to_start_from() {
-        let (_dir, schema) = schema();
-        let example = schema.example_for("/pets.PetService/GetPet").unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&example).unwrap();
-        assert_eq!(parsed["id"], "");
-        assert_eq!(parsed["includeToys"], false, "fields use their JSON names");
-
-        // A message with an enum and a list of strings still parses as JSON.
-        let pet = schema.method("/pets.PetService/AddPets").unwrap().input();
-        let example: serde_json::Value = serde_json::from_str(&example_message(&pet, 0)).unwrap();
-        assert_eq!(example["kind"], "UNKNOWN");
-        assert_eq!(example["toys"], serde_json::json!([""]));
-    }
-
-    #[test]
-    fn converts_between_json_and_messages() {
-        let (_dir, schema) = schema();
-        let pet = schema.method("/pets.PetService/AddPets").unwrap().input();
-        let message = message_from_json(&pet, r#"{"id":"7","name":"Rex","kind":"DOG","toys":["ball"]}"#).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&message_to_json(&message)).unwrap();
-        assert_eq!(json["name"], "Rex");
-        assert_eq!(json["kind"], "DOG");
-        assert_eq!(json["toys"][0], "ball");
-
-        // An empty message is a valid one; a wrong field is not.
-        assert!(message_from_json(&pet, "").is_ok());
-        let error = message_from_json(&pet, r#"{"nope": 1}"#).unwrap_err().to_string();
-        assert!(error.contains("pets.Pet"), "{error}");
-    }
-
     /// A real server built the same dynamic way, so a call is tested end to end rather than
     /// against a stand-in.
     mod server {
-        use super::*;
+        use super::super::*;
         use prost_reflect::Value;
         use std::task::{Context, Poll};
         use tonic::codegen::http;
@@ -878,25 +819,24 @@ message Pet {
         }
     }
 
-    /// Starts the test server on a free port, with reflection turned on.
-    fn serve() -> (String, Schema, tokio::runtime::Runtime) {
-        let dir = tempfile::tempdir().unwrap();
+    /// Starts the server on a free port of `runtime`, with reflection turned on. Returns
+    /// the address and the schema it serves.
+    pub fn serve(runtime: &tokio::runtime::Runtime) -> (String, Schema) {
+        let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join("pets.proto");
-        std::fs::write(&path, PROTO).unwrap();
-        let descriptors = protox::compile([&path], [dir.path()]).unwrap();
-        let pool = DescriptorPool::from_file_descriptor_set(descriptors.clone()).unwrap();
+        std::fs::write(&path, PROTO).expect("writing the proto");
+        let descriptors = protox::compile([&path], [dir.path()]).expect("compiling the proto");
+        let pool = DescriptorPool::from_file_descriptor_set(descriptors.clone()).expect("a descriptor pool");
         let schema = Schema::from_pool(pool);
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("a free port");
+        let port = listener.local_addr().expect("the port").port();
         let reflection = tonic_reflection::server::Builder::configure()
             .register_file_descriptor_set(descriptors)
             .build_v1()
-            .unwrap();
+            .expect("the reflection service");
         let pets = server::Pets { schema: schema.clone() };
         runtime.spawn(async move {
             tonic::transport::Server::builder()
@@ -904,12 +844,99 @@ message Pet {
                 .add_service(reflection)
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
-                .unwrap();
+                .expect("serving");
         });
-        // The directory has to outlive the descriptors that came from it.
+        // The descriptors outlive the directory they came from.
         std::mem::forget(dir);
-        (format!("grpc://127.0.0.1:{port}"), schema, runtime)
+        (format!("grpc://127.0.0.1:{port}"), schema)
     }
+
+    /// The server with its own runtime, for callers that just want something to call.
+    /// It runs until this is dropped.
+    pub struct PetServer {
+        pub endpoint: String,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl PetServer {
+        pub fn start() -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let (endpoint, _schema) = serve(&runtime);
+            Self {
+                endpoint,
+                _runtime: runtime,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema() -> (tempfile::TempDir, Schema) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pets.proto");
+        std::fs::write(&path, PROTO).unwrap();
+        let schema = schema_from_protos(&[path], &[]).unwrap();
+        (dir, schema)
+    }
+
+    #[test]
+    fn reads_methods_from_proto_files() {
+        let (_dir, schema) = schema();
+        let names: Vec<String> = schema.methods.iter().map(|method| method.label()).collect();
+        assert_eq!(
+            names,
+            [
+                "PetService / AddPets",
+                "PetService / GetPet",
+                "PetService / ListPets",
+                "PetService / Watch"
+            ]
+        );
+        let watch = schema.methods.iter().find(|m| m.name == "Watch").unwrap();
+        assert!(watch.client_streaming && watch.server_streaming, "both ways stream");
+        assert_eq!(watch.path(), "/pets.PetService/Watch");
+        let get = schema.methods.iter().find(|m| m.name == "GetPet").unwrap();
+        assert!(!get.streaming(), "a plain call");
+    }
+
+    #[test]
+    fn offers_an_example_message_to_start_from() {
+        let (_dir, schema) = schema();
+        let example = schema.example_for("/pets.PetService/GetPet").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&example).unwrap();
+        assert_eq!(parsed["id"], "");
+        assert_eq!(parsed["includeToys"], false, "fields use their JSON names");
+
+        // A message with an enum and a list of strings still parses as JSON.
+        let pet = schema.method("/pets.PetService/AddPets").unwrap().input();
+        let example: serde_json::Value = serde_json::from_str(&example_message(&pet, 0)).unwrap();
+        assert_eq!(example["kind"], "UNKNOWN");
+        assert_eq!(example["toys"], serde_json::json!([""]));
+    }
+
+    #[test]
+    fn converts_between_json_and_messages() {
+        let (_dir, schema) = schema();
+        let pet = schema.method("/pets.PetService/AddPets").unwrap().input();
+        let message = message_from_json(&pet, r#"{"id":"7","name":"Rex","kind":"DOG","toys":["ball"]}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&message_to_json(&message)).unwrap();
+        assert_eq!(json["name"], "Rex");
+        assert_eq!(json["kind"], "DOG");
+        assert_eq!(json["toys"][0], "ball");
+
+        // An empty message is a valid one; a wrong field is not.
+        assert!(message_from_json(&pet, "").is_ok());
+        let error = message_from_json(&pet, r#"{"nope": 1}"#).unwrap_err().to_string();
+        assert!(error.contains("pets.Pet"), "{error}");
+    }
+
+    use crate::grpc::test_support::{PROTO, serve};
 
     fn collect(events: &std::sync::Arc<std::sync::Mutex<Vec<Event>>>) -> Vec<Event> {
         events.lock().unwrap().clone()
@@ -917,7 +944,11 @@ message Pet {
 
     #[test]
     fn calls_a_real_server_every_way_a_method_can_stream() {
-        let (endpoint, schema, runtime) = serve();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (endpoint, schema) = serve(&runtime);
         let options = CallOptions {
             metadata: vec![("x-tenant".into(), "acme".into())],
             timeout_secs: 5,
@@ -980,7 +1011,11 @@ message Pet {
 
     #[test]
     fn asks_a_server_what_it_serves() {
-        let (endpoint, _schema, runtime) = serve();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (endpoint, _schema) = serve(&runtime);
         let options = CallOptions {
             timeout_secs: 5,
             ..CallOptions::default()

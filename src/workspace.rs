@@ -3524,6 +3524,7 @@ fn new_request_label(kind: RequestKind) -> String {
         RequestKind::Graphql => t!("ws.new_graphql_request"),
         RequestKind::WebSocket => t!("ws.new_websocket_request"),
         RequestKind::EventStream => t!("ws.new_event_stream_request"),
+        RequestKind::Grpc => t!("ws.new_grpc_request"),
     }
     .to_string()
 }
@@ -3714,6 +3715,7 @@ fn request_label(request: &RequestFile) -> String {
         RequestKind::Graphql => "GQL".into(),
         RequestKind::WebSocket => "WS".into(),
         RequestKind::EventStream => "SSE".into(),
+        RequestKind::Grpc => "gRPC".into(),
         RequestKind::Http => request.method.clone(),
     }
 }
@@ -3760,6 +3762,7 @@ pub(super) fn kind_name(kind: RequestKind) -> String {
         RequestKind::Graphql => t!("colors.kind_graphql"),
         RequestKind::WebSocket => t!("colors.kind_websocket"),
         RequestKind::EventStream => t!("colors.kind_sse"),
+        RequestKind::Grpc => t!("colors.kind_grpc"),
     }
     .to_string()
 }
@@ -4638,6 +4641,10 @@ components:
         let stream = read("new-event-stream-sse.yaml");
         assert_eq!(stream.headers[0].value, "text/event-stream");
         assert_eq!(request_label(&stream), "SSE");
+        let grpc = read("new-grpc-call.yaml");
+        assert_eq!(request_label(&grpc), "gRPC");
+        assert_eq!(grpc.url, "grpc://localhost:50051");
+        assert!(grpc.grpc.is_some(), "and it knows it's a gRPC call");
 
         // Each kind has its own label colour, which can be changed and is saved.
         cx.update(|cx| {
@@ -4664,7 +4671,7 @@ components:
         cx.update(|cx| {
             let ws = workspace.read(cx);
             let path = ws.editor().read(cx).path().cloned().unwrap();
-            assert!(path.ends_with("new-event-stream-sse.yaml"), "the newest is open");
+            assert!(path.ends_with("new-grpc-call.yaml"), "the newest is open");
         });
     }
 
@@ -7328,5 +7335,118 @@ workspace::NewScratchRequest: \"\"\n",
             per_frame < Duration::from_millis(100),
             "a frame took {per_frame:?}, which would feel slow"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn a_grpc_call_reads_the_api_and_answers_on_the_timeline(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let project = project::project_dir(&root).to_path_buf();
+        // A .proto in the project, so the schema comes from a file rather than a server.
+        fs::write(
+            project.join("pets.proto"),
+            r#"
+syntax = "proto3";
+package pets;
+service PetService {
+  rpc GetPet(GetPetRequest) returns (Pet);
+  rpc ListPets(ListPetsRequest) returns (stream Pet);
+}
+message GetPetRequest { string id = 1; }
+message ListPetsRequest { int32 limit = 1; }
+message Pet { string id = 1; string name = 2; }
+"#,
+        )
+        .unwrap();
+
+        let path = root.join("call.yaml");
+        let mut request = crate::model::RequestKind::Grpc.template("Get pet");
+        request.url = "grpc://127.0.0.1:1".into(); // replaced below, once the server has a port
+        request.grpc = Some(crate::model::Grpc {
+            method: "/pets.PetService/GetPet".into(),
+            protos: "pets.proto".into(),
+        });
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+        })
+        .unwrap();
+
+        // The .proto is read, and its methods reach the picker.
+        let mut methods = Vec::new();
+        for _ in 0..100 {
+            cx.run_until_parked();
+            methods = cx.update(|cx| editor.read(cx).grpc_methods_for_test());
+            if !methods.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            methods,
+            ["PetService / GetPet", "PetService / ListPets"],
+            "the methods come from the .proto"
+        );
+
+        // And a call goes out to a real server, with its answers on the timeline.
+        // A real gRPC server, running until this test ends.
+        let server = courier_core::grpc::test_support::PetServer::start();
+        let endpoint = server.endpoint.clone();
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = endpoint;
+        request.body = Some(crate::model::Body {
+            kind: crate::model::BodyKind::Json,
+            content: r#"{"id":"7"}"#.into(),
+        });
+        storage::write_yaml(&path, &request).unwrap();
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+        })
+        .unwrap();
+        // Opening it reads the API again; sending waits for that.
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).grpc_methods_for_test().is_empty()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| editor.read(cx).ws_summary().is_some_and(|(_, connected, _)| !connected)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        if let Some(error) = cx.update(|cx| editor.read(cx).grpc_error_for_test()) {
+            panic!("the call never happened: {error}");
+        }
+        let messages = cx.update(|cx| editor.read(cx).ws_messages_for_test());
+        assert_eq!(messages.len(), 2, "what was sent and what came back: {messages:?}");
+        assert!(messages[0].0, "the request is on the timeline first");
+        assert!(
+            !messages[1].0 && messages[1].1.contains("\"name\": \"Rex\""),
+            "the reply came back as JSON: {messages:?}"
+        );
+        let status = cx
+            .update(|cx| editor.read(cx).grpc_status_for_test())
+            .unwrap_or_default();
+        assert!(status.starts_with("Ok"), "the call finished cleanly: {status}");
     }
 }

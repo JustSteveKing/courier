@@ -1,5 +1,6 @@
 //! The request editor on the right: edit, save, send, and show the response.
 
+mod grpc;
 mod highlight;
 mod json_filter;
 mod schema;
@@ -304,6 +305,10 @@ pub struct RequestEditor {
     inherited_settings: RequestSettings,
     /// What kind of body to send, or `None` to decide from the Content-Type header.
     body_kind: Entity<SelectState<SearchableVec<SharedString>>>,
+    /// The gRPC method picker, the `.proto` files to read, and what's known about the server.
+    grpc_method: Entity<SelectState<SearchableVec<SharedString>>>,
+    grpc_protos: Entity<EditorState>,
+    grpc: grpc::GrpcState,
     /// The URL's query parameters as `name=value` lines, kept in sync with the URL.
     params: Entity<EditorState>,
     disabled_params: Vec<QueryParam>,
@@ -539,6 +544,29 @@ impl RequestEditor {
             this.sync_schema(cx);
         })
         .detach();
+        let grpc_method =
+            cx.new(|cx| SelectState::new(SearchableVec::new(Vec::<SharedString>::new()), None, window, cx));
+        cx.subscribe(
+            &grpc_method,
+            |this, _, _: &SelectEvent<SearchableVec<SharedString>>, cx| {
+                this.update_dirty(cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        let grpc_protos = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("text")
+                .line_number(false)
+                .folding(false)
+                .placeholder(t!("grpc.protos_placeholder").to_string())
+        });
+        cx.subscribe(&grpc_protos, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.update_dirty(cx);
+            }
+        })
+        .detach();
         let body_kind = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(
@@ -583,6 +611,9 @@ impl RequestEditor {
             params_to_url: false,
             body,
             body_kind,
+            grpc_method,
+            grpc_protos,
+            grpc: grpc::GrpcState::default(),
             graphql_query,
             graphql_variables,
             operation_name,
@@ -698,6 +729,44 @@ impl RequestEditor {
         self.state()
             .and_then(|s| s.ws.as_ref())
             .map(|log| (log.total, log.connected, log.ended.is_some()))
+    }
+
+    /// The timeline's messages as text, newest last, for tests.
+    #[cfg(test)]
+    pub fn ws_messages_for_test(&self) -> Vec<(bool, String)> {
+        self.state()
+            .and_then(|s| s.ws.as_ref())
+            .map(|log| {
+                log.messages
+                    .iter()
+                    .map(|record| {
+                        let text = match &record.message.payload {
+                            crate::transport::WsPayload::Text(text) => text.clone(),
+                            crate::transport::WsPayload::Binary(bytes) => format!("{} bytes", bytes.len()),
+                            crate::transport::WsPayload::Close(reason) => reason.clone(),
+                        };
+                        (record.message.outgoing, text)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The methods the gRPC picker is showing.
+    #[cfg(test)]
+    pub fn grpc_methods_for_test(&self) -> Vec<String> {
+        self.grpc.methods().iter().map(|method| method.label()).collect()
+    }
+
+    #[cfg(test)]
+    pub fn grpc_error_for_test(&self) -> Option<String> {
+        self.grpc.error.clone()
+    }
+
+    /// The gRPC status line, once a call has finished.
+    #[cfg(test)]
+    pub fn grpc_status_for_test(&self) -> Option<String> {
+        self.state().and_then(|s| s.ws.as_ref()).map(|log| log.status.clone())
     }
 
     #[cfg(test)]
@@ -1188,6 +1257,29 @@ impl RequestEditor {
         true
     }
 
+    /// The gRPC settings as the pickers have them, for a request that is a gRPC call.
+    fn grpc_settings(&self, cx: &App) -> Option<crate::model::Grpc> {
+        self.saved.as_ref()?.grpc.as_ref()?;
+        Some(crate::model::Grpc {
+            method: self
+                .selected_grpc_method(cx)
+                .map(|method| method.path())
+                .or_else(|| {
+                    self.saved
+                        .as_ref()
+                        .and_then(|saved| saved.grpc.as_ref())
+                        .map(|grpc| grpc.method.clone())
+                })
+                .unwrap_or_default(),
+            protos: self.grpc_protos.read(cx).value().trim().to_string(),
+        })
+    }
+
+    /// Whether the open request is a gRPC call.
+    pub(super) fn is_grpc(&self) -> bool {
+        self.saved.as_ref().is_some_and(|saved| saved.grpc.is_some())
+    }
+
     /// The body kind the user picked, or `None` for "decide from the Content-Type".
     fn chosen_body_kind(&self, cx: &App) -> Option<BodyKind> {
         let index = self.body_kind.read(cx).selected_index(cx).map_or(0, |ix| ix.row);
@@ -1354,6 +1446,13 @@ impl RequestEditor {
             .update(cx, |s, cx| s.set_value(request.checks.join("\n"), window, cx));
         let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         self.body.update(cx, |s, cx| s.set_value(body, window, cx));
+        if let Some(grpc) = &request.grpc {
+            self.grpc_protos
+                .update(cx, |state, cx| state.set_value(grpc.protos.clone(), window, cx));
+            // Opening a gRPC call reads its API, so the method picker has something in it.
+            self.grpc.schema = None;
+            self.load_grpc_schema(true, window, cx);
+        }
         let kind_index = request
             .body
             .as_ref()
@@ -1437,6 +1536,7 @@ impl RequestEditor {
                 checks: self.check_lines(cx),
                 auth: self.auth.read(cx).value(cx),
                 settings: saved.settings.clone(),
+                grpc: None,
                 graphql: Some(Graphql {
                     query: self.graphql_query.read(cx).value().to_string(),
                     variables: self.graphql_variables.read(cx).value().to_string(),
@@ -1473,6 +1573,7 @@ impl RequestEditor {
             order: saved.order,
             messages: saved.messages,
             graphql: None,
+            grpc: self.grpc_settings(cx),
             disabled_params: self.disabled_params.clone(),
             checks: self.check_lines(cx),
             auth: self.auth.read(cx).value(cx),
@@ -1790,6 +1891,12 @@ impl RequestEditor {
         let Some(path) = self.path.clone() else {
             return;
         };
+        // A gRPC call goes out its own way: a method on a channel, not a URL over HTTP.
+        if self.is_grpc() {
+            self.save(cx);
+            self.send_grpc(window, cx);
+            return;
+        }
         let id = self.next_send_id;
         let websocket = self.is_websocket(cx);
         let state = self.responses.entry(path.clone()).or_default();
@@ -2719,6 +2826,11 @@ impl Render for RequestEditor {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
+                            .when(self.is_grpc(), |column| {
+                                column
+                                    .child(label(t!("grpc.method_label").to_string()))
+                                    .child(self.render_grpc_bar(cx))
+                            })
                             .child(label(t!("request.auth_label").to_string()))
                             .child(self.auth.clone())
                             .child(label(t!("request.params_label").to_string()))

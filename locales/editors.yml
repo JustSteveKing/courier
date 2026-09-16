@@ -1511,3 +1511,53 @@ auth.digest_hint:
   es: Primero se pide un desafío al servidor, así que una solicitud Digest se envía dos veces.
   de: Zuerst wird beim Server eine Challenge angefordert, daher geht eine Digest-Anfrage zweimal raus.
   fr: Le serveur est d'abord interrogé pour un défi, donc une requête Digest part deux fois.
+grpc.protos_placeholder:
+  en: ".proto files, one per line (empty asks the server)"
+  es: "Archivos .proto, uno por línea (si está vacío se pregunta al servidor)"
+  de: ".proto-Dateien, eine pro Zeile (leer fragt den Server)"
+  fr: "Fichiers .proto, un par ligne (vide interroge le serveur)"
+grpc.reload:
+  en: Read the server's API again
+  es: Volver a leer la API del servidor
+  de: Die API des Servers neu lesen
+  fr: Relire l'API du serveur
+grpc.loading:
+  en: Reading the API…
+  es: Leyendo la API…
+  de: API wird gelesen…
+  fr: Lecture de l'API…
+grpc.no_schema_yet:
+  en: Choose Read the server's API, or name a .proto file.
+  es: Elige leer la API del servidor, o indica un archivo .proto.
+  de: Lies die API des Servers, oder gib eine .proto-Datei an.
+  fr: Lisez l'API du serveur, ou indiquez un fichier .proto.
+grpc.no_schema:
+  en: Reading the API first; send again once it's there.
+  es: Primero se lee la API; vuelve a enviar cuando esté.
+  de: Zuerst wird die API gelesen; sende erneut, sobald sie da ist.
+  fr: L'API est lue d'abord ; renvoyez une fois qu'elle est là.
+grpc.no_method:
+  en: Choose a method to call.
+  es: Elige un método al que llamar.
+  de: Wähle eine Methode zum Aufrufen.
+  fr: Choisissez une méthode à appeler.
+grpc.client_streaming:
+  en: This method takes a stream of messages; the saved messages go with the first.
+  es: Este método recibe un flujo de mensajes; los mensajes guardados van con el primero.
+  de: Diese Methode nimmt einen Nachrichtenstrom; die gespeicherten Nachrichten gehen mit.
+  fr: Cette méthode reçoit un flux de messages ; les messages enregistrés partent avec.
+grpc.server_streaming:
+  en: This method answers with a stream of messages.
+  es: Este método responde con un flujo de mensajes.
+  de: Diese Methode antwortet mit einem Nachrichtenstrom.
+  fr: Cette méthode répond par un flux de messages.
+grpc.both_streaming:
+  en: Both sides stream on this method.
+  es: En este método ambos lados transmiten.
+  de: Bei dieser Methode streamen beide Seiten.
+  fr: Les deux côtés diffusent sur cette méthode.
+grpc.method_label:
+  en: Method
+  es: Método
+  de: Methode
+  fr: Méthode

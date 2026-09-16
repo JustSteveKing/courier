@@ -61,6 +61,12 @@ pub struct RequestColors {
     pub graphql: LabelColor,
     pub websocket: LabelColor,
     pub sse: LabelColor,
+    #[serde(default = "grpc_colour")]
+    pub grpc: LabelColor,
+}
+
+fn grpc_colour() -> LabelColor {
+    LabelColor::Blue
 }
 
 impl Default for RequestColors {
@@ -69,6 +75,7 @@ impl Default for RequestColors {
             http: LabelColor::Method,
             graphql: LabelColor::Magenta,
             websocket: LabelColor::Cyan,
+            grpc: grpc_colour(),
             sse: LabelColor::Blue,
         }
     }
@@ -82,6 +89,7 @@ impl RequestColors {
             Graphql => self.graphql,
             WebSocket => self.websocket,
             EventStream => self.sse,
+            Grpc => self.grpc,
         }
     }
 
@@ -92,6 +100,7 @@ impl RequestColors {
             Graphql => self.graphql = color,
             WebSocket => self.websocket = color,
             EventStream => self.sse = color,
+            Grpc => self.grpc = color,
         }
     }
 }

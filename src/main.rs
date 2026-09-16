@@ -12,8 +12,8 @@ mod workspace;
 
 // The engine lives in `courier-core`; these keep `crate::model` and friends working here.
 pub(crate) use courier_core::{
-    body_view, chain, checks, cookies, credentials, digest, dotenv, export, git, graphql, http, import, jwt, model,
-    oauth, paths, project, response_cache, runner, secret_store, sigv4, storage, template_assist, transport,
+    body_view, chain, checks, cookies, credentials, digest, dotenv, export, git, graphql, grpc, http, import, jwt,
+    model, oauth, paths, project, response_cache, runner, secret_store, sigv4, storage, template_assist, transport,
 };
 
 use gpui_kit::component::Root;

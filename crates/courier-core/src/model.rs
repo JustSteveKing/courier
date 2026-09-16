@@ -427,6 +427,9 @@ pub struct RequestFile {
     /// Present for a GraphQL request; the body is built from it when sending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphql: Option<Graphql>,
+    /// Present for a gRPC call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grpc: Option<Grpc>,
     /// Query parameters switched off in the params editor. Enabled ones live in the URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_params: Vec<QueryParam>,
@@ -522,6 +525,7 @@ impl RequestFile {
             disabled_params: Vec::new(),
             checks: Vec::new(),
             graphql: None,
+            grpc: None,
             auth: Auth::Inherit,
             settings: RequestSettings::default(),
         }
@@ -547,15 +551,24 @@ pub enum RequestKind {
     Graphql,
     WebSocket,
     EventStream,
+    Grpc,
 }
 
 impl RequestKind {
-    pub const ALL: [RequestKind; 4] = [Self::Http, Self::Graphql, Self::WebSocket, Self::EventStream];
+    pub const ALL: [RequestKind; 5] = [
+        Self::Http,
+        Self::Graphql,
+        Self::WebSocket,
+        Self::EventStream,
+        Self::Grpc,
+    ];
 
     /// What kind of request `request` is: GraphQL, a WebSocket URL, an event stream (asks
     /// for `text/event-stream`) or plain HTTP.
     pub fn of(request: &RequestFile) -> Self {
-        if request.graphql.is_some() {
+        if request.grpc.is_some() {
+            Self::Grpc
+        } else if request.graphql.is_some() {
             Self::Graphql
         } else if is_websocket_url(&request.url) {
             Self::WebSocket
@@ -584,9 +597,26 @@ impl RequestKind {
             }
             Self::WebSocket => request.url = "wss://".into(),
             Self::EventStream => request.headers = vec![Header::new("Accept", "text/event-stream")],
+            Self::Grpc => {
+                request.url = "grpc://localhost:50051".into();
+                request.grpc = Some(Grpc::default());
+            }
         }
         request
     }
+}
+
+/// A gRPC call: which method, and where its descriptors come from. The message itself is
+/// the request's body, and a streaming call's messages are its `messages`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Grpc {
+    /// `/package.Service/Method`, as gRPC names it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub method: String,
+    /// `.proto` files to read, one per line, relative to the project. Empty means asking
+    /// the server through reflection instead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub protos: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -1012,6 +1042,7 @@ mod tests {
                 content: "{\"op\": \"sub\"}".into(),
             }],
             graphql: None,
+            grpc: None,
             disabled_params: vec![QueryParam {
                 name: "debug".into(),
                 value: "1".into(),
