@@ -779,3 +779,33 @@ ws.paste_curl_hint:
   es: Copia primero un comando curl y pégalo aquí para crear una solicitud a partir de él.
   de: Kopiere zuerst einen curl-Befehl und füge ihn hier ein, um daraus eine Anfrage zu machen.
   fr: Copiez d'abord une commande curl, puis collez-la ici pour en créer une requête.
+ws.new_project_insomnia:
+  en: From an Insomnia export
+  es: Desde una exportación de Insomnia
+  de: Aus einem Insomnia-Export
+  fr: Depuis un export Insomnia
+ws.new_project_insomnia_detail:
+  en: Requests, folders, environments and auth from a v4 or v5 export.
+  es: Solicitudes, carpetas, entornos y autenticación de una exportación v4 o v5.
+  de: Anfragen, Ordner, Umgebungen und Auth aus einem v4- oder v5-Export.
+  fr: Requêtes, dossiers, environnements et authentification d'un export v4 ou v5.
+ws.new_project_har:
+  en: From a HAR recording
+  es: Desde una grabación HAR
+  de: Aus einer HAR-Aufzeichnung
+  fr: Depuis un enregistrement HAR
+ws.new_project_har_detail:
+  en: Turn traffic saved from your browser's dev tools into requests.
+  es: Convierte el tráfico guardado desde las herramientas del navegador en solicitudes.
+  de: Macht aus dem in den Browser-Entwicklertools gespeicherten Verkehr Anfragen.
+  fr: Transforme le trafic enregistré depuis les outils du navigateur en requêtes.
+ws.pick_insomnia:
+  en: Choose an Insomnia export
+  es: Elige una exportación de Insomnia
+  de: Insomnia-Export wählen
+  fr: Choisir un export Insomnia
+ws.pick_har:
+  en: Choose a HAR file
+  es: Elige un archivo HAR
+  de: HAR-Datei wählen
+  fr: Choisir un fichier HAR

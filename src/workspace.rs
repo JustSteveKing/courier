@@ -1483,6 +1483,20 @@ impl Workspace {
                         t!("ws.new_project_asyncapi").to_string(),
                         t!("ws.new_project_asyncapi_detail").to_string(),
                         |this, window, cx| this.new_project_from(ImportFormat::AsyncApi, window, cx),
+                    ))
+                    .child(choice(
+                        "new-project-insomnia",
+                        IconName::Inbox,
+                        t!("ws.new_project_insomnia").to_string(),
+                        t!("ws.new_project_insomnia_detail").to_string(),
+                        |this, window, cx| this.new_project_from(ImportFormat::Insomnia, window, cx),
+                    ))
+                    .child(choice(
+                        "new-project-har",
+                        IconName::Globe,
+                        t!("ws.new_project_har").to_string(),
+                        t!("ws.new_project_har_detail").to_string(),
+                        |this, window, cx| this.new_project_from(ImportFormat::Har, window, cx),
                     ));
                 content.child(rows)
             };
@@ -1771,6 +1785,8 @@ impl Workspace {
             ImportFormat::Postman => t!("ws.pick_postman_collection"),
             ImportFormat::OpenApi => t!("ws.pick_openapi"),
             ImportFormat::AsyncApi => t!("ws.pick_asyncapi"),
+            ImportFormat::Insomnia => t!("ws.pick_insomnia"),
+            ImportFormat::Har => t!("ws.pick_har"),
         };
         self.pick_path(false, prompt.to_string(), window, cx, |this, file, window, cx| {
             let result = fs::read_to_string(&file)
@@ -3667,6 +3683,8 @@ mod tests {
                 "new-project-postman",
                 "new-project-openapi",
                 "new-project-asyncapi",
+                "new-project-insomnia",
+                "new-project-har",
             ] {
                 assert!(window.try_find(id).is_some(), "offers {id}");
             }
@@ -6510,5 +6528,42 @@ components:
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(found, "the watcher reloads a changed .env");
+    }
+
+    #[gpui_kit::test]
+    async fn a_har_recording_imports_into_an_open_collection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let har = r#"{"log":{"creator":{"name":"Firefox"},"entries":[
+        {"request":{"method":"GET","url":"https://api.test/pets","headers":[
+            {"name":"Cookie","value":"session=abc"},
+            {"name":"Authorization","value":"Bearer tok-1"}]}},
+        {"request":{"method":"POST","url":"https://api.test/pets","headers":[],
+            "postData":{"mimeType":"application/json","text":"{\"name\":\"Rex\"}"}}}
+    ]}}"#;
+        let (format, import) = import::parse_collection_file(har).unwrap();
+        assert_eq!(format, ImportFormat::Har);
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.import_into(&root, import, window, cx).unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let made: RequestFile = storage::read_yaml(&root.join("get-pets.yaml")).unwrap();
+        assert_eq!(made.method, "GET");
+        assert!(
+            !made.headers.iter().any(|h| h.name.eq_ignore_ascii_case("cookie")),
+            "the recorded cookie header is left out: {:?}",
+            made.headers
+        );
+        // The bearer token became auth, and the workspace hoisted it into a secret.
+        let saved = fs::read_to_string(root.join("get-pets.yaml")).unwrap();
+        assert!(!saved.contains("tok-1"), "no literal token in the YAML:\n{saved}");
+        assert!(root.join("post-pets.yaml").exists());
     }
 }

@@ -2,6 +2,8 @@
 
 pub mod asyncapi;
 pub mod curl;
+pub mod har;
+pub mod insomnia;
 pub mod openapi;
 pub mod postman;
 mod spec;
@@ -65,6 +67,9 @@ pub enum ImportFormat {
     Postman,
     OpenApi,
     AsyncApi,
+    /// A recording from browser dev tools or a proxy.
+    Har,
+    Insomnia,
 }
 
 impl ImportFormat {
@@ -74,6 +79,10 @@ impl ImportFormat {
             Some(Self::OpenApi)
         } else if document.get("asyncapi").is_some() {
             Some(Self::AsyncApi)
+        } else if document.pointer("/log/entries").is_some() {
+            Some(Self::Har)
+        } else if insomnia::is_insomnia(document) {
+            Some(Self::Insomnia)
         } else if document.pointer("/info/name").is_some() && document.get("item").is_some() {
             Some(Self::Postman)
         } else {
@@ -90,9 +99,23 @@ pub fn parse_collection_file(text: &str) -> Result<(ImportFormat, CollectionImpo
         Some(ImportFormat::Postman) => (ImportFormat::Postman, postman::parse_collection(text)?),
         Some(ImportFormat::OpenApi) => (ImportFormat::OpenApi, keep_order(openapi::convert(&document)?)),
         Some(ImportFormat::AsyncApi) => (ImportFormat::AsyncApi, keep_order(asyncapi::convert(&document)?)),
-        None => bail!("Not a Postman collection, OpenAPI or AsyncAPI document"),
+        Some(ImportFormat::Har) => (
+            ImportFormat::Har,
+            keep_order(har::convert(&document, &har_name(&document))?),
+        ),
+        Some(ImportFormat::Insomnia) => (ImportFormat::Insomnia, keep_order(insomnia::convert(&document)?)),
+        None => bail!("Not a Postman collection, OpenAPI, AsyncAPI, HAR or Insomnia document"),
     };
     Ok(import)
+}
+
+/// A HAR has no name of its own; the tool that recorded it is the best there is.
+fn har_name(document: &serde_json::Value) -> String {
+    document
+        .pointer("/log/creator/name")
+        .and_then(serde_json::Value::as_str)
+        .map(|creator| format!("{creator} recording"))
+        .unwrap_or_else(|| "Recording".to_string())
 }
 
 /// Numbers requests in document order, so the sidebar lists them as the spec does.

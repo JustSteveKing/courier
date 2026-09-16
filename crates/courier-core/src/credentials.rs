@@ -34,6 +34,29 @@ pub fn hoist_credentials_with(
     added
 }
 
+/// Moves a request's auth credential (a password, token or key written literally) into
+/// `secrets`, leaving a `{{placeholder}}` behind. Returns the secret's name when one was
+/// added. Headers are handled by [`hoist_credentials_with`]; this is the auth row.
+pub fn hoist_auth(
+    request: &mut RequestFile,
+    secrets: &mut Variables,
+    is_reserved: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let value = request.auth.literal_credential()?.to_string();
+    // The same credential twice gets one secret, as it does for headers.
+    if let Some((name, _)) = secrets.iter().find(|(_, existing)| **existing == value) {
+        let name = name.clone();
+        request.auth.set_credential(format!("{{{{{name}}}}}"));
+        return None;
+    }
+    let name = unique_name(&request.auth.credential_name(), |candidate| {
+        secrets.contains_key(candidate) || is_reserved(candidate)
+    });
+    request.auth.set_credential(format!("{{{{{name}}}}}"));
+    secrets.insert(name.clone(), value);
+    Some(name)
+}
+
 /// Hoists just one header (by index) — used by the request editor's "Move to secret" button.
 /// Returns the secret name now referenced by the header (newly added, or an existing name whose
 /// value was identical), or None if that header holds no literal credential.

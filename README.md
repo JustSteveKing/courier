@@ -81,6 +81,10 @@ Paste one into the URL bar and it fills the open request — method, URL, header
 
 Each request you open gets a tab; opening one that's already open moves to it. `ctrl-w` closes the current tab, `ctrl-tab` and `ctrl-shift-tab` move between them, and the strip only appears once a second request is open. Tabs come back where you left them after a restart, and a tab whose request is renamed or moved follows it.
 
+### Importing from elsewhere
+
+New project (or **Import here** on a collection) takes a Postman collection, an OpenAPI or AsyncAPI document, an **Insomnia** export (v4 JSON or v5 YAML, with folders, environments and auth), or a **HAR** recording from your browser's dev tools. A HAR becomes one request per method and path — the same call recorded twenty times collapses into one — with the browser's own headers and cookies left out, the first host lifted into `base_url`, and recorded tokens moved into secrets rather than into the files. Anything that couldn't be carried across is reported.
+
 ### .env files as environments
 
 A project's `.env`, `.env.local`, `.env.staging` and friends appear in the environment picker after the collection's own environments, and `{{API_URL}}` resolves from whichever you pick. They're read, never written: Courier doesn't edit them, and the environment manager stays on Courier's own files. Editing a `.env` in your editor updates Courier straight away, and `.env.example` and friends are left out, since they hold placeholders rather than values.
