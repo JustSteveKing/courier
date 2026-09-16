@@ -87,6 +87,13 @@ impl Render for DraggedRequest {
     }
 }
 
+/// What a collection can be exported as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportFormat {
+    Postman,
+    OpenApi,
+}
+
 /// Dragged while resizing the sidebar.
 struct SidebarResize;
 
@@ -1688,6 +1695,74 @@ impl Workspace {
         });
     }
 
+    /// Writes an export of `root`'s collection to a file the user picks.
+    fn export_collection(&mut self, root: PathBuf, format: ExportFormat, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(collection) = self.collections.iter().find(|c| c.root == root) else {
+            return;
+        };
+        let document = match format {
+            ExportFormat::Postman => crate::export::postman(collection),
+            ExportFormat::OpenApi => crate::export::openapi(collection),
+        };
+        let name = format!(
+            "{}{}",
+            crate::model::slugify(&collection.file.name),
+            match format {
+                ExportFormat::Postman => ".postman_collection.json",
+                ExportFormat::OpenApi => ".openapi.json",
+            }
+        );
+        self.write_export(document, name, window, cx);
+    }
+
+    /// Writes a request's saved responses as a HAR file.
+    fn export_history(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(request) = self.find_request(&path).cloned() else {
+            return;
+        };
+        let Some(key) = self.response_key(&path) else {
+            return;
+        };
+        let cache = ResponseCache::new(&self.paths.cache_dir);
+        let responses = cache.load_history(&key);
+        if responses.is_empty() {
+            notify_error(t!("ws.export_no_history").to_string(), window, cx);
+            return;
+        }
+        let document = crate::export::har(&request, &responses);
+        let name = format!("{}.har", crate::model::slugify(&request.name));
+        self.write_export(document, name, window, cx);
+    }
+
+    fn write_export(&mut self, document: serde_json::Value, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let start = self
+            .active_collection(cx)
+            .map(|collection| project::project_dir(&collection.root).to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let path = cx.prompt_for_new_path(&start, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = path.await else {
+                return;
+            };
+            let written = cx
+                .background_executor()
+                .spawn(async move {
+                    let text = serde_json::to_string_pretty(&document)?;
+                    std::fs::write(&path, text).map(|()| path).map_err(anyhow::Error::from)
+                })
+                .await;
+            this.update_in(cx, |_, window, cx| match written {
+                Ok(path) => window.push_notification(
+                    Notification::success(t!("ws.exported", path = path.display()).to_string()),
+                    cx,
+                ),
+                Err(e) => notify_error(format!("{e:#}"), window, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Makes a request in `dir` from a curl command, hoisting any credentials into secrets,
     /// and opens it. Returns whether it parsed; `loud` reports the reason when it didn't.
     fn create_from_curl(
@@ -3146,6 +3221,7 @@ fn request_menu(
         .item(item("ws.copy_as_curl_with_secrets", |this, path, window, cx| {
             this.copy_as_curl(path, true, window, cx)
         }))
+        .item(item("ws.export_history", Workspace::export_history))
         .separator()
         .when_some(request.parent(), |menu, dir| {
             let (weak, dir) = (weak.clone(), dir.to_path_buf());
@@ -3206,6 +3282,12 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
         .item(item("ws.manage_environments_ellipsis", Workspace::manage_environments))
         .item(item("cookies.menu", Workspace::manage_cookies))
         .separator()
+        .item(item("ws.export_postman", |this, root, window, cx| {
+            this.export_collection(root, ExportFormat::Postman, window, cx)
+        }))
+        .item(item("ws.export_openapi", |this, root, window, cx| {
+            this.export_collection(root, ExportFormat::OpenApi, window, cx)
+        }))
         .item(item("ws.import_curl", Workspace::import_curl_dialog))
         .item(item("ws.import_file_here", Workspace::import_file_into))
         .item(item(
@@ -6565,5 +6647,47 @@ components:
         let saved = fs::read_to_string(root.join("get-pets.yaml")).unwrap();
         assert!(!saved.contains("tok-1"), "no literal token in the YAML:\n{saved}");
         assert!(root.join("post-pets.yaml").exists());
+    }
+
+    #[gpui_kit::test]
+    async fn exports_carry_names_but_never_secret_values(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+
+        // A collection with a secret, and a request that refers to it.
+        let mut file: crate::model::CollectionFile = storage::read_yaml(&root.join("collection.yaml")).unwrap();
+        file.secrets.push("token".into());
+        storage::save_collection_file(&root, &file).unwrap();
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.auth = crate::model::Auth::Bearer {
+            token: "{{token}}".into(),
+        };
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.reload_collection(&root, window, cx));
+        })
+        .unwrap();
+
+        let (postman, openapi) = cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let collection = ws.collections.iter().find(|c| c.root == root).unwrap();
+            (crate::export::postman(collection), crate::export::openapi(collection))
+        });
+        let postman = serde_json::to_string(&postman).unwrap();
+        assert!(postman.contains("{{token}}"), "the reference travels");
+        assert!(postman.contains("v2.1.0"), "a Postman v2.1 collection");
+        // The secret's value lives in the store; even so, nothing resembling it is written.
+        assert!(!postman.contains("secret-value"), "{postman}");
+        let (format, _) = import::parse_collection_file(&postman).unwrap();
+        assert_eq!(format, ImportFormat::Postman, "and our own importer reads it back");
+
+        let openapi = serde_json::to_string(&openapi).unwrap();
+        assert!(openapi.contains("3.1.0"), "{openapi}");
+        let (format, _) = import::parse_collection_file(&openapi).unwrap();
+        assert_eq!(format, ImportFormat::OpenApi);
     }
 }

@@ -31,6 +31,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `chain.rs` (template functions: `response()`/`response_header()` chaining, `uuid()` etc.; evaluated in `resolve_in_background` before `Request::resolve`)
 - `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL and upload bodies: `Request::resolve_in` takes the project dir, since upload paths are relative to it), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels; a timed DNS resolver and a connector layer report `Phases` through a task-local, which becomes `response_cache::Timing`)
 - `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
+- `export.rs` in core: collection → Postman v2.1 / OpenAPI 3.1, request history → HAR; tests round-trip each through our own importers
 - `dotenv.rs` in core: reading a project's `.env` files (listed in `Collection.env_files`, picked like an environment, watched for changes in `workspace::watch_env_files`)
 - `body_view.rs` in core: what a response body is (from Content-Type, then sniffing), XML pretty-printing and a small XPath; the editor picks its viewer from it
 - `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions, hover and validation from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)

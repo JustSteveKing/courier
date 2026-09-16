@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod digest;
 pub mod dotenv;
 pub mod encoding;
+pub mod export;
 pub mod graphql;
 pub mod http;
 pub mod import;
