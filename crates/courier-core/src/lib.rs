@@ -12,6 +12,7 @@ pub mod digest;
 pub mod dotenv;
 pub mod encoding;
 pub mod export;
+pub mod git;
 pub mod graphql;
 pub mod http;
 pub mod import;

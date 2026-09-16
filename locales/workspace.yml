@@ -839,3 +839,23 @@ ws.exported:
   es: "Exportado a %{path}"
   de: "Nach %{path} exportiert"
   fr: "Exporté vers %{path}"
+ws.show_changes:
+  en: Show changes
+  es: Ver los cambios
+  de: Änderungen anzeigen
+  fr: Voir les modifications
+ws.changes_title:
+  en: "Changes to %{name}"
+  es: "Cambios en %{name}"
+  de: "Änderungen an %{name}"
+  fr: "Modifications de %{name}"
+ws.no_changes:
+  en: "%{name} matches the last commit."
+  es: "%{name} coincide con el último commit."
+  de: "%{name} entspricht dem letzten Commit."
+  fr: "%{name} correspond au dernier commit."
+ws.branch:
+  en: "on %{branch}"
+  es: "en %{branch}"
+  de: "auf %{branch}"
+  fr: "sur %{branch}"

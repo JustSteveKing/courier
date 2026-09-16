@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent as TextInputEvent, InputState, TextareaState};
+use gpui_kit::component::input::{EditorState, InputEvent as TextInputEvent, InputState, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -41,7 +41,7 @@ use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, Secre
 use crate::settings::{AppSettings, LabelColor};
 use crate::settings_form::{PathField, SettingsForm, SettingsFormEvent};
 use crate::storage::{self, Collection, Item};
-use crate::ui::{dialog_footer, focus_in_dialog, text_input, textarea};
+use crate::ui::{dialog_footer, focus_in_dialog, readonly_editor, text_input, textarea};
 
 type EnvironmentSelect = SelectState<SearchableVec<SharedString>>;
 
@@ -126,6 +126,8 @@ pub struct Workspace {
     cookies: HashMap<PathBuf, Cookies>,
     /// Watches each project folder for `.env` changes; dropping one stops watching.
     env_watchers: HashMap<PathBuf, notify::RecommendedWatcher>,
+    /// What git makes of each collection, by root. Read in the background, never blocking.
+    git: HashMap<PathBuf, crate::git::Status>,
 }
 
 impl Workspace {
@@ -213,6 +215,7 @@ impl Workspace {
             secret_store: None,
             cookies: HashMap::new(),
             env_watchers: HashMap::new(),
+            git: HashMap::new(),
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
@@ -439,6 +442,7 @@ impl Workspace {
                 let first = collection.first_request();
                 self.collections.push(collection);
                 self.watch_env_files(&root, window, cx);
+                self.refresh_git(&root, cx);
                 if !self.is_scratch(&root) {
                     self.state.open_projects.push(project::project_dir(&root).to_path_buf());
                 }
@@ -456,6 +460,8 @@ impl Workspace {
         let Some(ix) = self.collections.iter().position(|c| c.root == root) else {
             return;
         };
+        // Saving, creating and deleting all land here, so this is where git is re-read.
+        self.refresh_git(root, cx);
         match storage::load_collection(root) {
             Ok(collection) => {
                 if !collection.errors.is_empty() {
@@ -1093,6 +1099,83 @@ impl Workspace {
         });
     }
 
+    // MARK: Git
+
+    /// Asks git what changed in this collection, in the background. Git is a convenience
+    /// here: when it isn't there or the folder isn't a repository, nothing is shown.
+    fn refresh_git(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let project = project::project_dir(root).to_path_buf();
+        let root = root.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { crate::git::status_of(&project) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.git.get(&root) != Some(&status) {
+                    this.git.insert(root, status);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The change git sees in a request file, for its sidebar row.
+    fn git_change(&self, path: &Path) -> Option<crate::git::Change> {
+        let root = &self.collections[self.collection_index_for(path)?].root;
+        self.git.get(root)?.change_for(path)
+    }
+
+    /// Whether anything inside a folder or collection differs from the last commit.
+    fn git_changed_within(&self, path: &Path) -> bool {
+        self.collection_index_for(path)
+            .and_then(|ix| self.git.get(&self.collections[ix].root))
+            .is_some_and(|status| status.changed_within(path))
+    }
+
+    /// Shows what a request looks like against the last commit.
+    fn show_changes(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor().update(cx, |editor, cx| editor.save(cx));
+        let name = self
+            .find_request(&path)
+            .map(|request| request.name.clone())
+            .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        cx.spawn_in(window, async move |this, cx| {
+            let diff = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { crate::git::diff(&path) }
+                })
+                .await;
+            this.update_in(cx, |_, window, cx| {
+                let Some(diff) = diff else {
+                    window.push_notification(Notification::info(t!("ws.no_changes", name = name).to_string()), cx);
+                    return;
+                };
+                let text = cx.new(|cx| {
+                    EditorState::new(window, cx)
+                        .language("diff")
+                        .line_number(false)
+                        .default_value(diff)
+                });
+                window.open_dialog(cx, move |dialog, _, _| {
+                    let text = text.clone();
+                    dialog
+                        .title(t!("ws.changes_title", name = name).to_string())
+                        .w(px(760.))
+                        .content(move |content, _, _| {
+                            content.child(div().h(px(420.)).child(readonly_editor(&text).size_full()))
+                        })
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // MARK: Environments
 
     /// Watches a project folder so edits to its `.env` files show up without a reload. Only
@@ -1141,6 +1224,7 @@ impl Workspace {
                             this.collections[index].env_files = reloaded.env_files;
                         }
                         this.refresh_environments(window, cx);
+                        this.refresh_git(&root, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -2924,6 +3008,9 @@ impl Workspace {
                                 .text_color(theme.muted_foreground),
                             )
                             .child(div().min_w_0().truncate().child(name.clone()))
+                            .when(self.git_changed_within(&path), |row| {
+                                row.child(div().flex_none().text_xs().text_color(theme.warning).child("●"))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed.remove(&path) {
                                     this.collapsed.insert(path.clone());
@@ -2980,6 +3067,17 @@ impl Workspace {
                                     .child(short_method(&request_label(request))),
                             )
                             .child(div().min_w_0().truncate().child(request.name.clone()))
+                            .children(self.git_change(&path).map(|change| {
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(match change {
+                                        crate::git::Change::New => theme.success,
+                                        crate::git::Change::Modified => theme.warning,
+                                        crate::git::Change::Deleted => theme.danger,
+                                    })
+                                    .child(change.mark())
+                            }))
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
                             )
@@ -3021,6 +3119,10 @@ impl Render for Workspace {
             .active_collection(cx)
             .map(|c| (self.collection_label(c), c.root.clone()));
         let collection_name = active.as_ref().map(|(name, _)| name.clone()).unwrap_or_default();
+        let branch = active
+            .as_ref()
+            .and_then(|(_, root)| self.git.get(root))
+            .and_then(|status| status.branch.clone());
         let managing = self.main_view == MainView::Environments;
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
@@ -3065,6 +3167,14 @@ impl Render for Workspace {
                                     .text_color(theme.muted_foreground)
                                     .child(collection_name),
                             )
+                            .children(branch.map(|branch| {
+                                div()
+                                    .id("git-branch")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(t!("ws.branch", branch = branch).to_string())
+                            }))
                             .child(
                                 Button::new("open-command-palette")
                                     .ghost()
@@ -3221,6 +3331,7 @@ fn request_menu(
         .item(item("ws.copy_as_curl_with_secrets", |this, path, window, cx| {
             this.copy_as_curl(path, true, window, cx)
         }))
+        .item(item("ws.show_changes", Workspace::show_changes))
         .item(item("ws.export_history", Workspace::export_history))
         .separator()
         .when_some(request.parent(), |menu, dir| {
@@ -6689,5 +6800,77 @@ components:
         assert!(openapi.contains("3.1.0"), "{openapi}");
         let (format, _) = import::parse_collection_file(&openapi).unwrap();
         assert_eq!(format, ImportFormat::OpenApi);
+    }
+
+    #[gpui_kit::test]
+    async fn git_marks_changed_requests_and_shows_the_branch(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let project = project::project_dir(&root).to_path_buf();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+        };
+        if git(&["init", "--initial-branch=work"]).is_none() {
+            eprintln!("skipping: git isn't installed");
+            return;
+        }
+        git(&["add", "."]).unwrap();
+        git(&["commit", "-m", "first"]).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let path = root.join("get-json.yaml");
+        let wait_for = |cx: &mut TestAppContext, want: Option<crate::git::Change>| {
+            for _ in 0..100 {
+                cx.run_until_parked();
+                if cx.update(|cx| workspace.read(cx).git_change(&path)) == want {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        assert!(wait_for(cx, None), "a committed request is quiet");
+
+        // Editing through the editor marks it changed.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.select_request(path.clone(), window, cx);
+                let url = this.editor().read(cx).url_for_test();
+                url.update(cx, |state, cx| state.replace_all("https://edited.test", window, cx));
+                this.editor().update(cx, |editor, cx| editor.save(cx));
+            });
+        })
+        .unwrap();
+        assert!(
+            wait_for(cx, Some(crate::git::Change::Modified)),
+            "saving marks the request as changed"
+        );
+        cx.update(|cx| {
+            assert!(
+                workspace.read(cx).git_changed_within(&root),
+                "and the collection above it knows"
+            );
+        });
+
+        // The branch shows in the header.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let branch = window.find("git-branch");
+            assert!(
+                branch.label().is_some_and(|label| label.contains("work")) || branch.visible(),
+                "the branch is on screen"
+            );
+        })
+        .unwrap();
     }
 }

@@ -81,6 +81,10 @@ Paste one into the URL bar and it fills the open request — method, URL, header
 
 Each request you open gets a tab; opening one that's already open moves to it. `ctrl-w` closes the current tab, `ctrl-tab` and `ctrl-shift-tab` move between them, and the strip only appears once a second request is open. Tabs come back where you left them after a restart, and a tab whose request is renamed or moved follows it.
 
+### Git awareness
+
+When a project is in git, the sidebar marks what differs from the last commit — `+` new, `●` changed, `−` deleted — folders and collections carry a dot when something inside them changed, and the branch shows in the header. **Show changes** on a request opens its diff against HEAD. It's read-only: Courier runs `git` to look, and committing stays in your own tools.
+
 ### Exporting
 
 Right-click a collection to export it as a **Postman collection** (v2.1, the format most tools read) or an **OpenAPI 3.1 skeleton** — paths, methods, path and query parameters, and the bodies you send as examples with a rough schema, ready to fill in. Right-click a request for **Export history as HAR**, which writes its saved responses with their timing breakdowns, so you can hand someone exactly what happened. Secret values never leave the keyring: exports carry the `{{names}}` and nothing else.
