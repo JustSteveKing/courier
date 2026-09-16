@@ -599,6 +599,11 @@ impl RequestEditor {
         self.path.as_ref()
     }
 
+    /// Whether the open request has edits that aren't saved yet.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// After a request file or a folder of them moved on disk: keeps responses, and the open
     /// request, with their new paths.
     pub fn moved(&mut self, from: &Path, to: &Path) {

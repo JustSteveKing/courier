@@ -769,3 +769,8 @@ ws.moved_here:
   es: "Se movió «%{name}» aquí."
   de: "„%{name}“ hierher verschoben."
   fr: "« %{name} » déplacée ici."
+ws.close_tab:
+  en: Close tab
+  es: Cerrar la pestaña
+  de: Tab schließen
+  fr: Fermer l'onglet

@@ -15,12 +15,18 @@ use crate::model::RequestKind;
 use crate::omarchy_theme;
 use crate::settings::AppSettings;
 
-gpui_kit::actions!(workspace, [OpenCommandPalette, NewScratchRequest]);
+gpui_kit::actions!(
+    workspace,
+    [OpenCommandPalette, NewScratchRequest, CloseTab, NextTab, PreviousTab]
+);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
         KeyBinding::new("ctrl-n", NewScratchRequest, None),
+        KeyBinding::new("ctrl-w", CloseTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
     ]);
 }
 
@@ -216,7 +222,7 @@ impl Workspace {
                 let root = root.clone();
                 Entry::new(t!(key), move |this, window, cx| run(this, root.clone(), window, cx)).english(key)
             };
-            if let Some(path) = self.editor.read(cx).path().cloned() {
+            if let Some(path) = self.editor().read(cx).path().cloned() {
                 for (key, include_secrets) in [("ws.copy_as_curl", false), ("ws.copy_as_curl_with_secrets", true)] {
                     let path = path.clone();
                     entries.push(

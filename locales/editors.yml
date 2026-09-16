@@ -1086,3 +1086,8 @@ request.file_hint:
   es: El archivo de esta ruta se envía como cuerpo. Las rutas son relativas al proyecto.
   de: Die Datei unter diesem Pfad wird als Body gesendet. Pfade sind relativ zum Projekt.
   fr: Le fichier situé à ce chemin est envoyé comme corps. Les chemins sont relatifs au projet.
+request.untitled:
+  en: Untitled
+  es: Sin título
+  de: Ohne Titel
+  fr: Sans titre

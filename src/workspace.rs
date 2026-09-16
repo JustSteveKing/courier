@@ -103,7 +103,10 @@ pub struct Workspace {
     state: AppState,
     collections: Vec<Collection>,
     collapsed: HashSet<PathBuf>,
-    editor: Entity<RequestEditor>,
+    request_editor: Entity<RequestEditor>,
+    /// Open requests, in tab order; `active` is the one the editor is showing.
+    open_tabs: Vec<PathBuf>,
+    active: usize,
     environment: Entity<EnvironmentSelect>,
     /// Filters the sidebar to matching requests while it has text.
     search: Entity<InputState>,
@@ -147,18 +150,7 @@ impl Workspace {
         })
         .detach();
 
-        cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
-            RequestEditorEvent::Saved(path) => this.reload_containing(path, window, cx),
-            RequestEditorEvent::MoveHeaderToSecret { path, index } => {
-                this.move_header_to_secret(path.clone(), *index, window, cx)
-            }
-            RequestEditorEvent::MoveAuthToSecret { path } => this.move_auth_to_secret(path.clone(), window, cx),
-            RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
-            RequestEditorEvent::Notice(message) => window.push_notification(Notification::success(message.clone()), cx),
-            RequestEditorEvent::EditSettings(path) => this.edit_settings(path.clone(), window, cx),
-            RequestEditorEvent::PickUploadFile => this.pick_upload_file(window, cx),
-        })
-        .detach();
+        Self::watch_editor(&editor, window, cx);
         let environment_editor = cx.new(|cx| EnvironmentEditor::new(window, cx));
         cx.subscribe_in(&environment_editor, window, |this, _, event, window, cx| match event {
             EnvironmentEditorEvent::Changed(root) => this.reload_collection(root, window, cx),
@@ -179,7 +171,7 @@ impl Workspace {
         cx.subscribe_in(&runner, window, |this, _, event, window, cx| match event {
             RunnerViewEvent::Open(path) => this.select_request(path.clone(), window, cx),
             RunnerViewEvent::Ran(responses) => this
-                .editor
+                .editor()
                 .update(cx, |editor, cx| editor.take_chained(responses.clone(), cx)),
             RunnerViewEvent::RunAgain(scope) => this.run_scope(scope.path.clone(), window, cx),
             RunnerViewEvent::Close => {
@@ -200,7 +192,9 @@ impl Workspace {
             paths,
             collections: Vec::new(),
             collapsed: HashSet::new(),
-            editor,
+            request_editor: editor,
+            open_tabs: Vec::new(),
+            active: 0,
             environment,
             search,
             environment_editor,
@@ -235,6 +229,14 @@ impl Workspace {
             .collect();
         self.save_state();
 
+        // The tabs from last time, minus anything that's since been deleted or renamed.
+        self.open_tabs = self
+            .state
+            .open_tabs
+            .clone()
+            .into_iter()
+            .filter(|path| self.find_request(path).is_some())
+            .collect();
         let last = self
             .state
             .last_request
@@ -347,7 +349,7 @@ impl Workspace {
     /// Moves a request into another collection's top level, e.g. from the scratchpad into a
     /// project.
     fn move_request(&mut self, path: PathBuf, destination: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
         match storage::move_request(&path, &destination) {
             Ok(target) => {
                 self.collapsed.remove(&destination);
@@ -377,7 +379,7 @@ impl Workspace {
         if after.as_deref() == Some(path.as_path()) {
             return;
         }
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
         match storage::place_request(&path, &folder, after.as_deref()) {
             Ok(target) => {
                 self.collapsed.remove(&folder);
@@ -394,7 +396,7 @@ impl Workspace {
     fn active_collection(&self, cx: &App) -> Option<&Collection> {
         let path = match self.main_view {
             MainView::Environments => self.environment_editor.read(cx).root().map(Path::to_path_buf),
-            MainView::Request => self.editor.read(cx).path().cloned(),
+            MainView::Request => self.editor().read(cx).path().cloned(),
             MainView::Runner => self.runner.read(cx).scope().map(|scope| scope.root.clone()),
         };
         path.and_then(|p| self.collection_index_for(&p))
@@ -409,7 +411,7 @@ impl Workspace {
             // Already open: bring it into view, unless one of its requests is already showing.
             self.collapsed.remove(&root);
             let showing = self
-                .editor
+                .editor()
                 .read(cx)
                 .path()
                 .is_some_and(|p| self.collection_index_for(p) == Some(ix));
@@ -459,11 +461,11 @@ impl Workspace {
                     });
                 }
                 self.collections[ix] = collection;
-                if let Some(open) = self.editor.read(cx).path().cloned()
+                if let Some(open) = self.editor().read(cx).path().cloned()
                     && open.starts_with(root)
                 {
                     let requests = self.request_index(&open);
-                    self.editor
+                    self.editor()
                         .update(cx, |editor, _| editor.set_collection_requests(requests));
                 }
             }
@@ -497,7 +499,7 @@ impl Workspace {
         if self.is_scratch(root) {
             return;
         }
-        self.editor.update(cx, |editor, cx| {
+        self.editor().update(cx, |editor, cx| {
             if editor.path().is_some_and(|p| p.starts_with(root)) {
                 editor.save(cx);
                 editor.unload(window, cx);
@@ -539,7 +541,7 @@ impl Workspace {
                 .as_deref()
                 .map(|root| storage::inherited_settings(root, path))
                 .unwrap_or_default();
-            self.editor.update(cx, |editor, cx| {
+            self.editor().update(cx, |editor, cx| {
                 editor.set_cookies(jar);
                 editor.set_collection_root(root);
                 editor.set_collection_requests(requests);
@@ -558,9 +560,12 @@ impl Workspace {
             return;
         }
         // Switching requests saves the one you were editing, like most modern API clients.
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
+        self.open_tab(&path);
+        self.main_view = MainView::Request;
         self.load_in_editor(&path, window, cx);
         self.state.last_request = Some(path);
+        self.state.open_tabs = self.open_tabs.clone();
         self.save_state();
         self.refresh_environments(window, cx);
         cx.notify();
@@ -574,7 +579,7 @@ impl Workspace {
             return;
         }
         // The run reads requests from disk, so save what's being edited first.
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
         let Some(setup) = self.run_setup(path, cx) else {
             return;
         };
@@ -616,7 +621,7 @@ impl Workspace {
                 root,
                 variables: layered.variables,
                 latest: Default::default(),
-                cache: self.editor.read(cx).shared_cache(cx),
+                cache: self.editor().read(cx).shared_cache(cx),
                 collection_id,
                 default_timeout_secs: AppSettings::get(cx).request_timeout_secs,
                 cookies: cookies.as_ref().map(|jar| jar.store().clone()),
@@ -624,6 +629,164 @@ impl Workspace {
             secrets: layered.secrets,
             store: self.secret_store.clone(),
         })
+    }
+
+    // MARK: Tabs
+
+    /// The request editor. One editor serves every tab: it already keeps responses and
+    /// filters per request, and switching tabs saves what was open.
+    fn editor(&self) -> Entity<RequestEditor> {
+        self.request_editor.clone()
+    }
+
+    fn watch_editor(editor: &Entity<RequestEditor>, window: &mut Window, cx: &mut Context<Self>) {
+        cx.subscribe_in(editor, window, |this, _, event, window, cx| match event {
+            RequestEditorEvent::Saved(path) => this.reload_containing(path, window, cx),
+            RequestEditorEvent::MoveHeaderToSecret { path, index } => {
+                this.move_header_to_secret(path.clone(), *index, window, cx)
+            }
+            RequestEditorEvent::MoveAuthToSecret { path } => this.move_auth_to_secret(path.clone(), window, cx),
+            RequestEditorEvent::Error(message) => notify_error(message.clone(), window, cx),
+            RequestEditorEvent::Notice(message) => window.push_notification(Notification::success(message.clone()), cx),
+            RequestEditorEvent::EditSettings(path) => this.edit_settings(path.clone(), window, cx),
+            RequestEditorEvent::PickUploadFile => this.pick_upload_file(window, cx),
+        })
+        .detach();
+    }
+
+    /// Gives `path` a tab, or moves to the one it already has.
+    fn open_tab(&mut self, path: &Path) {
+        match self.open_tabs.iter().position(|open| open == path) {
+            Some(index) => self.active = index,
+            None => {
+                self.open_tabs.push(path.to_path_buf());
+                self.active = self.open_tabs.len() - 1;
+            }
+        }
+    }
+
+    /// Closes a tab, showing its neighbour, or nothing when it was the last.
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.open_tabs.len() {
+            return;
+        }
+        let closing_open = self.editor().read(cx).path() == Some(&self.open_tabs[index]);
+        self.editor().update(cx, |editor, cx| editor.save(cx));
+        self.open_tabs.remove(index);
+        self.active = self
+            .active
+            .saturating_sub((self.active >= index && self.active > 0) as usize);
+        if closing_open {
+            self.show_active_tab(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the tabs for anything at or inside `path`, for a delete or a move away.
+    fn close_tabs_under(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let was_open = self.editor().read(cx).path().is_some_and(|open| open.starts_with(path));
+        self.open_tabs.retain(|tab| !tab.starts_with(path));
+        self.active = self.active.min(self.open_tabs.len().saturating_sub(1));
+        if was_open {
+            self.show_active_tab(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Loads whatever the active tab points at, emptying the editor when there is none.
+    fn show_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.open_tabs.get(self.active).cloned() {
+            Some(path) => {
+                self.load_in_editor(&path, window, cx);
+                self.state.last_request = Some(path);
+            }
+            None => {
+                self.editor().update(cx, |editor, cx| editor.unload(window, cx));
+                self.state.last_request = None;
+            }
+        }
+        self.state.open_tabs = self.open_tabs.clone();
+        self.save_state();
+        self.refresh_environments(window, cx);
+    }
+
+    /// Moves to the next or previous tab, wrapping around.
+    fn step_tab(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.open_tabs.len();
+        if count < 2 {
+            return;
+        }
+        let next = (self.active as isize + by).rem_euclid(count as isize) as usize;
+        self.select_tab(next, window, cx);
+    }
+
+    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.open_tabs.get(index).cloned() else {
+            return;
+        };
+        self.select_request(path, window, cx);
+    }
+
+    /// The editor with a tab strip above it, once more than one request is open.
+    fn render_request_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let editor = self.editor().into_any_element();
+        if self.open_tabs.len() < 2 {
+            return editor;
+        }
+        let theme = cx.theme().clone();
+        let open = self.editor().read(cx).path().cloned();
+        let dirty = self.editor().read(cx).is_dirty();
+        let tabs: Vec<AnyElement> = self
+            .open_tabs
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let selected = open.as_deref() == Some(path.as_path());
+                let name = self
+                    .find_request(path)
+                    .map(|request| request.name.clone())
+                    .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+                h_flex()
+                    .id(sidebar_row_id("tab", path))
+                    .test_support()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .max_w(px(220.))
+                    .flex_none()
+                    .border_b_2()
+                    .border_color(if selected { theme.primary } else { theme.background })
+                    .when(selected, |tab| tab.bg(theme.accent))
+                    .cursor_pointer()
+                    .hover(|tab| tab.bg(theme.accent))
+                    .child(div().min_w_0().truncate().text_sm().child(name))
+                    .when(selected && dirty, |tab| {
+                        tab.child(div().text_xs().text_color(theme.muted_foreground).child("●"))
+                    })
+                    .child(
+                        Button::new(("close-tab", index))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(t!("ws.close_tab").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| this.close_tab(index, window, cx))),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| this.select_tab(index, window, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .size_full()
+            .child(
+                h_flex()
+                    .id("tab-strip")
+                    .overflow_x_scroll()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .children(tabs),
+            )
+            .child(div().flex_1().min_h_0().child(editor))
+            .into_any_element()
     }
 
     fn new_request(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -676,7 +839,7 @@ impl Workspace {
             cx,
             move |this, name, window, cx| {
                 // Unsaved edits go with the request rather than being left behind.
-                this.editor.update(cx, |editor, cx| editor.save(cx));
+                this.editor().update(cx, |editor, cx| editor.save(cx));
                 let target = if path.is_dir() {
                     storage::rename_folder(&path, &name)?
                 } else {
@@ -691,7 +854,16 @@ impl Workspace {
     /// Updates everything that remembers paths after `from` moved to `to`: the sidebar, saved
     /// responses, the open request and the saved state.
     fn after_move(&mut self, from: &Path, to: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let remap = |path: &Path| path.strip_prefix(from).ok().map(|rest| to.join(rest));
+        // `to.join("")` would leave a trailing separator, so the moved item itself maps to `to`.
+        let remap = |path: &Path| {
+            path.strip_prefix(from).ok().map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    to.to_path_buf()
+                } else {
+                    to.join(rest)
+                }
+            })
+        };
         let old_keys: Vec<(CacheKey, PathBuf)> = self
             .collection_index_for(from)
             .map(|ix| {
@@ -729,8 +901,13 @@ impl Workspace {
             self.state.last_request = Some(last);
             self.save_state();
         }
-        let open = self.editor.read(cx).path().cloned();
-        self.editor.update(cx, |editor, _| editor.moved(from, to));
+        let open = self.editor().read(cx).path().cloned();
+        self.editor().update(cx, |editor, _| editor.moved(from, to));
+        for tab in &mut self.open_tabs {
+            if let Some(moved) = remap(tab) {
+                *tab = moved;
+            }
+        }
         if let Some(new) = open.as_deref().and_then(remap) {
             self.load_in_editor(&new, window, cx);
         }
@@ -762,7 +939,7 @@ impl Workspace {
             request.name.clone()
         };
         let json_path = self
-            .editor
+            .editor()
             .read(cx)
             .filter_for(&path)
             .filter(|p| !p.trim().is_empty())
@@ -776,10 +953,10 @@ impl Workspace {
 
     /// Opens `path` if it isn't open, then copies it as a curl command.
     fn copy_as_curl(&mut self, path: PathBuf, include_secrets: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.editor.read(cx).path() != Some(&path) {
+        if self.editor().read(cx).path() != Some(&path) {
             self.select_request(path, window, cx);
         }
-        self.editor
+        self.editor()
             .update(cx, |editor, cx| editor.copy_as_curl(include_secrets, cx));
     }
 
@@ -787,7 +964,7 @@ impl Workspace {
         let Some(name) = self.find_request(&path).map(|r| r.name.clone()) else {
             return;
         };
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
         match storage::duplicate_request(&path, &t!("ws.copy_name", name = name)) {
             Ok(copy) => {
                 self.reload_containing(&copy, window, cx);
@@ -829,10 +1006,7 @@ impl Workspace {
                 .footer(dialog_footer(Some(t!("ws.delete").to_string()), ButtonVariant::Danger))
                 .on_ok(move |_, window, cx| {
                     weak.update(cx, |this, cx| {
-                        let open = this.editor.read(cx).path().is_some_and(|p| p.starts_with(&path));
-                        if open {
-                            this.editor.update(cx, |editor, cx| editor.unload(window, cx));
-                        }
+                        this.close_tabs_under(&path, window, cx);
                         match storage::delete_item(&path) {
                             Ok(()) => {
                                 if this.state.last_request.as_ref().is_some_and(|p| p.starts_with(&path)) {
@@ -940,7 +1114,7 @@ impl Workspace {
             select.set_items(SearchableVec::new(names), window, cx);
             select.set_selected_index(Some(IndexPath::new(selected)), window, cx);
         });
-        self.editor.update(cx, |editor, cx| {
+        self.editor().update(cx, |editor, cx| {
             editor.set_variables(layered.variables, layered.secrets, cx)
         });
         self.environment_editor
@@ -955,7 +1129,7 @@ impl Workspace {
         if editing_other && !self.environment_editor.update(cx, |editor, cx| editor.save(window, cx)) {
             return;
         }
-        self.editor.update(cx, |editor, cx| editor.save(cx));
+        self.editor().update(cx, |editor, cx| editor.save(cx));
         let target = self
             .state
             .active_environments
@@ -987,7 +1161,7 @@ impl Workspace {
         crate::i18n::apply(crate::i18n::resolve(language.as_deref()));
         // Strings built during render update on the next frame; placeholders set when inputs
         // were created need re-applying.
-        self.editor.update(cx, |editor, cx| editor.relocalize(window, cx));
+        self.editor().update(cx, |editor, cx| editor.relocalize(window, cx));
         self.environment_editor
             .update(cx, |editor, cx| editor.relocalize(window, cx));
         self.refresh_environments(window, cx);
@@ -1053,7 +1227,9 @@ impl Workspace {
     }
 
     fn clear_saved_responses(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let removed = self.editor.update(cx, |editor, cx| editor.clear_responses(window, cx));
+        let removed = self
+            .editor()
+            .update(cx, |editor, cx| editor.clear_responses(window, cx));
         window.push_notification(
             Notification::success(t!("ws.responses_cleared", count = removed).to_string()),
             cx,
@@ -1088,7 +1264,7 @@ impl Workspace {
     /// it's inside, so the collection still works on another machine.
     fn pick_upload_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let project = self
-            .editor
+            .editor()
             .read(cx)
             .path()
             .and_then(|path| self.collection_index_for(path))
@@ -1103,7 +1279,7 @@ impl Workspace {
                     Some(relative) => relative.display().to_string(),
                     None => file.display().to_string(),
                 };
-                this.editor
+                this.editor()
                     .update(cx, |editor, cx| editor.add_upload_file(stored, window, cx));
             },
         );
@@ -1594,7 +1770,7 @@ impl Workspace {
                 .await;
             this.update_in(cx, |this, window, cx| match store {
                 Ok(store) => {
-                    this.editor
+                    this.editor()
                         .update(cx, |editor, _| editor.set_secret_store(store.clone()));
                     this.environment_editor
                         .update(cx, |editor, cx| editor.set_store(store.clone(), window, cx));
@@ -1911,11 +2087,11 @@ impl Workspace {
 
     /// Tells the editor what its request inherits, after loading it or changing auth above it.
     fn refresh_inherited_auth(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.editor.read(cx).path().cloned() else {
+        let Some(path) = self.editor().read(cx).path().cloned() else {
             return;
         };
         if let Some((auth, source)) = self.inherited_auth(&path) {
-            self.editor
+            self.editor()
                 .update(cx, |editor, cx| editor.set_inherited_auth(auth, source, cx));
         }
     }
@@ -2036,7 +2212,7 @@ impl Workspace {
                     weak.update(cx, |this, cx| match result {
                         Ok(()) => {
                             this.reload_collection(&root, window, cx);
-                            if let Some(open) = this.editor.read(cx).path().cloned()
+                            if let Some(open) = this.editor().read(cx).path().cloned()
                                 && open.starts_with(&path)
                             {
                                 this.load_in_editor(&open, window, cx);
@@ -2487,7 +2663,7 @@ impl Workspace {
                 .map(|c| (self.collection_label(c), c.root.clone()))
                 .collect(),
         );
-        let selected = self.editor.read(cx).path().cloned();
+        let selected = self.editor().read(cx).path().cloned();
         let indent = px(4. + depth as f32 * 14.);
         let query = self.search_query(cx);
 
@@ -2637,6 +2813,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &palette::NewScratchRequest, window, cx| this.new_scratch_request(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &palette::CloseTab, window, cx| this.close_tab(this.active, window, cx)))
+            .on_action(cx.listener(|this, _: &palette::NextTab, window, cx| this.step_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &palette::PreviousTab, window, cx| this.step_tab(-1, window, cx)))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -2695,11 +2874,11 @@ impl Render for Workspace {
                         MainView::Environments => self.environment_editor.clone().into_any_element(),
                         MainView::Runner => self.runner.clone().into_any_element(),
                         MainView::Request
-                            if self.projects().next().is_none() && self.editor.read(cx).path().is_none() =>
+                            if self.projects().next().is_none() && self.editor().read(cx).path().is_none() =>
                         {
                             self.render_no_projects(cx).into_any_element()
                         }
-                        MainView::Request => self.editor.clone().into_any_element(),
+                        MainView::Request => self.render_request_view(cx),
                     })),
             )
             .children(dialog_layer)
@@ -3322,7 +3501,7 @@ mod tests {
         cx.update(|cx| {
             let ws = workspace.read(cx);
             assert_eq!(ws.projects().count(), 1);
-            let opened = ws.editor.read(cx).path().cloned().expect("a first request is open");
+            let opened = ws.editor().read(cx).path().cloned().expect("a first request is open");
             assert!(opened.starts_with(&root), "{}", opened.display());
             assert_eq!(ws.projects().next().unwrap().requests().len(), 1);
             assert_eq!(
@@ -3399,7 +3578,7 @@ components:
         cx.update(|cx| {
             let ws = workspace.read(cx);
             assert_eq!(ws.projects().count(), 1);
-            let opened = ws.editor.read(cx).path().cloned().expect("the first request is open");
+            let opened = ws.editor().read(cx).path().cloned().expect("the first request is open");
             assert!(opened.starts_with(root.join("pets")), "{}", opened.display());
         });
 
@@ -3478,7 +3657,7 @@ components:
         storage::save_collection_file(&root, &file).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -3552,7 +3731,7 @@ components:
         let root = create_example_project(tmp.path()).unwrap();
         let get_json = root.join("get-json.yaml");
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let type_and_confirm = |cx: &mut TestAppContext, text: &str| {
             // The dialog slides in; clicking before it settles hits where it isn't yet.
             cx.executor().advance_clock(Duration::from_secs(1));
@@ -3602,7 +3781,7 @@ components:
         );
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert_eq!(ws.editor.read(cx).path(), Some(&fetch));
+            assert_eq!(ws.editor().read(cx).path(), Some(&fetch));
             assert_eq!(ws.state.last_request.as_ref(), Some(&fetch));
             let key = ws.response_key(&fetch).unwrap();
             assert!(cache.load(&key).is_some(), "saved response moved with it");
@@ -3648,9 +3827,15 @@ components:
         .unwrap();
         cx.run_until_parked();
         assert!(!animals.exists());
+        // Its tab goes with it, leaving the request that was open in the other tab.
         cx.update(|cx| {
-            assert_eq!(editor.read(cx).path(), None);
-            assert_eq!(workspace.read(cx).state.last_request, None);
+            assert_eq!(editor.read(cx).path(), Some(&copy));
+            assert_eq!(workspace.read(cx).state.last_request.as_ref(), Some(&copy));
+            assert_eq!(
+                workspace.read(cx).open_tabs,
+                vec![fetch.clone(), copy.clone()],
+                "the other tabs stay, renamed along with their files"
+            );
         });
     }
 
@@ -3678,7 +3863,7 @@ components:
         assert!(quick.exists());
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert_eq!(ws.editor.read(cx).path(), Some(&quick));
+            assert_eq!(ws.editor().read(cx).path(), Some(&quick));
             assert!(ws.state.open_projects.is_empty(), "not remembered as a project");
         });
 
@@ -3711,7 +3896,7 @@ components:
         assert!(moved.exists() && !quick.exists());
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            assert_eq!(ws.editor.read(cx).path(), Some(&moved));
+            assert_eq!(ws.editor().read(cx).path(), Some(&moved));
             assert_eq!(ws.collections[0].requests().len(), 1, "scratchpad keeps the other one");
             assert_eq!(ws.projects().next().unwrap().requests().len(), 3);
         });
@@ -3739,7 +3924,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -3849,7 +4034,7 @@ components:
         assert!(saved.contains("sse: yellow") && saved.contains("http: grey"), "{saved}");
         cx.update(|cx| {
             let ws = workspace.read(cx);
-            let path = ws.editor.read(cx).path().cloned().unwrap();
+            let path = ws.editor().read(cx).path().cloned().unwrap();
             assert!(path.ends_with("new-event-stream-sse.yaml"), "the newest is open");
         });
     }
@@ -3861,7 +4046,7 @@ components:
         let root = create_example_project(tmp.path()).unwrap();
         let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
         })
@@ -3951,7 +4136,7 @@ components:
         let open_request = storage::create_request(&public, &RequestFile::new("Status")).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let send_to = |cx: &mut TestAppContext, path: &Path| {
             let (port, received) = one_shot_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
             let mut request: RequestFile = storage::read_yaml(path).unwrap();
@@ -4026,7 +4211,7 @@ components:
         let root = create_example_project(tmp.path()).unwrap();
         let get_json = root.join("get-json.yaml");
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let send = |cx: &mut TestAppContext, response: &'static str| {
             let (port, received) = one_shot_server(response);
             let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
@@ -4160,7 +4345,7 @@ components:
         let root = create_example_project(tmp.path()).unwrap();
         let get_json = root.join("get-json.yaml");
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let send = |cx: &mut TestAppContext, body: &'static str, history: usize| {
             let (port, _received) = http_server(body);
             let mut request: RequestFile = storage::read_yaml(&get_json).unwrap();
@@ -4210,7 +4395,7 @@ components:
             restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
         })
         .unwrap();
-        let editor = cx.update(|cx| restarted.read(cx).editor.clone());
+        let editor = cx.update(|cx| restarted.read(cx).editor());
         assert_eq!(cx.update(|cx| editor.read(cx).history_len()), 1);
     }
 
@@ -4235,7 +4420,7 @@ components:
         let me_path = storage::create_request(&root, &me).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let send = |cx: &mut TestAppContext, path: &Path| {
             cx.update_window(window, |_, window, cx| {
                 workspace.update(cx, |this, cx| {
@@ -4320,7 +4505,7 @@ components:
         let login_path = storage::create_request(&root, &login).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -4419,7 +4604,7 @@ components:
         let containers = storage::create_request(&docker, &containers).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let send = |cx: &mut TestAppContext, path: &Path| -> u16 {
             cx.update_window(window, |_, window, cx| {
                 workspace.update(cx, |this, cx| {
@@ -4494,7 +4679,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -4596,7 +4781,7 @@ components:
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(!window.has_active_dialog(cx), "palette closed after confirming");
-            assert_eq!(workspace.read(cx).editor.read(cx).path(), Some(&echo));
+            assert_eq!(workspace.read(cx).editor().read(cx).path(), Some(&echo));
         })
         .unwrap();
     }
@@ -4716,7 +4901,7 @@ components:
                 this.reload_collection(&root, window, cx);
                 this.select_request(get_json.clone(), window, cx);
             });
-            let headers = workspace.read(cx).editor.read(cx).headers_entity();
+            let headers = workspace.read(cx).editor().read(cx).headers_entity();
             headers.focus_handle(cx).focus(window, cx);
             window.render_frame(cx);
             window.press("ctrl-enter", cx);
@@ -4725,19 +4910,19 @@ components:
         // Events from the key press are delivered when that update ends, so the send has
         // started (but not finished) before this switch.
         cx.update_window(window, |_, window, cx| {
-            assert!(workspace.read(cx).editor.read(cx).is_sending(), "send started");
+            assert!(workspace.read(cx).editor().read(cx).is_sending(), "send started");
             workspace.update(cx, |this, cx| this.select_request(echo.clone(), window, cx));
         })
         .unwrap();
         for _ in 0..500 {
             cx.run_until_parked();
-            if cx.update(|cx| workspace.read(cx).editor.read(cx).response_for(&get_json).is_some()) {
+            if cx.update(|cx| workspace.read(cx).editor().read(cx).response_for(&get_json).is_some()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         cx.update(|cx| {
-            let editor = workspace.read(cx).editor.read(cx);
+            let editor = workspace.read(cx).editor().read(cx);
             assert_eq!(editor.path(), Some(&echo));
             assert!(
                 editor.shown_response().is_none(),
@@ -4755,7 +4940,7 @@ components:
         // Switching back shows it again.
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
-            let editor = workspace.read(cx).editor.read(cx);
+            let editor = workspace.read(cx).editor().read(cx);
             let (_, restored) = editor.shown_response().expect("shown after switching back");
             assert!(!restored);
         })
@@ -4771,7 +4956,7 @@ components:
         let (restarted, window) = open_workspace(cx, &paths, launch(&root));
         cx.update_window(window, |_, window, cx| {
             restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
-            let editor = restarted.read(cx).editor.read(cx);
+            let editor = restarted.read(cx).editor().read(cx);
             let (response, restored) = editor.shown_response().expect("restored from cache");
             assert!(restored);
             let crate::response_cache::Outcome::Response { headers, .. } = &response.outcome else {
@@ -4853,14 +5038,14 @@ components:
         for _ in 0..200 {
             cx.run_until_parked();
             std::thread::sleep(Duration::from_millis(10));
-            if cx.update(|cx| workspace.read(cx).editor.read(cx).received_bytes() > 3) {
+            if cx.update(|cx| workspace.read(cx).editor().read(cx).received_bytes() > 3) {
                 break;
             }
         }
         cx.update_window(window, |_, window, cx| {
-            assert!(workspace.read(cx).editor.read(cx).is_sending());
+            assert!(workspace.read(cx).editor().read(cx).is_sending());
             assert!(
-                workspace.read(cx).editor.read(cx).received_bytes() > 3,
+                workspace.read(cx).editor().read(cx).received_bytes() > 3,
                 "body is streaming in"
             );
             window.render_frame(cx);
@@ -4869,7 +5054,7 @@ components:
         .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            let editor = workspace.read(cx).editor.read(cx);
+            let editor = workspace.read(cx).editor().read(cx);
             assert!(!editor.is_sending(), "cancelled");
             assert!(editor.shown_response().is_none(), "a cancelled send leaves no response");
         });
@@ -4924,7 +5109,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -5031,7 +5216,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let wait_until = |cx: &mut TestAppContext, done: &dyn Fn(&RequestEditor) -> bool| {
             for _ in 0..300 {
                 cx.run_until_parked();
@@ -5117,7 +5302,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -5175,7 +5360,7 @@ components:
         storage::write_yaml(&get_json, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         let wait_until = |cx: &mut TestAppContext, done: &dyn Fn(&App) -> bool| {
             for _ in 0..300 {
                 cx.run_until_parked();
@@ -5259,7 +5444,7 @@ components:
 
         // After a restart the schema comes from the cache without fetching again.
         let (restarted, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| restarted.read(cx).editor.clone());
+        let editor = cx.update(|cx| restarted.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             restarted.update(cx, |this, cx| this.select_request(get_json.clone(), window, cx));
         })
@@ -5318,7 +5503,7 @@ components:
         cx.update(|cx| {
             let ws = workspace.read(cx);
             assert!(
-                ws.editor.read(cx).secret_names().contains(&"api_token".to_string()),
+                ws.editor().read(cx).secret_names().contains(&"api_token".to_string()),
                 "requests can use it"
             );
         });
@@ -5330,7 +5515,7 @@ components:
         .unwrap();
         let token = "eyJhbGciOiJIUzI1NiJ9.TESTTOKEN.signature";
         let request_path = root.join("get-json.yaml");
-        let headers = cx.update(|cx| workspace.read(cx).editor.read(cx).headers_entity());
+        let headers = cx.update(|cx| workspace.read(cx).editor().read(cx).headers_entity());
         cx.update_window(window, |_, window, cx| {
             headers.focus_handle(cx).focus(window, cx);
             window.render_frame(cx);
@@ -5362,7 +5547,7 @@ components:
                 this.reload_collection(&root, window, cx);
                 let request = this.find_request(&request_path).cloned().unwrap();
                 let key = this.response_key(&request_path);
-                this.editor.update(cx, |editor, cx| {
+                this.editor().update(cx, |editor, cx| {
                     editor.load(request_path.clone(), request, key, window, cx)
                 });
             });
@@ -5442,7 +5627,7 @@ components:
         cx.update(|cx| assert!(workspace.read(cx).main_view == MainView::Runner));
 
         // The run's responses become each request's latest, so opening one shows it.
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.select_request(root.join("get-json.yaml"), window, cx);
@@ -5475,7 +5660,7 @@ components:
         storage::write_yaml(&path, &request).unwrap();
 
         let (workspace, window) = open_workspace(cx, &paths, launch(&root));
-        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        let editor = cx.update(|cx| workspace.read(cx).editor());
         cx.update_window(window, |_, window, cx| {
             workspace.update(cx, |this, cx| {
                 this.reload_collection(&root, window, cx);
@@ -5597,5 +5782,67 @@ components:
             "and the order sticks: {order:?}"
         );
         assert_eq!(order.get(1).map(String::as_str), Some("Echo POST"), "{order:?}");
+    }
+
+    #[gpui_kit::test]
+    async fn open_requests_get_tabs_that_survive_a_restart(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        let open = |cx: &mut TestAppContext, path: &Path| {
+            let path = path.to_path_buf();
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| this.select_request(path.clone(), window, cx));
+                window.render_frame(cx);
+            })
+            .unwrap();
+        };
+        open(cx, &get_json);
+        open(cx, &echo);
+        cx.update(|cx| {
+            assert_eq!(
+                workspace.read(cx).open_tabs,
+                vec![get_json.clone(), echo.clone()],
+                "each request opened gets its own tab"
+            );
+            assert_eq!(editor.read(cx).path(), Some(&echo));
+        });
+
+        // Opening one that's already open moves to its tab instead of adding another.
+        open(cx, &get_json);
+        cx.update(|cx| {
+            assert_eq!(workspace.read(cx).open_tabs.len(), 2);
+            assert_eq!(workspace.read(cx).active, 0);
+        });
+
+        // Clicking a tab shows it; closing one leaves the other.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(format!("tab:{}", echo.display()), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(editor.read(cx).path(), Some(&echo)));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("close-tab", 1usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(workspace.read(cx).open_tabs, vec![get_json.clone()]);
+            assert_eq!(editor.read(cx).path(), Some(&get_json), "the neighbour takes over");
+        });
+
+        // A restart brings the tabs back.
+        open(cx, &echo);
+        let (restarted, _) = open_workspace(cx, &paths, launch(&root));
+        cx.update(|cx| {
+            assert_eq!(restarted.read(cx).open_tabs, vec![get_json.clone(), echo.clone()]);
+            assert_eq!(restarted.read(cx).editor().read(cx).path(), Some(&echo));
+        });
     }
 }
