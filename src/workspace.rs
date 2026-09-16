@@ -117,6 +117,8 @@ pub struct Workspace {
     secret_store: Option<SecretStore>,
     /// Cookie jars of collections, by root, opened when first needed.
     cookies: HashMap<PathBuf, Cookies>,
+    /// Watches each project folder for `.env` changes; dropping one stops watching.
+    env_watchers: HashMap<PathBuf, notify::RecommendedWatcher>,
 }
 
 impl Workspace {
@@ -203,6 +205,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             secret_store: None,
             cookies: HashMap::new(),
+            env_watchers: HashMap::new(),
         };
         this.connect_secret_store(window, cx);
         this.start_response_tidy(cx);
@@ -428,6 +431,7 @@ impl Workspace {
                 }
                 let first = collection.first_request();
                 self.collections.push(collection);
+                self.watch_env_files(&root, window, cx);
                 if !self.is_scratch(&root) {
                     self.state.open_projects.push(project::project_dir(&root).to_path_buf());
                 }
@@ -1084,25 +1088,105 @@ impl Workspace {
 
     // MARK: Environments
 
+    /// Watches a project folder so edits to its `.env` files show up without a reload. Only
+    /// `.env` files matter here; the collection itself is reloaded by other means.
+    fn watch_env_files(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = project::project_dir(root).to_path_buf();
+        if self.env_watchers.contains_key(&dir) {
+            return;
+        }
+        use notify::Watcher as _;
+        let (send, changes) = async_channel::unbounded();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let touched_env = event.is_ok_and(|event| {
+                !matches!(event.kind, notify::EventKind::Access(_))
+                    && event.paths.iter().any(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy())
+                            .is_some_and(|name| name == ".env" || name.starts_with(".env."))
+                    })
+            });
+            if touched_env {
+                let _ = send.try_send(());
+            }
+        });
+        let mut watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(e) => {
+                eprintln!("not watching {} for .env changes: {e}", dir.display());
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+            eprintln!("not watching {} for .env changes: {e}", dir.display());
+            return;
+        }
+        self.env_watchers.insert(dir.clone(), watcher);
+        let root = root.to_path_buf();
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        // The list of files may have changed too, so reload the collection.
+                        if let Some(index) = this.collections.iter().position(|c| c.root == root)
+                            && let Ok(reloaded) = storage::load_collection(&root)
+                        {
+                            this.collections[index].env_files = reloaded.env_files;
+                        }
+                        this.refresh_environments(window, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn refresh_environments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (names, selected, layered, active) = match self.active_collection(cx) {
             Some(collection) => {
                 let active = self.state.active_environments.get(&collection.root);
-                let selected = active
-                    .and_then(|path| collection.environments.iter().position(|e| &e.path == path))
-                    .map(|ix| ix + 1);
-                let environment = selected
-                    .map(|ix| &collection.environments[ix - 1])
-                    .map(|env| (env.path.as_path(), &env.file));
+                // The picker lists the collection's own environments, then the project's
+                // `.env` files, which are read as they are and never written.
+                let environments = collection.environments.len();
+                let selected = active.and_then(|path| {
+                    collection
+                        .environments
+                        .iter()
+                        .position(|e| &e.path == path)
+                        .or_else(|| {
+                            collection
+                                .env_files
+                                .iter()
+                                .position(|file| &file.path == path)
+                                .map(|ix| ix + environments)
+                        })
+                        .map(|ix| ix + 1)
+                });
                 let names = std::iter::once(SharedString::from(t!("ws.no_environment").to_string()))
                     .chain(collection.environments.iter().map(|e| e.file.name.clone().into()))
+                    .chain(collection.env_files.iter().map(|file| file.name.clone().into()))
                     .collect::<Vec<_>>();
-                (
-                    names,
-                    selected.unwrap_or(0),
-                    secret_store::layer(&collection.file, environment),
-                    active.cloned(),
-                )
+                let layered = match selected.map(|ix| ix - 1) {
+                    Some(ix) if ix < environments => {
+                        let env = &collection.environments[ix];
+                        secret_store::layer(&collection.file, Some((env.path.as_path(), &env.file)))
+                    }
+                    Some(ix) => {
+                        // A `.env` file's values are right there in the file, so they go
+                        // straight in rather than through the secret store.
+                        let mut layered = secret_store::layer(&collection.file, None);
+                        layered
+                            .variables
+                            .extend(crate::dotenv::read(&collection.env_files[ix - environments].path));
+                        layered
+                    }
+                    None => secret_store::layer(&collection.file, None),
+                };
+                (names, selected.unwrap_or(0), layered, active.cloned())
             }
             None => (
                 vec![t!("ws.no_environment").to_string().into()],
@@ -1118,8 +1202,14 @@ impl Workspace {
         self.editor().update(cx, |editor, cx| {
             editor.set_variables(layered.variables, layered.secrets, cx)
         });
+        // The environment manager only edits Courier's own files, so a `.env` selection
+        // leaves it showing the collection defaults.
+        let editable = active.filter(|path| {
+            self.active_collection(cx)
+                .is_some_and(|collection| collection.environments.iter().any(|env| &env.path == path))
+        });
         self.environment_editor
-            .update(cx, |editor, cx| editor.set_active(active, cx));
+            .update(cx, |editor, cx| editor.set_active(editable, cx));
     }
 
     fn manage_environments(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -1242,12 +1332,18 @@ impl Workspace {
             return;
         };
         let root = collection.root.clone();
-        match index
-            .filter(|ix| *ix > 0)
-            .and_then(|ix| collection.environments.get(ix - 1))
-        {
-            Some(env) => {
-                let path = env.path.clone();
+        // Index 0 is "no environment"; the collection's environments come next, then the
+        // project's `.env` files.
+        let chosen = index.filter(|ix| *ix > 0).map(|ix| ix - 1).and_then(|ix| {
+            collection.environments.get(ix).map(|env| env.path.clone()).or_else(|| {
+                collection
+                    .env_files
+                    .get(ix - collection.environments.len())
+                    .map(|file| file.path.clone())
+            })
+        });
+        match chosen {
+            Some(path) => {
                 self.state.active_environments.insert(root, path);
             }
             None => {
@@ -6347,5 +6443,72 @@ components:
             }
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn env_files_can_be_picked_as_environments(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let project = project::project_dir(&root).to_path_buf();
+        fs::write(project.join(".env"), "base_url=https://from-env.test\nAPI_TOKEN=abc").unwrap();
+        fs::write(project.join(".env.local"), "base_url=http://localhost:9999").unwrap();
+        fs::write(project.join(".env.example"), "base_url=").unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(root.join("get-json.yaml"), window, cx);
+            });
+        })
+        .unwrap();
+
+        // They sit in the picker after the collection's own environments, examples left out.
+        let names = cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let collection = ws.collections.iter().find(|c| c.root == root).unwrap();
+            collection
+                .env_files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(names, [".env", ".env.local"]);
+
+        // "Local" is the example project's own environment, so `.env` is the one after it.
+        let dotenv_index = cx.update(|cx| {
+            let ws = workspace.read(cx);
+            let collection = ws.collections.iter().find(|c| c.root == root).unwrap();
+            collection.environments.len() + 1
+        });
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.choose_environment(Some(dotenv_index), window, cx));
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let variables = editor.read(cx).variables_for_test();
+            assert_eq!(
+                variables.get("base_url").map(String::as_str),
+                Some("https://from-env.test")
+            );
+            assert_eq!(variables.get("API_TOKEN").map(String::as_str), Some("abc"));
+        });
+
+        // Editing the file is picked up without touching Courier.
+        fs::write(project.join(".env"), "base_url=https://edited.test").unwrap();
+        let mut found = false;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if cx.update(|cx| {
+                editor.read(cx).variables_for_test().get("base_url").map(String::as_str) == Some("https://edited.test")
+            }) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(found, "the watcher reloads a changed .env");
     }
 }

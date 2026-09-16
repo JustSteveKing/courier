@@ -756,6 +756,11 @@ impl RequestEditor {
     }
 
     #[cfg(test)]
+    pub fn variables_for_test(&self) -> Variables {
+        self.variables.clone()
+    }
+
+    #[cfg(test)]
     pub fn show_timing_tab_for_test(&mut self, cx: &mut Context<Self>) {
         self.response_tab = ResponseTab::Timing;
         cx.notify();

@@ -19,6 +19,8 @@ pub struct Collection {
     pub file: CollectionFile,
     pub items: Vec<Item>,
     pub environments: Vec<Environment>,
+    /// The project's own `.env` files, which can be picked as environments too.
+    pub env_files: Vec<crate::dotenv::DotEnv>,
     /// Files that exist but could not be parsed. Shown to the user, never fatal.
     pub errors: Vec<(PathBuf, String)>,
 }
@@ -136,6 +138,7 @@ pub fn load_collection(root: &Path) -> Result<Collection> {
         file,
         items,
         environments,
+        env_files: crate::dotenv::files_in(crate::project::project_dir(root)),
         errors,
     })
 }

@@ -81,6 +81,10 @@ Paste one into the URL bar and it fills the open request — method, URL, header
 
 Each request you open gets a tab; opening one that's already open moves to it. `ctrl-w` closes the current tab, `ctrl-tab` and `ctrl-shift-tab` move between them, and the strip only appears once a second request is open. Tabs come back where you left them after a restart, and a tab whose request is renamed or moved follows it.
 
+### .env files as environments
+
+A project's `.env`, `.env.local`, `.env.staging` and friends appear in the environment picker after the collection's own environments, and `{{API_URL}}` resolves from whichever you pick. They're read, never written: Courier doesn't edit them, and the environment manager stays on Courier's own files. Editing a `.env` in your editor updates Courier straight away, and `.env.example` and friends are left out, since they hold placeholders rather than values.
+
 ### Finding and arranging requests
 
 The box at the top of the sidebar filters as you type, matching a request's name, method or URL — `post pets` and `/v2/` both work — and opens whatever holds a match. Drag a request onto a folder or collection to move it there, or onto another request to drop it straight after that one; the order is saved with the requests, so it survives a reload and a checkout.
