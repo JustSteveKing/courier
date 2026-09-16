@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rust_i18n::t;
 use serde::Serialize;
 
 use crate::chain::{self, Context, Sent};
@@ -152,13 +153,13 @@ async fn run_one(path: &Path, file: &RequestFile, context: &Context, sent: &mut 
     match RequestKind::of(file) {
         RequestKind::WebSocket => {
             result.status = RunStatus::Skipped {
-                reason: "WebSocket requests aren't run".into(),
+                reason: t!("run.skip_websocket").to_string(),
             };
             return result;
         }
         RequestKind::EventStream => {
             result.status = RunStatus::Skipped {
-                reason: "event streams don't end, so they aren't run".into(),
+                reason: t!("run.skip_event_stream").to_string(),
             };
             return result;
         }

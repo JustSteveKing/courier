@@ -20,7 +20,8 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 
 
 - `workspace.rs` (+ `workspace/palette.rs`): window root: sidebar, projects, imports, dialogs, command palette
-- `request_editor.rs`, `environment_editor.rs`: the two main panes
+- `request_editor.rs`, `environment_editor.rs`, `runner_view.rs`: the main panes (`MainView` picks one)
+- Runs: `runner.rs` in core (shared with the CLI), `runner_view.rs` for the live results; the workspace builds the context in `run_setup`
 - `model.rs` (YAML types, no I/O), `storage.rs` (load/save collections), `project.rs` (`.courier/` discovery)
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
 - Request settings: `model::RequestSettings` (collection → folder `.folder.yaml` → request, merged by `overlay`, resolved with `resolve`), `transport::ClientOptions`/`client_for` (cached clients), `settings_form.rs` (dialog)

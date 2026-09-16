@@ -595,6 +595,11 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// A copy of the response cache for code outside the editor, like a run.
+    pub(crate) fn shared_cache(&self, cx: &App) -> Option<ResponseCache> {
+        self.cache(cx).cloned()
+    }
+
     /// The response cache, unless saving responses is turned off.
     fn cache(&self, cx: &App) -> Option<&ResponseCache> {
         AppSettings::get(cx).remember_responses.then_some(&self.response_cache)

@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Runs
+
+Right-click a collection or a folder and choose **Run**. The requests go out in sidebar order, sharing responses so `{{ response() }}` chaining works, and each one's status, time and checks appear as it finishes. **Stop on failure** stops at the first failed check, **Stop** ends a run in progress, and clicking a result opens that request with the response the run got. WebSocket and event-stream requests are skipped.
+
 ### From a terminal or CI
 
 The same binary sends requests and runs checks without a window:

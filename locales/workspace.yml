@@ -649,3 +649,108 @@ ws.copied_response_reference:
   es: Copiado. Pégalo en otra solicitud para usar allí la respuesta de esta.
   de: Kopiert. Füge es in eine andere Anfrage ein, um dort diese Antwort zu verwenden.
   fr: Copié. Collez-le dans une autre requête pour y utiliser la réponse de celle-ci.
+run.menu_collection:
+  en: Run collection
+  es: Ejecutar la colección
+  de: Sammlung ausführen
+  fr: Exécuter la collection
+run.menu_folder:
+  en: Run folder
+  es: Ejecutar la carpeta
+  de: Ordner ausführen
+  fr: Exécuter le dossier
+run.title:
+  en: "Running %{name}"
+  es: "Ejecutando %{name}"
+  de: "%{name} wird ausgeführt"
+  fr: "Exécution de %{name}"
+run.in_progress:
+  en: "%{done} of %{total}…"
+  es: "%{done} de %{total}…"
+  de: "%{done} von %{total}…"
+  fr: "%{done} sur %{total}…"
+run.passed:
+  en: "%{count} passed"
+  es: "%{count} correctas"
+  de: "%{count} bestanden"
+  fr: "%{count} réussies"
+run.failed:
+  en: "%{count} failed"
+  es: "%{count} fallidas"
+  de: "%{count} fehlgeschlagen"
+  fr: "%{count} en échec"
+run.errors:
+  en: "%{count} errored"
+  es: "%{count} con error"
+  de: "%{count} mit Fehler"
+  fr: "%{count} en erreur"
+run.skipped:
+  en: "%{count} skipped"
+  es: "%{count} omitidas"
+  de: "%{count} übersprungen"
+  fr: "%{count} ignorées"
+run.took:
+  en: "in %{seconds} s"
+  es: "en %{seconds} s"
+  de: "in %{seconds} s"
+  fr: "en %{seconds} s"
+run.stopped_early:
+  en: (stopped at the first failure)
+  es: (detenida en el primer fallo)
+  de: (beim ersten Fehler gestoppt)
+  fr: (arrêtée au premier échec)
+run.milliseconds:
+  en: "%{count} ms"
+  es: "%{count} ms"
+  de: "%{count} ms"
+  fr: "%{count} ms"
+run.checks_passed:
+  en: "%{passed}/%{total} checks"
+  es: "%{passed}/%{total} comprobaciones"
+  de: "%{passed}/%{total} Prüfungen"
+  fr: "%{passed}/%{total} vérifications"
+run.stop:
+  en: Stop
+  es: Detener
+  de: Stoppen
+  fr: Arrêter
+run.run_again:
+  en: Run again
+  es: Ejecutar de nuevo
+  de: Erneut ausführen
+  fr: Relancer
+run.close:
+  en: Close the run
+  es: Cerrar la ejecución
+  de: Ausführung schließen
+  fr: Fermer l'exécution
+run.stop_on_failure:
+  en: Stop on failure
+  es: Detener al fallar
+  de: Bei Fehler stoppen
+  fr: Arrêter en cas d'échec
+run.stop_on_failure_tooltip:
+  en: Stop at the first failed check or error instead of running everything.
+  es: Detenerse en la primera comprobación fallida o error en vez de ejecutarlo todo.
+  de: Bei der ersten fehlgeschlagenen Prüfung oder dem ersten Fehler stoppen, statt alles auszuführen.
+  fr: S'arrêter à la première vérification en échec ou erreur au lieu de tout exécuter.
+run.nothing_to_run:
+  en: There are no requests here to run.
+  es: Aquí no hay solicitudes que ejecutar.
+  de: Hier gibt es keine Anfragen zum Ausführen.
+  fr: Il n'y a aucune requête à exécuter ici.
+run.hint:
+  en: Requests run in sidebar order and share responses, so {{ response() }} works. Click one to open it.
+  es: Las solicitudes se ejecutan en el orden de la barra lateral y comparten respuestas, así que {{ response() }} funciona. Haz clic en una para abrirla.
+  de: Anfragen laufen in der Reihenfolge der Seitenleiste und teilen sich Antworten, sodass {{ response() }} funktioniert. Klicke eine an, um sie zu öffnen.
+  fr: Les requêtes s'exécutent dans l'ordre de la barre latérale et partagent leurs réponses, donc {{ response() }} fonctionne. Cliquez sur l'une d'elles pour l'ouvrir.
+run.skip_websocket:
+  en: WebSocket requests aren't run
+  es: Las solicitudes WebSocket no se ejecutan
+  de: WebSocket-Anfragen werden nicht ausgeführt
+  fr: Les requêtes WebSocket ne sont pas exécutées
+run.skip_event_stream:
+  en: event streams don't end, so they aren't run
+  es: los flujos de eventos no terminan, así que no se ejecutan
+  de: Event-Streams enden nicht und werden daher nicht ausgeführt
+  fr: les flux d'événements ne se terminent pas, ils ne sont donc pas exécutés

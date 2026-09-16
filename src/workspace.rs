@@ -23,6 +23,7 @@ use gpui_kit::*;
 use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
+use crate::chain;
 use crate::cookies::Cookies;
 use crate::credentials::{hoist_credentials_with, hoist_header, reserved_names, unique_name};
 use crate::environment_editor::{EnvironmentEditor, EnvironmentEditorEvent, Target};
@@ -34,6 +35,8 @@ use crate::paths::{AppPaths, AppState};
 use crate::project;
 use crate::request_editor::{RequestEditor, RequestEditorEvent};
 use crate::response_cache::{CacheKey, Liveness, ResponseCache};
+use crate::runner;
+use crate::runner_view::{RunSetup, RunnerView, RunnerViewEvent, Scope};
 use crate::secret_store::{self, DEFAULTS_LABEL, DEFAULTS_SCOPE, SecretRef, SecretStore, SecretWrite};
 use crate::settings::{AppSettings, LabelColor};
 use crate::settings_form::{PathField, SettingsForm, SettingsFormEvent};
@@ -53,6 +56,7 @@ pub struct Launch {
 enum MainView {
     Request,
     Environments,
+    Runner,
 }
 
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -79,6 +83,7 @@ pub struct Workspace {
     editor: Entity<RequestEditor>,
     environment: Entity<EnvironmentSelect>,
     environment_editor: Entity<EnvironmentEditor>,
+    runner: Entity<RunnerView>,
     main_view: MainView,
     focus_handle: FocusHandle,
     secret_store: Option<SecretStore>,
@@ -132,6 +137,19 @@ impl Workspace {
             }
         })
         .detach();
+        let runner = cx.new(|_| RunnerView::new());
+        cx.subscribe_in(&runner, window, |this, _, event, window, cx| match event {
+            RunnerViewEvent::Open(path) => this.select_request(path.clone(), window, cx),
+            RunnerViewEvent::Ran(responses) => this
+                .editor
+                .update(cx, |editor, cx| editor.take_chained(responses.clone(), cx)),
+            RunnerViewEvent::RunAgain(scope) => this.run_scope(scope.path.clone(), window, cx),
+            RunnerViewEvent::Close => {
+                this.main_view = MainView::Request;
+                cx.notify();
+            }
+        })
+        .detach();
         cx.subscribe_in(&environment, window, |this, select, _: &SelectEvent<_>, window, cx| {
             let index = select.read(cx).selected_index(cx).map(|ix| ix.row);
             this.choose_environment(index, window, cx);
@@ -147,6 +165,7 @@ impl Workspace {
             editor,
             environment,
             environment_editor,
+            runner,
             main_view: MainView::Request,
             focus_handle: cx.focus_handle(),
             secret_store: None,
@@ -310,6 +329,7 @@ impl Workspace {
         let path = match self.main_view {
             MainView::Environments => self.environment_editor.read(cx).root().map(Path::to_path_buf),
             MainView::Request => self.editor.read(cx).path().cloned(),
+            MainView::Runner => self.runner.read(cx).scope().map(|scope| scope.root.clone()),
         };
         path.and_then(|p| self.collection_index_for(&p))
             .or((!self.collections.is_empty()).then_some(0))
@@ -478,6 +498,66 @@ impl Workspace {
         self.save_state();
         self.refresh_environments(window, cx);
         cx.notify();
+    }
+
+    // MARK: Runs
+
+    /// Runs a collection or a folder, showing the results as they arrive.
+    fn run_scope(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main_view == MainView::Environments && !self.close_environments(window, cx) {
+            return;
+        }
+        // The run reads requests from disk, so save what's being edited first.
+        self.editor.update(cx, |editor, cx| editor.save(cx));
+        let Some(setup) = self.run_setup(path, cx) else {
+            return;
+        };
+        self.runner.update(cx, |runner, cx| runner.start(setup, cx));
+        self.main_view = MainView::Runner;
+        self.refresh_environments(window, cx);
+        cx.notify();
+    }
+
+    /// The requests under `path`, the collection's variables and secrets, and a chaining
+    /// context sharing the collection's cookie jar.
+    fn run_setup(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Option<RunSetup> {
+        let index = self.collection_index_for(&path)?;
+        let collection = &self.collections[index];
+        let root = collection.root.clone();
+        let title = if path == root {
+            collection.file.name.clone()
+        } else {
+            path.file_name()?.to_string_lossy().to_string()
+        };
+        let requests = runner::requests_in(collection, &path);
+        let collection_id = collection.file.id.clone();
+        let environment = self
+            .state
+            .active_environments
+            .get(&root)
+            .and_then(|active| collection.environments.iter().find(|env| &env.path == active))
+            .map(|env| (env.path.as_path(), &env.file));
+        let layered = secret_store::layer(&collection.file, environment);
+        let cookies = self.cookies_for(&root, cx);
+        Some(RunSetup {
+            scope: Scope {
+                root: root.clone(),
+                path,
+                title,
+            },
+            requests,
+            context: chain::Context {
+                root,
+                variables: layered.variables,
+                latest: Default::default(),
+                cache: self.editor.read(cx).shared_cache(cx),
+                collection_id,
+                default_timeout_secs: AppSettings::get(cx).request_timeout_secs,
+                cookies: cookies.as_ref().map(|jar| jar.store().clone()),
+            },
+            secrets: layered.secrets,
+            store: self.secret_store.clone(),
+        })
     }
 
     fn new_request(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -2425,15 +2505,16 @@ impl Render for Workspace {
                                 )
                             }),
                     )
-                    .child(div().flex_1().min_h_0().child(
-                        if !managing && self.projects().next().is_none() && self.editor.read(cx).path().is_none() {
+                    .child(div().flex_1().min_h_0().child(match self.main_view {
+                        MainView::Environments => self.environment_editor.clone().into_any_element(),
+                        MainView::Runner => self.runner.clone().into_any_element(),
+                        MainView::Request
+                            if self.projects().next().is_none() && self.editor.read(cx).path().is_none() =>
+                        {
                             self.render_no_projects(cx).into_any_element()
-                        } else if managing {
-                            self.environment_editor.clone().into_any_element()
-                        } else {
-                            self.editor.clone().into_any_element()
-                        },
-                    )),
+                        }
+                        MainView::Request => self.editor.clone().into_any_element(),
+                    })),
             )
             .children(dialog_layer)
             .children(notification_layer)
@@ -2503,6 +2584,7 @@ fn folder_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, folder: &Path) -> 
     };
     new_request_items(menu, weak, folder)
         .separator()
+        .item(item("run.menu_folder", Workspace::run_scope))
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.auth_ellipsis", Workspace::edit_auth))
         .item(item("settings_form.menu", Workspace::edit_settings))
@@ -2599,6 +2681,7 @@ fn collection_menu(menu: PopupMenu, weak: &WeakEntity<Workspace>, root: &Path, s
     };
     new_request_items(menu, weak, root)
         .separator()
+        .item(item("run.menu_collection", Workspace::run_scope))
         .item(item("ws.new_folder_ellipsis", Workspace::new_folder))
         .item(item("ws.auth_ellipsis", Workspace::edit_auth))
         .item(item("settings_form.menu", Workspace::edit_settings))
@@ -4357,6 +4440,41 @@ components:
         (port, received)
     }
 
+    /// Answers `count` HTTP requests on one port, in order, with the same JSON reply.
+    fn http_server_serving(count: usize, reply: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Read as _, Write as _};
+            for _ in 0..count {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                write!(
+                    reader.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+            }
+        });
+        port
+    }
+
     /// Answers one HTTP request on a local port. Returns the port and a channel that
     /// receives the raw request text.
     fn one_shot_server(response: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
@@ -5070,6 +5188,75 @@ components:
             wire.lines()
                 .any(|l| l.eq_ignore_ascii_case(&format!("authorization: Bearer {token}"))),
             "real token sent:\n{wire}"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn running_a_collection_reports_checks_and_keeps_the_responses(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let port = http_server_serving(2, "{\"id\":7}");
+        for (name, checks) in [
+            (
+                "get-json.yaml",
+                vec!["status == 200".to_string(), "$.id == 7".to_string()],
+            ),
+            ("echo-post.yaml", vec!["status == 500".to_string()]),
+        ] {
+            let path = root.join(name);
+            let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+            request.url = format!("http://127.0.0.1:{port}/thing");
+            request.checks = checks;
+            storage::write_yaml(&path, &request).unwrap();
+        }
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let runner = cx.update(|cx| workspace.read(cx).runner.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.run_scope(root.clone(), window, cx);
+            });
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !runner.read(cx).running()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let results = cx.update(|cx| runner.read(cx).results_for_test());
+        assert_eq!(
+            results,
+            vec![
+                ("get-json.yaml".to_string(), crate::runner::RunStatus::Passed),
+                ("echo-post.yaml".to_string(), crate::runner::RunStatus::Failed),
+            ],
+            "both ran, in sidebar order, and the checks decided the outcome"
+        );
+        let (passed, failed) = cx.update(|cx| {
+            let summary = runner.read(cx).summary_for_test().cloned().unwrap();
+            (summary.passed, summary.failed)
+        });
+        assert_eq!((passed, failed), (1, 1));
+        cx.update(|cx| assert!(workspace.read(cx).main_view == MainView::Runner));
+
+        // The run's responses become each request's latest, so opening one shows it.
+        let editor = cx.update(|cx| workspace.read(cx).editor.clone());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.select_request(root.join("get-json.yaml"), window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let shown = cx.update(|cx| editor.read(cx).shown_response().map(|(r, _)| r.clone()));
+        assert!(
+            matches!(shown.map(|r| r.outcome), Some(crate::response_cache::Outcome::Response { status, .. }) if status == 200),
+            "the editor shows the response from the run"
         );
     }
 }
