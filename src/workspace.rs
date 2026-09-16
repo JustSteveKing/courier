@@ -1571,38 +1571,71 @@ impl Workspace {
                 })
                 .on_ok(move |_, window, cx| {
                     let text = command.read(cx).value().to_string();
-                    let result = curl::parse(&text).and_then(|mut request| {
-                        let (hoisted, writes) = weak
-                            .update(cx, |this, _| this.hoist_into_defaults(&dir, &mut request))
-                            .map_err(|_| anyhow::anyhow!("workspace closed"))??;
-                        let path = storage::create_request(&dir, &request)?;
-                        Ok((path, hoisted, writes))
-                    });
-                    match result {
-                        Ok((path, hoisted, writes)) => {
-                            weak.update(cx, |this, cx| {
-                                this.store_secrets(writes, window, cx);
-                                this.reload_containing(&path, window, cx);
-                                this.select_request(path, window, cx);
-                                if !hoisted.is_empty() {
-                                    window.push_notification(
-                                        Notification::info(
-                                            t!("ws.moved_to_defaults", names = hoisted.join(", ")).to_string(),
-                                        ),
-                                        cx,
-                                    );
-                                }
-                            })
-                            .ok();
-                            true
-                        }
-                        Err(e) => {
-                            notify_error(format!("{e:#}"), window, cx);
-                            false
-                        }
-                    }
+                    weak.update(cx, |this, cx| this.create_from_curl(&dir, &text, true, window, cx))
+                        .unwrap_or(false)
                 })
         });
+    }
+
+    /// Makes a request in `dir` from a curl command, hoisting any credentials into secrets,
+    /// and opens it. Returns whether it parsed; `loud` reports the reason when it didn't.
+    fn create_from_curl(
+        &mut self,
+        dir: &Path,
+        command: &str,
+        loud: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = curl::parse(command).and_then(|mut request| {
+            let (hoisted, writes) = self.hoist_into_defaults(dir, &mut request)?;
+            let path = storage::create_request(dir, &request)?;
+            Ok((path, hoisted, writes))
+        });
+        match result {
+            Ok((path, hoisted, writes)) => {
+                self.store_secrets(writes, window, cx);
+                self.reload_containing(&path, window, cx);
+                self.select_request(path, window, cx);
+                if !hoisted.is_empty() {
+                    window.push_notification(
+                        Notification::info(t!("ws.moved_to_defaults", names = hoisted.join(", ")).to_string()),
+                        cx,
+                    );
+                }
+                true
+            }
+            Err(e) => {
+                if loud {
+                    notify_error(format!("{e:#}"), window, cx);
+                }
+                false
+            }
+        }
+    }
+
+    /// Ctrl+V outside a text field: a curl command on the clipboard becomes a request in
+    /// the collection you're working in.
+    fn paste_curl(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        if !text.trim_start().starts_with("curl") {
+            window.push_notification(Notification::info(t!("ws.paste_curl_hint").to_string()), cx);
+            return;
+        }
+        // Next to the open request when there is one, else the collection you're looking at.
+        let dir = self
+            .editor()
+            .read(cx)
+            .path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .or_else(|| self.active_collection(cx).map(|c| c.root.clone()));
+        let Some(dir) = dir else {
+            return;
+        };
+        self.create_from_curl(&dir, &text, true, window, cx);
     }
 
     /// Asks for a Postman environment file, then hands its contents to `apply`.
@@ -2814,6 +2847,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &palette::NewScratchRequest, window, cx| this.new_scratch_request(window, cx)),
             )
             .on_action(cx.listener(|this, _: &palette::CloseTab, window, cx| this.close_tab(this.active, window, cx)))
+            .on_action(cx.listener(|this, _: &palette::PasteCurl, window, cx| this.paste_curl(window, cx)))
             .on_action(cx.listener(|this, _: &palette::NextTab, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &palette::PreviousTab, window, cx| this.step_tab(-1, window, cx)))
             .size_full()
@@ -5843,6 +5877,64 @@ components:
         cx.update(|cx| {
             assert_eq!(restarted.read(cx).open_tabs, vec![get_json.clone(), echo.clone()]);
             assert_eq!(restarted.read(cx).editor().read(cx).path(), Some(&echo));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_pasted_curl_command_becomes_a_request(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+
+        // Into the URL bar: the open request is filled in, not overwritten with the text.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.select_request(root.join("get-json.yaml"), window, cx)
+            });
+            let url = editor.read(cx).url_for_test();
+            url.update(cx, |state, cx| {
+                state.replace_all(
+                    "curl -X POST 'https://api.test/pets?big=1' -H 'Accept: application/json' -d '{\"name\":\"Rex\"}'",
+                    window,
+                    cx,
+                )
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let request = editor.read(cx).current_for_test(cx);
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.url, "https://api.test/pets?big=1");
+            assert_eq!(request.name, "Get JSON", "its name is left alone");
+            assert!(request.headers.iter().any(|h| h.name == "Accept"));
+            assert_eq!(
+                request.body.as_ref().map(|b| b.content.as_str()),
+                Some("{\"name\":\"Rex\"}")
+            );
+        });
+
+        // Anywhere else: a new request in the folder you're working in.
+        cx.update(|cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                "curl https://api.test/ping -H 'X-Trace: abc'".into(),
+            ))
+        });
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.paste_curl(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let path = editor.read(cx).path().cloned().unwrap();
+            assert!(path.starts_with(&root) && path != root.join("get-json.yaml"));
+            let made: RequestFile = storage::read_yaml(&path).unwrap();
+            assert_eq!(
+                (made.method.as_str(), made.url.as_str()),
+                ("GET", "https://api.test/ping")
+            );
         });
     }
 }

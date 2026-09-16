@@ -1091,3 +1091,8 @@ request.untitled:
   es: Sin título
   de: Ohne Titel
   fr: Sans titre
+request.filled_from_curl:
+  en: Filled in from the curl command.
+  es: Completado desde el comando curl.
+  de: Aus dem curl-Befehl übernommen.
+  fr: Rempli à partir de la commande curl.

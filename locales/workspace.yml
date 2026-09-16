@@ -774,3 +774,8 @@ ws.close_tab:
   es: Cerrar la pestaña
   de: Tab schließen
   fr: Fermer l'onglet
+ws.paste_curl_hint:
+  en: Copy a curl command first, then paste it here to make a request from it.
+  es: Copia primero un comando curl y pégalo aquí para crear una solicitud a partir de él.
+  de: Kopiere zuerst einen curl-Befehl und füge ihn hier ein, um daraus eine Anfrage zu machen.
+  fr: Copiez d'abord une commande curl, puis collez-la ici pour en créer une requête.

@@ -455,8 +455,12 @@ impl RequestEditor {
         cx.subscribe_in(&url, window, |this, url, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { secondary: false, .. } => this.send(window, cx),
             InputEvent::Change => {
-                // A URL is one line: Shift+Enter or a pasted line break shouldn't split it.
+                // Pasting a curl command in the URL fills the whole request instead.
                 let value = url.read(cx).value();
+                let command = value.to_string();
+                if command.trim_start().starts_with("curl") && this.fill_from_curl(&command, window, cx) {
+                    return;
+                }
                 if value.contains(['\n', '\r']) {
                     let joined = value.replace(['\n', '\r'], "");
                     url.update(cx, |s, cx| s.replace_all(joined, window, cx));
@@ -996,6 +1000,41 @@ impl RequestEditor {
 
     pub fn set_inherited_settings(&mut self, settings: RequestSettings) {
         self.inherited_settings = settings;
+    }
+
+    /// Fills the open request from a curl command: method, URL, headers and body, keeping
+    /// its name. Returns false if it isn't a curl command after all, so the text stays put.
+    pub(crate) fn fill_from_curl(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Ok(request) = crate::import::curl::parse(command) else {
+            return false;
+        };
+        let method = METHODS
+            .iter()
+            .position(|m| m.eq_ignore_ascii_case(&request.method))
+            .unwrap_or(0);
+        self.method.update(cx, |s, cx| {
+            s.set_selected_index(Some(IndexPath::new(method)), window, cx)
+        });
+        self.url
+            .update(cx, |s, cx| s.set_value(request.url.clone(), window, cx));
+        self.headers
+            .update(cx, |s, cx| s.set_value(headers_to_text(&request.headers), window, cx));
+        self.disabled_params = request.disabled_params.clone();
+        let body = request.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
+        self.body.update(cx, |s, cx| s.set_value(body, window, cx));
+        let kind_index = request
+            .body
+            .as_ref()
+            .and_then(|b| BODY_KINDS.iter().position(|k| *k == Some(b.kind)))
+            .unwrap_or(0);
+        self.body_kind.update(cx, |s, cx| {
+            s.set_selected_index(Some(IndexPath::new(kind_index)), window, cx)
+        });
+        self.update_dirty(cx);
+        self.rehighlight_all(cx);
+        cx.emit(RequestEditorEvent::Notice(t!("request.filled_from_curl").to_string()));
+        cx.notify();
+        true
     }
 
     /// The body kind the user picked, or `None` for "decide from the Content-Type".

@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Paste a curl command anywhere
+
+Paste one into the URL bar and it fills the open request — method, URL, headers and body — keeping its name. Paste it anywhere else in the window (`ctrl-v` outside a text field) and it becomes a new request next to the one you have open, with any credentials it carries hoisted into secrets. The import dialog is still in the collection menu for when you'd rather paste into a box.
+
 ### Tabs
 
 Each request you open gets a tab; opening one that's already open moves to it. `ctrl-w` closes the current tab, `ctrl-tab` and `ctrl-shift-tab` move between them, and the strip only appears once a second request is open. Tabs come back where you left them after a restart, and a tab whose request is renamed or moved follows it.

@@ -17,7 +17,14 @@ use crate::settings::AppSettings;
 
 gpui_kit::actions!(
     workspace,
-    [OpenCommandPalette, NewScratchRequest, CloseTab, NextTab, PreviousTab]
+    [
+        OpenCommandPalette,
+        NewScratchRequest,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        PasteCurl
+    ]
 );
 
 pub fn init(cx: &mut App) {
@@ -25,6 +32,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
         KeyBinding::new("ctrl-n", NewScratchRequest, None),
         KeyBinding::new("ctrl-w", CloseTab, None),
+        KeyBinding::new("ctrl-v", PasteCurl, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
     ]);
