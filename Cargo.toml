@@ -34,3 +34,10 @@ courier-core = { path = "crates/courier-core", features = ["test-support"] }
 futures-lite = "2.6.1"
 gpui-kit = { version = "0.6.1", features = ["test-support", "tree-sitter", "tree-sitter-graphql"] }
 tempfile = "3.27.0"
+
+# A release build is what people install: worth the longer compile.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

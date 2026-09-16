@@ -87,6 +87,34 @@ impl Render for DraggedRequest {
     }
 }
 
+/// A row of the sidebar, described before it is drawn.
+#[derive(Clone, Debug, PartialEq)]
+enum SidebarRow {
+    Collection {
+        index: usize,
+        collapsed: bool,
+    },
+    Folder {
+        path: PathBuf,
+        depth: usize,
+        collapsed: bool,
+    },
+    Request {
+        path: PathBuf,
+        depth: usize,
+    },
+}
+
+impl SidebarRow {
+    /// The path the arrow keys use to name this row.
+    fn path<'a>(&'a self, collections: &'a [Collection]) -> Option<&'a Path> {
+        match self {
+            Self::Collection { index, .. } => collections.get(*index).map(|c| c.root.as_path()),
+            Self::Folder { path, .. } | Self::Request { path, .. } => Some(path),
+        }
+    }
+}
+
 /// What a collection can be exported as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportFormat {
@@ -1196,47 +1224,12 @@ impl Workspace {
 
     // MARK: Moving around
 
-    /// Every row the arrow keys can land on, in the order they're drawn: collections,
-    /// their open folders, and the requests inside.
+    /// Every row the arrow keys can land on: the rows the sidebar is drawing.
     fn navigable_rows(&self, cx: &App) -> Vec<PathBuf> {
-        fn walk(this: &Workspace, items: &[Item], query: Option<&str>, rows: &mut Vec<PathBuf>) {
-            for item in items {
-                match item {
-                    Item::Folder { name, path, children } => {
-                        let matches = query.is_none_or(|query| {
-                            name.to_lowercase().contains(query) || Workspace::folder_matches(children, query)
-                        });
-                        if !matches {
-                            continue;
-                        }
-                        rows.push(path.clone());
-                        if query.is_some() || !this.collapsed.contains(path) {
-                            walk(this, children, query, rows);
-                        }
-                    }
-                    Item::Request { path, request } => {
-                        if query.is_none_or(|query| Workspace::request_matches(request, query)) {
-                            rows.push(path.clone());
-                        }
-                    }
-                }
-            }
-        }
-        let query = self.search_query(cx);
-        let mut rows = Vec::new();
-        for collection in &self.collections {
-            let query = query.as_deref();
-            if query.is_some_and(|query| {
-                !Self::folder_matches(&collection.items, query) && !collection.file.name.to_lowercase().contains(query)
-            }) {
-                continue;
-            }
-            rows.push(collection.root.clone());
-            if query.is_some() || !self.collapsed.contains(&collection.root) {
-                walk(self, &collection.items, query, &mut rows);
-            }
-        }
-        rows
+        self.sidebar_rows(cx)
+            .iter()
+            .filter_map(|row| row.path(&self.collections).map(Path::to_path_buf))
+            .collect()
     }
 
     fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2912,10 +2905,9 @@ impl Workspace {
     fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let weak = cx.entity().downgrade();
-        let mut rows = Vec::new();
-        for collection in &self.collections {
-            self.render_collection(collection, &mut rows, cx);
-        }
+        let rows = self.sidebar_rows(cx);
+        let count = rows.len();
+        let entity = cx.entity();
 
         let handle = div()
             .id("sidebar-resize")
@@ -2995,12 +2987,10 @@ impl Workspace {
             )
             .child(
                 v_flex()
-                    .id("sidebar-rows")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .p_1()
-                    .when(rows.is_empty() && self.search_query(cx).is_some(), |list| {
+                    .when(count == 0 && self.search_query(cx).is_some(), |list| {
                         list.child(
                             div()
                                 .p_2()
@@ -3009,9 +2999,21 @@ impl Workspace {
                                 .child(t!("ws.search_none").to_string()),
                         )
                     })
-                    .children(rows)
+                    // Only the rows on screen are drawn, so a collection of thousands costs
+                    // what a screenful costs.
+                    .child(
+                        gpui_kit::uniform_list("sidebar-rows", count, move |range, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                range
+                                    .filter_map(|index| Some(this.render_row(rows.get(index)?, cx)))
+                                    .collect()
+                            })
+                        })
+                        .flex_1()
+                        .min_h_0(),
+                    )
                     // Right-clicking the empty space below the rows.
-                    .child(div().id("sidebar-space").flex_1().min_h(px(48.)).context_menu({
+                    .child(div().id("sidebar-space").flex_none().min_h(px(48.)).context_menu({
                         let weak = cx.entity().downgrade();
                         move |menu, window, cx| {
                             scratch_request_submenu(menu, &weak, window, cx)
@@ -3102,250 +3104,282 @@ impl Workspace {
         })
     }
 
-    fn render_collection(&self, collection: &Collection, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
-        let theme = cx.theme();
-        let root = collection.root.clone();
-        let scratch = self.is_scratch(&root);
-        let query = self.search_query(cx);
-        // While filtering, everything holding a match is open: hunting through folders for
-        // the thing you just searched for defeats the search.
-        let collapsed = query.is_none() && self.collapsed.contains(&root);
-        if let Some(query) = &query
-            && !Self::folder_matches(&collection.items, query)
-            && !collection.file.name.to_lowercase().contains(query.as_str())
-        {
-            return;
-        }
-        let weak = cx.entity().downgrade();
-        let row_id = rows.len();
-
-        rows.push(
-            h_flex()
-                .id(sidebar_row_id("collection", &root))
-                .test_support()
-                .group("collection-row")
-                .px_1()
-                .py_1()
-                .mt_1()
-                .gap_1()
-                .rounded_md()
-                .cursor_pointer()
-                .when(self.cursor.as_deref() == Some(root.as_path()), |row| {
-                    row.border_1().border_color(theme.primary)
-                })
-                .hover(|s| s.bg(theme.sidebar_accent))
-                .child(chevron(collapsed))
-                .when(scratch, |row| {
-                    row.child(
-                        Icon::new(IconName::SquareTerminal)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    )
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.collection_label(collection)),
-                )
-                .when(!collection.errors.is_empty(), |this| {
-                    this.child(Icon::new(IconName::TriangleAlert).xsmall().text_color(theme.warning))
-                })
-                .child({
-                    let root = root.clone();
-                    Button::new(("collection-menu", row_id))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Ellipsis)
-                        .dropdown_menu(move |menu, _, _| collection_menu(menu, &weak, &root, scratch))
-                })
-                .on_click(cx.listener({
-                    let root = root.clone();
-                    move |this, _, _, cx| {
-                        if !this.collapsed.remove(&root) {
-                            this.collapsed.insert(root.clone());
+    /// One row of the sidebar. Rows are described first and drawn only when they're on
+    /// screen, so a collection with thousands of requests costs what a screenful costs.
+    fn sidebar_rows(&self, cx: &App) -> Vec<SidebarRow> {
+        fn walk(this: &Workspace, items: &[Item], depth: usize, query: Option<&str>, rows: &mut Vec<SidebarRow>) {
+            for item in items {
+                match item {
+                    Item::Folder { name, path, children } => {
+                        if query.is_some_and(|query| {
+                            !name.to_lowercase().contains(query) && !Workspace::folder_matches(children, query)
+                        }) {
+                            continue;
                         }
-                        cx.notify();
+                        // While filtering, everything holding a match is open: hunting
+                        // through folders for what you just searched for defeats the search.
+                        let collapsed = query.is_none() && this.collapsed.contains(path);
+                        rows.push(SidebarRow::Folder {
+                            path: path.clone(),
+                            depth,
+                            collapsed,
+                        });
+                        if !collapsed {
+                            walk(this, children, depth + 1, query, rows);
+                        }
                     }
-                }))
-                .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
-                .on_drop(cx.listener({
-                    let root = root.clone();
-                    move |this, dragged: &DraggedRequest, window, cx| {
-                        this.drop_request(dragged.path.clone(), root.clone(), None, window, cx)
+                    Item::Request { path, request } => {
+                        if query.is_none_or(|query| Workspace::request_matches(request, query)) {
+                            rows.push(SidebarRow::Request {
+                                path: path.clone(),
+                                depth,
+                            });
+                        }
                     }
-                }))
-                .context_menu({
-                    let (weak, root) = (cx.entity().downgrade(), root.clone());
-                    move |menu, _, _| collection_menu(menu, &weak, &root, scratch)
-                })
-                .into_any_element(),
-        );
-
-        if !collapsed {
-            self.render_items(&collection.items, 1, rows, cx);
-        }
-    }
-
-    fn render_items(&self, items: &[Item], depth: usize, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
-        let theme = cx.theme().clone();
-        let destinations: Rc<Vec<(String, PathBuf)>> = Rc::new(
-            self.collections
-                .iter()
-                .map(|c| (self.collection_label(c), c.root.clone()))
-                .collect(),
-        );
-        let selected = self.editor().read(cx).path().cloned();
-        let indent = px(4. + depth as f32 * 14.);
-        let query = self.search_query(cx);
-
-        for item in items {
-            match item {
-                Item::Folder { name, path, children } => {
-                    if let Some(query) = &query
-                        && !name.to_lowercase().contains(query.as_str())
-                        && !Self::folder_matches(children, query)
-                    {
-                        continue;
-                    }
-                    let collapsed = query.is_none() && self.collapsed.contains(path);
-                    let path = path.clone();
-                    let menu_path = path.clone();
-                    let weak = cx.entity().downgrade();
-                    rows.push(
-                        h_flex()
-                            .id(sidebar_row_id("folder", &path))
-                            .test_support()
-                            .pl(indent)
-                            .pr_1()
-                            .py_1()
-                            .gap_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_sm()
-                            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
-                                row.border_1().border_color(theme.primary)
-                            })
-                            .hover(|s| s.bg(theme.sidebar_accent))
-                            .child(chevron(collapsed))
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::Folder
-                                } else {
-                                    IconName::FolderOpen
-                                })
-                                .xsmall()
-                                .text_color(theme.muted_foreground),
-                            )
-                            .child(div().min_w_0().truncate().child(name.clone()))
-                            .when(self.git_changed_within(&path), |row| {
-                                row.child(div().flex_none().text_xs().text_color(theme.warning).child("●"))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed.remove(&path) {
-                                    this.collapsed.insert(path.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
-                            .on_drop(cx.listener({
-                                let into = menu_path.clone();
-                                move |this, dragged: &DraggedRequest, window, cx| {
-                                    this.drop_request(dragged.path.clone(), into.clone(), None, window, cx)
-                                }
-                            }))
-                            .context_menu(move |menu, _, _| folder_menu(menu, &weak, &menu_path))
-                            .into_any_element(),
-                    );
-                    if !collapsed {
-                        self.render_items(children, depth + 1, rows, cx);
-                    }
-                }
-                Item::Request { path, request } => {
-                    if let Some(query) = &query
-                        && !Self::request_matches(request, query)
-                    {
-                        continue;
-                    }
-                    let is_selected = selected.as_ref() == Some(path);
-                    let path = path.clone();
-                    let menu_path = path.clone();
-                    let kind = RequestKind::of(request);
-                    let weak = cx.entity().downgrade();
-                    rows.push(
-                        h_flex()
-                            .id(sidebar_row_id("request", &path))
-                            .test_support()
-                            .pl(indent + px(18.))
-                            .pr_1()
-                            .py_1()
-                            .gap_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_sm()
-                            .when(is_selected, |s| {
-                                s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground)
-                            })
-                            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
-                                row.border_1().border_color(theme.primary)
-                            })
-                            .hover(|s| s.bg(theme.sidebar_accent))
-                            .child(
-                                div()
-                                    .w(px(52.))
-                                    .flex_none()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(request_color(request, &theme, cx))
-                                    .child(short_method(&request_label(request))),
-                            )
-                            .child(div().min_w_0().truncate().child(request.name.clone()))
-                            .children(self.git_change(&path).map(|change| {
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(match change {
-                                        crate::git::Change::New => theme.success,
-                                        crate::git::Change::Modified => theme.warning,
-                                        crate::git::Change::Deleted => theme.danger,
-                                    })
-                                    .child(change.mark())
-                            }))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.cursor = Some(path.clone());
-                                this.select_request(path.clone(), window, cx)
-                            }))
-                            .on_drag(
-                                DraggedRequest {
-                                    path: menu_path.clone(),
-                                    label: request.name.clone().into(),
-                                },
-                                |dragged, _, _, cx| cx.new(|_| dragged.clone()),
-                            )
-                            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
-                            .on_drop(cx.listener({
-                                let after = menu_path.clone();
-                                move |this, dragged: &DraggedRequest, window, cx| {
-                                    let Some(folder) = after.parent().map(Path::to_path_buf) else {
-                                        return;
-                                    };
-                                    this.drop_request(dragged.path.clone(), folder, Some(after.clone()), window, cx)
-                                }
-                            }))
-                            .context_menu({
-                                let destinations = destinations.clone();
-                                move |menu, window, cx| {
-                                    request_menu(menu, &weak, &menu_path, kind, &destinations, window, cx)
-                                }
-                            })
-                            .into_any_element(),
-                    );
                 }
             }
         }
+
+        let query = self.search_query(cx);
+        let mut rows = Vec::new();
+        for (index, collection) in self.collections.iter().enumerate() {
+            if let Some(query) = &query
+                && !Self::folder_matches(&collection.items, query)
+                && !collection.file.name.to_lowercase().contains(query.as_str())
+            {
+                continue;
+            }
+            let collapsed = query.is_none() && self.collapsed.contains(&collection.root);
+            rows.push(SidebarRow::Collection { index, collapsed });
+            if !collapsed {
+                walk(self, &collection.items, 1, query.as_deref(), &mut rows);
+            }
+        }
+        rows
+    }
+
+    fn render_row(&self, row: &SidebarRow, cx: &mut Context<Self>) -> AnyElement {
+        match row {
+            SidebarRow::Collection { index, collapsed } => self.render_collection_row(*index, *collapsed, cx),
+            SidebarRow::Folder { path, depth, collapsed } => self.render_folder_row(path, *depth, *collapsed, cx),
+            SidebarRow::Request { path, depth } => self.render_request_row(path, *depth, cx),
+        }
+    }
+
+    fn render_collection_row(&self, index: usize, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(collection) = self.collections.get(index) else {
+            return div().into_any_element();
+        };
+        let root = collection.root.clone();
+        let scratch = self.is_scratch(&root);
+        let weak = cx.entity().downgrade();
+
+        h_flex()
+            .id(sidebar_row_id("collection", &root))
+            .test_support()
+            .group("collection-row")
+            .px_1()
+            .py_1()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .when(self.cursor.as_deref() == Some(root.as_path()), |row| {
+                row.border_1().border_color(theme.primary)
+            })
+            .hover(|s| s.bg(theme.sidebar_accent))
+            .child(chevron(collapsed))
+            .when(scratch, |row| {
+                row.child(
+                    Icon::new(IconName::SquareTerminal)
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.collection_label(collection)),
+            )
+            .when(!collection.errors.is_empty(), |this| {
+                this.child(Icon::new(IconName::TriangleAlert).xsmall().text_color(theme.warning))
+            })
+            .child({
+                let root = root.clone();
+                Button::new(("collection-menu", index))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Ellipsis)
+                    .dropdown_menu(move |menu, _, _| collection_menu(menu, &weak, &root, scratch))
+            })
+            .on_click(cx.listener({
+                let root = root.clone();
+                move |this, _, _, cx| {
+                    if !this.collapsed.remove(&root) {
+                        this.collapsed.insert(root.clone());
+                    }
+                    cx.notify();
+                }
+            }))
+            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+            .on_drop(cx.listener({
+                let root = root.clone();
+                move |this, dragged: &DraggedRequest, window, cx| {
+                    this.drop_request(dragged.path.clone(), root.clone(), None, window, cx)
+                }
+            }))
+            .context_menu({
+                let (weak, root) = (cx.entity().downgrade(), root.clone());
+                move |menu, _, _| collection_menu(menu, &weak, &root, scratch)
+            })
+            .into_any_element()
+    }
+
+    fn render_folder_row(&self, path: &Path, depth: usize, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let indent = px(4. + depth as f32 * 14.);
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let path = path.to_path_buf();
+        let menu_path = path.clone();
+        let weak = cx.entity().downgrade();
+
+        h_flex()
+            .id(sidebar_row_id("folder", &path))
+            .test_support()
+            .pl(indent)
+            .pr_1()
+            .py_1()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
+                row.border_1().border_color(theme.primary)
+            })
+            .hover(|s| s.bg(theme.sidebar_accent))
+            .child(chevron(collapsed))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::Folder
+                } else {
+                    IconName::FolderOpen
+                })
+                .xsmall()
+                .text_color(theme.muted_foreground),
+            )
+            .child(div().min_w_0().truncate().child(name))
+            .when(self.git_changed_within(&path), |row| {
+                row.child(div().flex_none().text_xs().text_color(theme.warning).child("●"))
+            })
+            .on_click(cx.listener({
+                let path = path.clone();
+                move |this, _, _, cx| {
+                    if !this.collapsed.remove(&path) {
+                        this.collapsed.insert(path.clone());
+                    }
+                    cx.notify();
+                }
+            }))
+            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+            .on_drop(cx.listener({
+                let into = menu_path.clone();
+                move |this, dragged: &DraggedRequest, window, cx| {
+                    this.drop_request(dragged.path.clone(), into.clone(), None, window, cx)
+                }
+            }))
+            .context_menu(move |menu, _, _| folder_menu(menu, &weak, &menu_path))
+            .into_any_element()
+    }
+
+    fn render_request_row(&self, path: &Path, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(request) = self.find_request(path).cloned() else {
+            return div().into_any_element();
+        };
+        let indent = px(4. + depth as f32 * 14.);
+        let is_selected = self.editor().read(cx).path() == Some(&path.to_path_buf());
+        let path = path.to_path_buf();
+        let menu_path = path.clone();
+        let kind = RequestKind::of(&request);
+        let weak = cx.entity().downgrade();
+        let destinations: Rc<Vec<(String, PathBuf)>> = Rc::new(
+            self.collections
+                .iter()
+                .filter(|collection| !path.starts_with(&collection.root))
+                .map(|collection| (self.collection_label(collection), collection.root.clone()))
+                .collect(),
+        );
+
+        h_flex()
+            .id(sidebar_row_id("request", &path))
+            .test_support()
+            .pl(indent + px(18.))
+            .pr_1()
+            .py_1()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .when(is_selected, |s| {
+                s.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground)
+            })
+            .when(self.cursor.as_deref() == Some(path.as_path()), |row| {
+                row.border_1().border_color(theme.primary)
+            })
+            .hover(|s| s.bg(theme.sidebar_accent))
+            .child(
+                div()
+                    .w(px(52.))
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(request_color(&request, &theme, cx))
+                    .child(short_method(&request_label(&request))),
+            )
+            .child(div().min_w_0().truncate().child(request.name.clone()))
+            .children(self.git_change(&path).map(|change| {
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(match change {
+                        crate::git::Change::New => theme.success,
+                        crate::git::Change::Modified => theme.warning,
+                        crate::git::Change::Deleted => theme.danger,
+                    })
+                    .child(change.mark())
+            }))
+            .on_click(cx.listener({
+                let path = path.clone();
+                move |this, _, window, cx| {
+                    this.cursor = Some(path.clone());
+                    this.select_request(path.clone(), window, cx)
+                }
+            }))
+            .on_drag(
+                DraggedRequest {
+                    path: menu_path.clone(),
+                    label: request.name.clone().into(),
+                },
+                |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+            )
+            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+            .on_drop(cx.listener({
+                let after = menu_path.clone();
+                move |this, dragged: &DraggedRequest, window, cx| {
+                    let Some(folder) = after.parent().map(Path::to_path_buf) else {
+                        return;
+                    };
+                    this.drop_request(dragged.path.clone(), folder, Some(after.clone()), window, cx)
+                }
+            }))
+            .context_menu(move |menu, window, cx| {
+                request_menu(menu, &weak, &menu_path, kind, &destinations, window, cx)
+            })
+            .into_any_element()
     }
 }
 
@@ -7251,5 +7285,48 @@ workspace::NewScratchRequest: \"\"\n",
                 "enter opens the request the cursor is on"
             );
         });
+    }
+
+    #[gpui_kit::test]
+    async fn a_large_collection_still_draws_quickly(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        // Two thousand requests across twenty folders, the shape a big API ends up in.
+        for folder in 0..20 {
+            let dir = storage::create_folder(&root, &format!("Area {folder:02}")).unwrap();
+            for request in 0..100 {
+                let mut file = RequestFile::new(format!("Request {folder:02}-{request:03}"));
+                file.url = format!("{{{{base_url}}}}/area/{folder}/thing/{request}");
+                storage::create_request(&dir, &file).unwrap();
+            }
+        }
+
+        let loaded = std::time::Instant::now();
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.reload_collection(&root, window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let first = loaded.elapsed();
+
+        // Everything open: the worst case for the sidebar.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, _| this.collapsed.clear());
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let frame = std::time::Instant::now();
+        for _ in 0..5 {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+        }
+        let per_frame = frame.elapsed() / 5;
+        eprintln!("2000 requests: first draw {first:?}, {per_frame:?} a frame with everything open");
+        assert!(
+            per_frame < Duration::from_millis(100),
+            "a frame took {per_frame:?}, which would feel slow"
+        );
     }
 }
