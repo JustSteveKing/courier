@@ -9,6 +9,7 @@ mod ws;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -23,6 +24,7 @@ use indexmap::IndexMap;
 use rust_i18n::t;
 
 use crate::auth_form::{AuthForm, AuthFormEvent};
+use crate::body_view::{self, BodyView};
 use crate::chain;
 use crate::checks;
 use crate::cookies::Cookies;
@@ -129,6 +131,9 @@ struct ResponseState {
     sse: Option<sse::SseLog>,
     /// The message timeline of a WebSocket request.
     ws: Option<ws::WsLog>,
+    /// The latest response's bytes as they arrived, for images, hex and saving to a file.
+    /// Kept in memory only: the cache holds text.
+    bytes: Option<Rc<Vec<u8>>>,
 }
 
 /// A request ready to send, the variables it lacked, and the variables (with secrets) used.
@@ -231,6 +236,7 @@ impl ResponseState {
     }
 
     fn clear(&mut self) {
+        self.bytes = None;
         self.response = None;
         self.history.clear();
         self.viewing = None;
@@ -251,6 +257,11 @@ impl ResponseState {
                 self.restored = true;
             }
         }
+    }
+
+    fn finish_with_bytes(&mut self, response: StoredResponse, bytes: Vec<u8>) {
+        self.bytes = Some(Rc::new(bytes));
+        self.finish(response);
     }
 
     fn finish(&mut self, response: StoredResponse) {
@@ -864,14 +875,19 @@ impl RequestEditor {
             self.parsed_body = Some((path, received_at, parsed));
         }
         let parsed = self.parsed_body.as_ref().and_then(|(_, _, v)| v.clone());
-        let result = json_filter::filter(parsed.as_deref(), expression);
+        let view = self.body_view();
+        let result = match view {
+            BodyView::Xml | BodyView::Html => self.filter_xml(expression),
+            BodyView::Json => json_filter::filter(parsed.as_deref(), expression),
+            _ => json_filter::Filtered::NotFilterable,
+        };
         let text = match &result {
             json_filter::Filtered::Matches { text, .. } => text.clone(),
             _ => self
                 .state()
                 .and_then(ResponseState::outcome)
                 .map(|outcome| match outcome {
-                    Outcome::Response { body, .. } => http::pretty_body(body),
+                    Outcome::Response { body, .. } => self.shown_body(view, body),
                     Outcome::Error { message } => message.clone(),
                 })
                 .unwrap_or_default(),
@@ -880,12 +896,126 @@ impl RequestEditor {
         text
     }
 
+    /// Runs an XPath over an XML or HTML body.
+    fn filter_xml(&self, expression: &str) -> json_filter::Filtered {
+        let Some(Outcome::Response { body, .. }) = self.state().and_then(ResponseState::outcome) else {
+            return json_filter::Filtered::NotFilterable;
+        };
+        match body_view::select_xml(body, expression) {
+            Ok(selection) => json_filter::Filtered::Matches {
+                text: selection.text(),
+                count: selection.count(),
+            },
+            Err(message) => json_filter::Filtered::Invalid(message),
+        }
+    }
+
+    /// The body as text for the editor: pretty JSON or XML, hex for binary, else as it came.
+    fn shown_body(&self, view: BodyView, body: &str) -> String {
+        match view {
+            BodyView::Json => http::pretty_body(body),
+            BodyView::Xml | BodyView::Html => body_view::pretty_xml(body),
+            BodyView::Binary => match self.response_bytes() {
+                Some(bytes) => hex_dump(&bytes),
+                None => hex_dump(body.as_bytes()),
+            },
+            BodyView::Image(_) | BodyView::Text => body.to_string(),
+        }
+    }
+
+    /// How the response on screen is best shown.
+    fn body_view(&self) -> BodyView {
+        match self.state().and_then(ResponseState::outcome) {
+            Some(Outcome::Response { headers, body, .. }) => {
+                let content_type = headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, value)| value.as_str());
+                BodyView::of(content_type, body)
+            }
+            _ => BodyView::Text,
+        }
+    }
+
+    /// The response's bytes as they arrived, when this session received them. A response
+    /// restored from the cache only has text.
+    fn response_bytes(&self) -> Option<Rc<Vec<u8>>> {
+        let state = self.state()?;
+        state.viewing.is_none().then(|| state.bytes.clone()).flatten()
+    }
+
+    /// Writes the response body to a file the user picks.
+    fn save_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bytes = match self.response_bytes() {
+            Some(bytes) => bytes.to_vec(),
+            None => match self.state().and_then(ResponseState::outcome) {
+                Some(Outcome::Response { body, .. }) => body.clone().into_bytes(),
+                _ => return,
+            },
+        };
+        let name = self.suggested_file_name();
+        let path = cx.prompt_for_new_path(&std::env::current_dir().unwrap_or_default(), Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = path.await else {
+                return;
+            };
+            let written = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(&path, bytes).map(|()| path) })
+                .await;
+            this.update(cx, |_, cx| match written {
+                Ok(path) => cx.emit(RequestEditorEvent::Notice(
+                    t!("request.body_saved", path = path.display()).to_string(),
+                )),
+                Err(e) => cx.emit(RequestEditorEvent::Error(
+                    t!("request.body_not_saved", error = e.to_string()).to_string(),
+                )),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A file name for saving: the request's name plus what the content type suggests.
+    fn suggested_file_name(&self) -> String {
+        let stem = self
+            .path
+            .as_ref()
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "response".into());
+        let extension = match self.body_view() {
+            BodyView::Json => "json",
+            BodyView::Xml => "xml",
+            BodyView::Html => "html",
+            BodyView::Image(format) => format,
+            BodyView::Text => "txt",
+            BodyView::Binary => "bin",
+        };
+        format!("{stem}.{extension}")
+    }
+
+    /// Opens the response in the browser by way of a temporary file, for HTML.
+    fn open_body_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(Outcome::Response { body, .. }) = self.state().and_then(ResponseState::outcome) else {
+            return;
+        };
+        let file = std::env::temp_dir().join(format!("courier-{}.html", response_cache::now()));
+        match std::fs::write(&file, body) {
+            Ok(()) => cx.open_url(&format!("file://{}", file.display())),
+            Err(e) => cx.emit(RequestEditorEvent::Error(
+                t!("request.body_not_saved", error = e.to_string()).to_string(),
+            )),
+        }
+    }
+
     fn show_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter_status = None;
         let expression = self.path.as_ref().and_then(|p| self.response_filters.get(p)).cloned();
+        let view = self.body_view();
         let (body, headers) = match self.state().and_then(ResponseState::outcome) {
             Some(Outcome::Response { headers, body, .. }) => (
-                expression.is_none().then(|| http::pretty_body(body)),
+                expression.is_none().then(|| self.shown_body(view, body)),
                 headers
                     .iter()
                     .map(|(n, v)| format!("{n}: {v}"))
@@ -901,6 +1031,12 @@ impl RequestEditor {
             (None, None) => String::new(),
         };
         self.response_body.update(cx, |s, cx| s.set_value(body, window, cx));
+        let placeholder = match view.filter_kind() {
+            Some("xpath") => t!("request.filter_xpath_placeholder"),
+            _ => t!("request.filter_placeholder"),
+        };
+        self.response_filter
+            .update(cx, |s, cx| s.set_placeholder(placeholder.to_string(), window, cx));
         self.response_headers
             .update(cx, |s, cx| s.set_value(headers, window, cx));
         self.refresh_checks(cx);
@@ -1590,6 +1726,7 @@ impl RequestEditor {
         let Some(live) = state.live.as_mut().filter(|live| live.id == id) else {
             return false;
         };
+        let mut received_bytes = None;
         let finished = match event {
             transport::Event::Head {
                 status,
@@ -1664,6 +1801,9 @@ impl RequestEditor {
                     return false;
                 }
                 let (status, reason, headers) = live.head.take().unwrap_or_default();
+                let received = std::mem::take(&mut live.body);
+                let body = String::from_utf8_lossy(&received).into_owned();
+                received_bytes = Some(received);
                 Some(StoredResponse {
                     received_at: response_cache::now(),
                     elapsed_ms: elapsed.as_millis() as u64,
@@ -1671,7 +1811,7 @@ impl RequestEditor {
                         status,
                         reason,
                         headers,
-                        body: String::from_utf8_lossy(&live.body).into_owned(),
+                        body,
                         body_size: bytes,
                         truncated: live.truncated,
                     },
@@ -1702,7 +1842,10 @@ impl RequestEditor {
             cx.notify();
             return true;
         };
-        state.finish(stored.clone());
+        match received_bytes {
+            Some(bytes) => state.finish_with_bytes(stored.clone(), bytes),
+            None => state.finish(stored.clone()),
+        }
         if let (Some(cache), Some(key)) = (cache, state.cache_key.clone()) {
             cx.background_executor()
                 .spawn(async move {
@@ -1821,7 +1964,9 @@ impl RequestEditor {
                 },
             ),
             Some(json_filter::Filtered::Invalid(error)) => (error.clone(), theme.danger),
-            Some(json_filter::Filtered::NotJson) => (t!("request.filter_not_json").to_string(), theme.warning),
+            Some(json_filter::Filtered::NotFilterable) => {
+                (t!("request.filter_not_filterable").to_string(), theme.warning)
+            }
         };
         h_flex()
             .gap_2()
@@ -1860,6 +2005,89 @@ impl RequestEditor {
                         .child(status),
                 )
             })
+    }
+
+    /// The row above a response body: what it is, and what you can do with it.
+    fn render_body_actions(&self, view: BodyView, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let note = match view {
+            BodyView::Binary => {
+                let size = self
+                    .response_bytes()
+                    .map(|bytes| bytes.len())
+                    .or_else(|| match self.state().and_then(ResponseState::outcome) {
+                        Some(Outcome::Response { body_size, .. }) => Some(*body_size),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                Some(t!("request.binary_body", size = format_size(size)).to_string())
+            }
+            _ => None,
+        };
+        h_flex()
+            .gap_2()
+            .items_center()
+            .children(note.map(|note| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(note)
+            }))
+            .when(note_is_none(view), |row| row.child(div().flex_1()))
+            .when(view == BodyView::Html, |row| {
+                row.child(
+                    Button::new("open-in-browser")
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::ExternalLink)
+                        .label(t!("request.open_in_browser").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.open_body_in_browser(cx))),
+                )
+            })
+            .child(
+                Button::new("save-body")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::FolderOpen)
+                    .label(t!("request.save_body").to_string())
+                    .on_click(cx.listener(|this, _, window, cx| this.save_body(window, cx))),
+            )
+    }
+
+    /// The body itself: an image when it is one, otherwise the read-only editor.
+    fn render_body(&self, view: BodyView, cx: &Context<Self>) -> AnyElement {
+        let BodyView::Image(format) = view else {
+            return readonly_editor(&self.response_body)
+                .flex_1()
+                .min_h_0()
+                .into_any_element();
+        };
+        let Some(bytes) = self.response_bytes().filter(|bytes| !bytes.is_empty()) else {
+            return div()
+                .p_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(t!("request.image_not_kept").to_string())
+                .into_any_element();
+        };
+        let Some(format) = image_format(format) else {
+            return readonly_editor(&self.response_body)
+                .flex_1()
+                .min_h_0()
+                .into_any_element();
+        };
+        let image = std::sync::Arc::new(gpui_kit::Image::from_bytes(format, bytes.to_vec()));
+        div()
+            .id("response-image")
+            .flex_1()
+            .min_h_0()
+            .overflow_scroll()
+            .p_2()
+            .child(img(image).max_w_full())
+            .into_any_element()
     }
 
     fn render_status(&self, event_stream: bool, cx: &Context<Self>) -> impl IntoElement {
@@ -2040,12 +2268,16 @@ impl Render for RequestEditor {
                     Some(Outcome::Response { .. })
                 ) =>
             {
+                let view = self.body_view();
                 v_flex()
                     .flex_1()
                     .min_h_0()
                     .gap_1()
-                    .child(self.render_filter_bar(cx))
-                    .child(readonly_editor(&self.response_body).flex_1().min_h_0())
+                    .child(self.render_body_actions(view, cx))
+                    .when(view.filter_kind().is_some(), |column| {
+                        column.child(self.render_filter_bar(cx))
+                    })
+                    .child(self.render_body(view, cx))
                     .into_any_element()
             }
             _ => readonly_editor(if response_tab == ResponseTab::Body {
@@ -2296,6 +2528,50 @@ fn history_label(response: &StoredResponse) -> String {
     };
     let age = saved_age(response_cache::now().saturating_sub(response.received_at));
     format!("{status}  ·  {}  ·  {age}", format_duration(response.elapsed_ms))
+}
+
+/// Whether the actions row has no note to show on the left.
+fn note_is_none(view: BodyView) -> bool {
+    view != BodyView::Binary
+}
+
+/// The gpui image format for one of our names, when it can decode it.
+fn image_format(name: &str) -> Option<gpui_kit::ImageFormat> {
+    Some(match name {
+        "png" => gpui_kit::ImageFormat::Png,
+        "jpeg" => gpui_kit::ImageFormat::Jpeg,
+        "gif" => gpui_kit::ImageFormat::Gif,
+        "webp" => gpui_kit::ImageFormat::Webp,
+        "bmp" => gpui_kit::ImageFormat::Bmp,
+        "tiff" => gpui_kit::ImageFormat::Tiff,
+        // SVG needs a size to rasterise at, so it stays source for now.
+        _ => return None,
+    })
+}
+
+/// Classic hex + ASCII dump, capped so a huge body doesn't fill the editor.
+fn hex_dump(bytes: &[u8]) -> String {
+    const MAX: usize = 4 * 1024;
+    let shown = &bytes[..bytes.len().min(MAX)];
+    let mut out = String::new();
+    for (row, chunk) in shown.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text: String = chunk
+            .iter()
+            .map(|&byte| {
+                if (0x20..0x7f).contains(&byte) {
+                    byte as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("{:08x}  {:<47}  {text}\n", row * 16, hex.join(" ")));
+    }
+    if bytes.len() > MAX {
+        out.push_str(t!("request.hex_truncated", size = format_size(bytes.len())).as_ref());
+    }
+    out
 }
 
 fn format_size(bytes: usize) -> String {

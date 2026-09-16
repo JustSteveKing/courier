@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Reading responses
+
+The response pane follows the content type. JSON is pretty-printed and filtered with JSONPath, as before. XML and SOAP arrive indented and filter with a small XPath — `//entry/title/text()`, `//entry[2]/@id`, `*` for any element, namespaces ignored. Images render inline. HTML shows its source with **Open in browser**. Anything else that isn't text shows as a hex dump. **Save body…** writes the bytes exactly as they arrived to a file you pick.
+
 ### Paste a curl command anywhere
 
 Paste one into the URL bar and it fills the open request — method, URL, headers and body — keeping its name. Paste it anywhere else in the window (`ctrl-v` outside a text field) and it becomes a new request next to the one you have open, with any credentials it carries hoisted into secrets. The import dialog is still in the collection menu for when you'd rather paste into a box.

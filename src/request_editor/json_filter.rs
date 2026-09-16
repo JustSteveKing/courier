@@ -10,8 +10,8 @@ pub(super) enum Filtered {
     Matches { text: String, count: usize },
     /// The expression doesn't parse (often because it's still being typed).
     Invalid(String),
-    /// The body isn't JSON, so there's nothing to filter.
-    NotJson,
+    /// The body isn't JSON or XML, so there's nothing to filter.
+    NotFilterable,
 }
 
 /// Parses a response body for filtering, if it's JSON.
@@ -21,7 +21,7 @@ pub(super) fn parse_body(body: &str) -> Option<Value> {
 
 pub(super) fn filter(body: Option<&Value>, expression: &str) -> Filtered {
     let Some(body) = body else {
-        return Filtered::NotJson;
+        return Filtered::NotFilterable;
     };
     let path = match JsonPath::parse(expression.trim()) {
         Ok(path) => path,
@@ -93,6 +93,6 @@ mod tests {
     fn reports_bad_expressions_and_non_json() {
         assert!(matches!(run("$.store.books["), Filtered::Invalid(_)));
         assert!(matches!(run("store"), Filtered::Invalid(_)));
-        assert_eq!(filter(parse_body("<html>").as_ref(), "$"), Filtered::NotJson);
+        assert_eq!(filter(parse_body("<html>").as_ref(), "$"), Filtered::NotFilterable);
     }
 }

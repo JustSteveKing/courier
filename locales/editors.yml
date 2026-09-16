@@ -1096,3 +1096,78 @@ request.filled_from_curl:
   es: Completado desde el comando curl.
   de: Aus dem curl-Befehl übernommen.
   fr: Rempli à partir de la commande curl.
+body.xml_invalid:
+  en: "This isn't valid XML: %{error}"
+  es: "Esto no es XML válido: %{error}"
+  de: "Das ist kein gültiges XML: %{error}"
+  fr: "Ce n'est pas du XML valide : %{error}"
+body.xml_empty:
+  en: There's no XML element here.
+  es: Aquí no hay ningún elemento XML.
+  de: Hier gibt es kein XML-Element.
+  fr: Il n'y a aucun élément XML ici.
+body.xpath_empty:
+  en: Type a path, such as //title.
+  es: Escribe una ruta, por ejemplo //title.
+  de: Gib einen Pfad ein, zum Beispiel //title.
+  fr: Saisissez un chemin, par exemple //title.
+body.xpath_step_empty:
+  en: A step of the path is missing a name.
+  es: A un paso de la ruta le falta el nombre.
+  de: Einem Schritt des Pfads fehlt der Name.
+  fr: Une étape du chemin n'a pas de nom.
+body.xpath_attribute_empty:
+  en: "@ needs an attribute name after it."
+  es: "Después de @ hace falta el nombre de un atributo."
+  de: "Nach @ fehlt ein Attributname."
+  fr: "Il manque un nom d'attribut après @."
+body.xpath_index:
+  en: "%{step} needs a number in its brackets, counting from 1."
+  es: "%{step} necesita un número entre corchetes, empezando por 1."
+  de: "%{step} braucht eine Zahl in den Klammern, beginnend bei 1."
+  fr: "%{step} attend un nombre entre crochets, à partir de 1."
+request.body_saved:
+  en: "Saved to %{path}"
+  es: "Guardado en %{path}"
+  de: "In %{path} gespeichert"
+  fr: "Enregistré dans %{path}"
+request.body_not_saved:
+  en: "Could not save the body: %{error}"
+  es: "No se pudo guardar el cuerpo: %{error}"
+  de: "Der Body konnte nicht gespeichert werden: %{error}"
+  fr: "Impossible d'enregistrer le corps : %{error}"
+request.save_body:
+  en: Save body…
+  es: Guardar el cuerpo…
+  de: Body speichern…
+  fr: Enregistrer le corps…
+request.open_in_browser:
+  en: Open in browser
+  es: Abrir en el navegador
+  de: Im Browser öffnen
+  fr: Ouvrir dans le navigateur
+request.image_not_kept:
+  en: This image came from the saved response, which keeps text only. Send it again to see it.
+  es: Esta imagen viene de la respuesta guardada, que solo conserva texto. Vuelve a enviarla para verla.
+  de: Dieses Bild stammt aus der gespeicherten Antwort, die nur Text behält. Sende erneut, um es zu sehen.
+  fr: Cette image vient de la réponse enregistrée, qui ne garde que du texte. Renvoyez la requête pour la voir.
+request.binary_body:
+  en: "%{size} of binary data, shown as hex."
+  es: "%{size} de datos binarios, mostrados en hexadecimal."
+  de: "%{size} Binärdaten, hexadezimal dargestellt."
+  fr: "%{size} de données binaires, affichées en hexadécimal."
+request.filter_xpath_placeholder:
+  en: "Filter with XPath, e.g. //entry/title/text()"
+  es: "Filtrar con XPath, p. ej. //entry/title/text()"
+  de: "Mit XPath filtern, z. B. //entry/title/text()"
+  fr: "Filtrer avec XPath, par ex. //entry/title/text()"
+request.filter_not_filterable:
+  en: This body isn't JSON or XML, so there's nothing to filter.
+  es: Este cuerpo no es JSON ni XML, así que no hay nada que filtrar.
+  de: Dieser Body ist weder JSON noch XML, es gibt also nichts zu filtern.
+  fr: Ce corps n'est ni du JSON ni du XML, il n'y a donc rien à filtrer.
+request.hex_truncated:
+  en: "… first 4 KB of %{size} shown."
+  es: "… se muestran los primeros 4 KB de %{size}."
+  de: "… die ersten 4 KB von %{size} werden gezeigt."
+  fr: "… premiers 4 Ko sur %{size} affichés."

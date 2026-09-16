@@ -3,6 +3,7 @@
 //! Server-Sent Events and WebSockets. It has no UI, so the app and the command-line tool
 //! behave the same.
 
+pub mod body_view;
 pub mod chain;
 pub mod checks;
 pub mod cookies;

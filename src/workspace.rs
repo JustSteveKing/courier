@@ -4891,6 +4891,31 @@ components:
         port
     }
 
+    /// Answers one request with `body` as XML.
+    fn xml_server(body: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Write as _};
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        port
+    }
+
     /// Answers one HTTP request on a local port. Returns the port and a channel that
     /// receives the raw request text.
     fn one_shot_server(response: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
@@ -5936,5 +5961,61 @@ components:
                 ("GET", "https://api.test/ping")
             );
         });
+    }
+
+    #[gpui_kit::test]
+    async fn responses_are_shown_by_kind_and_xml_filters_with_xpath(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        let feed = "<?xml version=\"1.0\"?><feed><entry id=\"1\"><title>0.1.0</title></entry>\
+                <entry id=\"2\"><title>0.2.0</title></entry></feed>";
+        let port = xml_server(feed);
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/feed.xml");
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // XML arrives indented, not as one line.
+        let shown = cx.update(|cx| editor.read(cx).response_body_text(cx));
+        assert!(shown.starts_with("<feed>\n  <entry"), "indented XML:\n{shown}");
+
+        // The filter box takes an XPath for XML.
+        let filter = cx.update(|cx| editor.read(cx).response_filter_for_test());
+        cx.update_window(window, |_, window, cx| {
+            filter.update(cx, |state, cx| state.replace_all("//entry/title/text()", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|cx| editor.read(cx).response_body_text(cx)),
+            "0.1.0\n0.2.0",
+            "both titles, one per line"
+        );
+        cx.update_window(window, |_, window, cx| {
+            filter.update(cx, |state, cx| state.replace_all("//entry[2]/@id", window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| editor.read(cx).response_body_text(cx)), "2");
     }
 }
