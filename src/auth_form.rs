@@ -34,6 +34,7 @@ enum Kind {
     OAuth2,
     Jwt,
     Aws,
+    Digest,
 }
 
 pub struct AuthForm {
@@ -79,6 +80,7 @@ fn kind_label(kind: Kind) -> SharedString {
         Kind::OAuth2 => t!("auth.oauth2"),
         Kind::Jwt => t!("auth.jwt"),
         Kind::Aws => t!("auth.aws"),
+        Kind::Digest => t!("auth.digest"),
     }
     .to_string()
     .into()
@@ -103,6 +105,7 @@ fn kind_of(auth: &Auth) -> Kind {
         Auth::OAuth2 { .. } => Kind::OAuth2,
         Auth::Jwt { .. } => Kind::Jwt,
         Auth::AwsSigV4 { .. } => Kind::Aws,
+        Auth::Digest { .. } => Kind::Digest,
     }
 }
 
@@ -118,6 +121,7 @@ impl AuthForm {
             Kind::OAuth2,
             Kind::Jwt,
             Kind::Aws,
+            Kind::Digest,
         ]
         .into_iter()
         .filter(|k| allow_inherit || *k != Kind::Inherit)
@@ -198,6 +202,10 @@ impl AuthForm {
                 value: text(&self.key_value),
                 in_query: self.key_in_query,
             },
+            Kind::Digest => Auth::Digest {
+                username: text(&self.username),
+                password: text(&self.password),
+            },
             Kind::Jwt => Auth::Jwt {
                 algorithm: self.jwt_algorithm,
                 key: text(&self.jwt_key),
@@ -237,7 +245,9 @@ impl AuthForm {
         });
         let empty = String::new();
         let (username, password, token, name, value) = match auth {
-            Auth::Basic { username, password } => (username, password, &empty, &empty, &empty),
+            Auth::Basic { username, password } | Auth::Digest { username, password } => {
+                (username, password, &empty, &empty, &empty)
+            }
             Auth::Bearer { token } => (&empty, &empty, token, &empty, &empty),
             Auth::ApiKey { name, value, .. } => (&empty, &empty, &empty, name, value),
             Auth::OAuth2 { .. } | Auth::Jwt { .. } | Auth::AwsSigV4 { .. } | Auth::Inherit | Auth::None => {
@@ -450,6 +460,15 @@ impl Render for AuthForm {
                             .child(status)
                     })),
             ),
+            Kind::Digest => fields
+                .child(div().flex_1().child(text_input(&self.username).small()))
+                .child(div().flex_1().child(text_input(&self.password).small()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(t!("auth.digest_hint").to_string()),
+                ),
             Kind::Jwt => fields.child(
                 v_flex()
                     .flex_1()

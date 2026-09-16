@@ -8,6 +8,7 @@ pub mod chain;
 pub mod checks;
 pub mod cookies;
 pub mod credentials;
+pub mod digest;
 pub mod encoding;
 pub mod graphql;
 pub mod http;

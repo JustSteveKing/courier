@@ -1476,3 +1476,38 @@ auth.aws_hint:
   es: La región y el servicio son us-east-1 y s3 por defecto. La firma cubre la solicitud final, así que se añade al final.
   de: Region und Service sind standardmäßig us-east-1 und s3. Die Signatur deckt die fertige Anfrage ab und kommt daher zuletzt.
   fr: La région et le service valent us-east-1 et s3 par défaut. La signature couvre la requête finale, elle est donc ajoutée en dernier.
+digest.bad_url:
+  en: "This request's URL can't be signed: %{error}"
+  es: "No se puede firmar la URL de esta solicitud: %{error}"
+  de: "Die URL dieser Anfrage kann nicht signiert werden: %{error}"
+  fr: "L'URL de cette requête ne peut pas être signée : %{error}"
+digest.bad_request:
+  en: "This request can't ask for a challenge: %{error}"
+  es: "Esta solicitud no puede pedir un desafío: %{error}"
+  de: "Diese Anfrage kann keine Challenge anfordern: %{error}"
+  fr: "Cette requête ne peut pas demander de défi : %{error}"
+digest.no_challenge:
+  en: "The server wasn't reachable for the Digest challenge: %{error}"
+  es: "No se pudo contactar con el servidor para el desafío Digest: %{error}"
+  de: "Der Server war für die Digest-Challenge nicht erreichbar: %{error}"
+  fr: "Le serveur était injoignable pour le défi Digest : %{error}"
+digest.not_offered:
+  en: This server didn't offer Digest authentication.
+  es: Este servidor no ofreció autenticación Digest.
+  de: Dieser Server hat keine Digest-Authentifizierung angeboten.
+  fr: Ce serveur n'a pas proposé l'authentification Digest.
+digest.bad_challenge:
+  en: "That Digest challenge couldn't be read: %{header}"
+  es: "No se pudo leer ese desafío Digest: %{header}"
+  de: "Diese Digest-Challenge war nicht lesbar: %{header}"
+  fr: "Ce défi Digest n'a pas pu être lu : %{header}"
+auth.digest:
+  en: Digest
+  es: Digest
+  de: Digest
+  fr: Digest
+auth.digest_hint:
+  en: The server is asked for a challenge first, so a Digest request goes out twice.
+  es: Primero se pide un desafío al servidor, así que una solicitud Digest se envía dos veces.
+  de: Zuerst wird beim Server eine Challenge angefordert, daher geht eine Digest-Anfrage zweimal raus.
+  fr: Le serveur est d'abord interrogé pour un défi, donc une requête Digest part deux fois.

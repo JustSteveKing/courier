@@ -114,6 +114,13 @@ pub enum Auth {
         #[serde(default = "bearer_prefix")]
         prefix: String,
     },
+    /// HTTP Digest: the server is asked for a challenge, then the request is signed.
+    Digest {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
     /// AWS Signature Version 4, for AWS and the S3-compatible services.
     #[serde(rename = "aws_sigv4")]
     AwsSigV4 {
@@ -170,6 +177,7 @@ impl Auth {
             Self::ApiKey { value, .. } => value,
             Self::OAuth2 { client_secret, .. } => client_secret,
             Self::Jwt { key, .. } => key,
+            Self::Digest { password, .. } => password,
             Self::AwsSigV4 { secret_access_key, .. } => secret_access_key,
             Self::Inherit | Self::None => return None,
         };
@@ -184,6 +192,7 @@ impl Auth {
             Self::ApiKey { value, .. } => *value = text,
             Self::OAuth2 { client_secret, .. } => *client_secret = text,
             Self::Jwt { key, .. } => *key = text,
+            Self::Digest { password, .. } => *password = text,
             Self::AwsSigV4 { secret_access_key, .. } => *secret_access_key = text,
             Self::Inherit | Self::None => {}
         }
@@ -209,6 +218,7 @@ impl Auth {
             Self::ApiKey { .. } => "api_key".into(),
             Self::OAuth2 { .. } => "client_secret".into(),
             Self::Jwt { .. } => "jwt_key".into(),
+            Self::Digest { .. } => "password".into(),
             Self::AwsSigV4 { .. } => "aws_secret_access_key".into(),
             _ => "token".into(),
         }

@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Digest
+
+**Digest** takes a username and password like Basic, but the request goes out twice: once to collect the server's challenge, then signed with it. MD5 and SHA-256 are both handled, with or without `qop`, so old and new servers work.
+
 ### JWT and AWS Signature v4
 
 **JWT** signs a token per request from your claims and a key: HS256/384/512 with a shared secret, RS256/384/512 or ES256 with a PEM private key. Claims and extra header fields are JSON and take `{{variables}}`, so `{"sub": "{{user_id}}"}` works, and the prefix (`Bearer` by default) is yours to change.

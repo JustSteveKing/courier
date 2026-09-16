@@ -39,6 +39,7 @@ uuid = { version = "1.26.1", features = ["v4"] }
 rsa = "0.9.10"
 hmac = "0.12"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
+md-5 = "0.10"
 
 [dev-dependencies]
 futures-lite = "2.6.1"

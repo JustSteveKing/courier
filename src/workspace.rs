@@ -3560,6 +3560,10 @@ mod tests {
             workspace.update(cx, |this, cx| this.new_project(window, cx));
         })
         .unwrap();
+        // Let the dialog finish sliding in: mid-animation its contents aren't where a
+        // query expects them yet.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             for id in [
@@ -6214,6 +6218,89 @@ components:
         assert!(
             head.contains("x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
             "an empty body hashes to the known value:\n{head}"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn digest_auth_answers_the_servers_challenge(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        // A server that challenges once, then checks what comes back.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sent, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead as _, Write as _};
+            for turn in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let reply = if turn == 0 {
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"courier@test\",                  qop=\"auth\", nonce=\"abc123\", opaque=\"op\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+                } else {
+                    let body = "{\"ok\":true}";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                write!(reader.get_mut(), "{reply}").unwrap();
+                sent.send(head).unwrap();
+            }
+        });
+
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/private/area");
+        request.auth = crate::model::Auth::Digest {
+            username: "Mufasa".into(),
+            password: "Circle Of Life".into(),
+        };
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let probe = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            !probe.to_ascii_lowercase().contains("authorization:"),
+            "the first attempt asks for a challenge without credentials:\n{probe}"
+        );
+        let signed = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(signed.contains("Digest username=\"Mufasa\""), "{signed}");
+        assert!(signed.contains("uri=\"/private/area\""), "the path is signed: {signed}");
+        assert!(signed.contains("qop=auth, nc=00000001"), "{signed}");
+        assert!(
+            signed.contains("opaque=\"op\""),
+            "the opaque value is echoed back: {signed}"
         );
     }
 }

@@ -212,6 +212,7 @@ pub fn calls_in(file: &RequestFile) -> Vec<(String, Result<Call, String>)> {
             scope.as_str(),
         ]),
         Auth::Jwt { key, claims, .. } => texts.extend([key.as_str(), claims.as_str()]),
+        Auth::Digest { username, password } => texts.extend([username.as_str(), password.as_str()]),
         Auth::AwsSigV4 {
             access_key_id,
             secret_access_key,
@@ -396,6 +397,7 @@ async fn send(
     let (mut request, missing) = Request::resolve_in(&file, &variables, crate::project::project_dir(&context.root))?;
     // AWS signs the finished request, so this is the one that happens after resolving.
     crate::sigv4::apply(&signing, &mut request, &variables)?;
+    crate::digest::apply(&signing, &mut request, &variables).await?;
     if crate::model::is_websocket_url(&request.url) {
         return Err(format!(
             "\"{}\" is a WebSocket, which has no response to use",

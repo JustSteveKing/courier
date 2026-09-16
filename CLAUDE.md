@@ -23,6 +23,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `request_editor.rs`, `environment_editor.rs`, `runner_view.rs`: the main panes (`MainView` picks one)
 - Runs: `runner.rs` in core (shared with the CLI), `runner_view.rs` for the live results; the workspace builds the context in `run_setup`
 - `model.rs` (YAML types, no I/O), `storage.rs` (load/save collections), `project.rs` (`.courier/` discovery)
+- `digest.rs` (HTTP Digest; like sigv4 it runs after resolve, and it asks the server for a challenge first)
 - `jwt.rs` (signing JSON Web Tokens: HMAC, RSA, ECDSA) and `sigv4.rs` (AWS Signature v4; `apply` runs *after* `Request::resolve`, since the signature covers the finished request)
 - `oauth.rs` (OAuth 2.0 tokens: fetch, refresh, cache in the secret store keyed by a fingerprint of the settings; `authorize` swaps `Auth::OAuth2` for the header before a request resolves)
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
