@@ -14,6 +14,7 @@ pub mod encoding;
 pub mod export;
 pub mod git;
 pub mod graphql;
+pub mod grpc;
 pub mod http;
 pub mod import;
 pub mod jwt;

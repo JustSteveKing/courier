@@ -40,11 +40,21 @@ rsa = "0.9.10"
 hmac = "0.12"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 md-5 = "0.10"
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
+prost = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.9"
+prost-types = "0.14"
+tokio-stream = "0.1"
 
 [dev-dependencies]
 futures-lite = "2.6.1"
+http-body = "1"
 rand = "0.8"
 rcgen = "0.14"
 rustls = "0.23"
 tempfile = "3.27.0"
 tokio-rustls = "0.26"
+tonic = { version = "0.14", features = ["router", "server"] }
+tonic-reflection = "0.14"
+tower-service = "0.3"
