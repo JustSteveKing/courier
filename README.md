@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Finding and arranging requests
+
+The box at the top of the sidebar filters as you type, matching a request's name, method or URL — `post pets` and `/v2/` both work — and opens whatever holds a match. Drag a request onto a folder or collection to move it there, or onto another request to drop it straight after that one; the order is saved with the requests, so it survives a reload and a checkout.
+
 ### File uploads
 
 Pick a body kind next to **Body**: JSON, XML, text, form, **multipart form** or **file**.

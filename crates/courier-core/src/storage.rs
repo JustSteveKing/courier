@@ -376,6 +376,40 @@ pub fn move_request(path: &Path, dir: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Moves `path` into `dir` if it isn't already there and puts it straight after `after`
+/// (first in the folder when that's `None`), numbering the folder's requests so the order
+/// survives a reload. Returns where the request ended up.
+pub fn place_request(path: &Path, dir: &Path, after: Option<&Path>) -> Result<PathBuf> {
+    let moved = if path.parent() == Some(dir) {
+        path.to_path_buf()
+    } else {
+        move_request(path, dir)?
+    };
+    // `dir` may be the collection root, whose collection.yaml isn't a request.
+    let mut order: Vec<PathBuf> = load_items(dir, true, &mut Vec::new())
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Request { path, .. } => Some(path),
+            Item::Folder { .. } => None,
+        })
+        .filter(|p| p != &moved)
+        .collect();
+    let at = match after {
+        Some(after) => order.iter().position(|p| p == after).map(|ix| ix + 1).unwrap_or(0),
+        None => 0,
+    };
+    order.insert(at.min(order.len()), moved.clone());
+    for (index, path) in order.iter().enumerate() {
+        let mut request: RequestFile = read_yaml(path)?;
+        let number = index as i64 + 1;
+        if request.order != Some(number) {
+            request.order = Some(number);
+            write_yaml(path, &request)?;
+        }
+    }
+    Ok(moved)
+}
+
 /// Copies a request next to itself as “<name> copy”, just after it in the list.
 pub fn duplicate_request(path: &Path, copy_name: &str) -> Result<PathBuf> {
     let mut request: RequestFile = read_yaml(path)?;
@@ -387,6 +421,40 @@ pub fn duplicate_request(path: &Path, copy_name: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_requests_in_order_and_across_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::project::init(tmp.path()).unwrap();
+        let folder = create_folder(&root, "Pets").unwrap();
+        let names = |dir: &Path| -> Vec<String> {
+            load_items(dir, true, &mut Vec::new())
+                .into_iter()
+                .filter_map(|item| match item {
+                    Item::Request { request, .. } => Some(request.name),
+                    Item::Folder { .. } => None,
+                })
+                .collect()
+        };
+        let a = create_request(&root, &RequestFile::new("A")).unwrap();
+        let b = create_request(&root, &RequestFile::new("B")).unwrap();
+        let c = create_request(&root, &RequestFile::new("C")).unwrap();
+        assert_eq!(names(&root), ["A", "B", "C"], "file name order to begin with");
+
+        // Dragging C to the top, then A to the end.
+        place_request(&c, &root, None).unwrap();
+        assert_eq!(names(&root), ["C", "A", "B"]);
+        place_request(&a, &root, Some(&b)).unwrap();
+        assert_eq!(names(&root), ["C", "B", "A"]);
+
+        // Into a folder, and out again after C.
+        let moved = place_request(&b, &folder, None).unwrap();
+        assert_eq!(names(&folder), ["B"]);
+        assert_eq!(names(&root), ["C", "A"]);
+        let back = place_request(&moved, &root, Some(&a)).unwrap();
+        assert_eq!(names(&root), ["C", "A", "B"], "back at the end, after A");
+        assert!(back.starts_with(&root) && !moved.exists());
+    }
 
     #[test]
     fn creates_renames_duplicates_and_deletes() {

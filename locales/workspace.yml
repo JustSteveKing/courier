@@ -754,3 +754,18 @@ run.skip_event_stream:
   es: los flujos de eventos no terminan, así que no se ejecutan
   de: Event-Streams enden nicht und werden daher nicht ausgeführt
   fr: les flux d'événements ne se terminent pas, ils ne sont donc pas exécutés
+ws.search_placeholder:
+  en: Filter requests
+  es: Filtrar solicitudes
+  de: Anfragen filtern
+  fr: Filtrer les requêtes
+ws.search_none:
+  en: Nothing matches.
+  es: No hay coincidencias.
+  de: Keine Treffer.
+  fr: Aucun résultat.
+ws.moved_here:
+  en: "Moved “%{name}” here."
+  es: "Se movió «%{name}» aquí."
+  de: "„%{name}“ hierher verschoben."
+  fr: "« %{name} » déplacée ici."

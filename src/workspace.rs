@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::component::input::{InputEvent as TextInputEvent, InputState, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -64,6 +64,29 @@ const SIDEBAR_MIN_WIDTH: f32 = 180.;
 /// Room always left for the request editor when widening the sidebar.
 const MAIN_MIN_WIDTH: f32 = 420.;
 
+/// A request being dragged in the sidebar, and what it looks like while dragging.
+#[derive(Clone)]
+struct DraggedRequest {
+    path: PathBuf,
+    label: SharedString,
+}
+
+impl Render for DraggedRequest {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .text_color(theme.popover_foreground)
+            .child(self.label.clone())
+    }
+}
+
 /// Dragged while resizing the sidebar.
 struct SidebarResize;
 
@@ -82,6 +105,8 @@ pub struct Workspace {
     collapsed: HashSet<PathBuf>,
     editor: Entity<RequestEditor>,
     environment: Entity<EnvironmentSelect>,
+    /// Filters the sidebar to matching requests while it has text.
+    search: Entity<InputState>,
     environment_editor: Entity<EnvironmentEditor>,
     runner: Entity<RunnerView>,
     main_view: MainView,
@@ -109,6 +134,18 @@ impl Workspace {
                 cx,
             )
         });
+
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("ws.search_placeholder").to_string())
+                .clean_on_escape()
+        });
+        cx.subscribe(&search, |_, _, event: &TextInputEvent, cx| {
+            if let TextInputEvent::Change = event {
+                cx.notify();
+            }
+        })
+        .detach();
 
         cx.subscribe_in(&editor, window, |this, _, event, window, cx| match event {
             RequestEditorEvent::Saved(path) => this.reload_containing(path, window, cx),
@@ -165,6 +202,7 @@ impl Workspace {
             collapsed: HashSet::new(),
             editor,
             environment,
+            search,
             environment_editor,
             runner,
             main_view: MainView::Request,
@@ -320,6 +358,33 @@ impl Workspace {
                         Notification::success(t!("ws.moved_to", collection = name).to_string()),
                         cx,
                     );
+                }
+            }
+            Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
+    /// Dropping a dragged request: into `folder`, straight after `after` when it was
+    /// dropped on a request. Ordering is saved, so it survives a reload.
+    fn drop_request(
+        &mut self,
+        path: PathBuf,
+        folder: PathBuf,
+        after: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if after.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        self.editor.update(cx, |editor, cx| editor.save(cx));
+        match storage::place_request(&path, &folder, after.as_deref()) {
+            Ok(target) => {
+                self.collapsed.remove(&folder);
+                if target != path {
+                    self.after_move(&path, &target, window, cx);
+                } else {
+                    self.reload_containing(&target, window, cx);
                 }
             }
             Err(e) => notify_error(format!("{e:#}"), window, cx),
@@ -2213,12 +2278,29 @@ impl Workspace {
                     ),
             )
             .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(theme.sidebar_border)
+                    .child(text_input(&self.search).small().cleanable(true)),
+            )
+            .child(
                 v_flex()
                     .id("sidebar-rows")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_1()
+                    .when(rows.is_empty() && self.search_query(cx).is_some(), |list| {
+                        list.child(
+                            div()
+                                .p_2()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(t!("ws.search_none").to_string()),
+                        )
+                    })
                     .children(rows)
                     // Right-clicking the empty space below the rows.
                     .child(div().id("sidebar-space").flex_1().min_h(px(48.)).context_menu({
@@ -2288,17 +2370,51 @@ impl Workspace {
             )
     }
 
+    /// What the sidebar is filtered to, lowercased, or `None` when the box is empty.
+    fn search_query(&self, cx: &App) -> Option<String> {
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        (!query.is_empty()).then_some(query)
+    }
+
+    /// A request matches on its name, method or URL, so "post pets" and "/v2/" both work.
+    fn request_matches(request: &RequestFile, query: &str) -> bool {
+        query.split_whitespace().all(|word| {
+            request.name.to_lowercase().contains(word)
+                || request.url.to_lowercase().contains(word)
+                || request_label(request).to_lowercase().contains(word)
+        })
+    }
+
+    fn folder_matches(items: &[Item], query: &str) -> bool {
+        items.iter().any(|item| match item {
+            Item::Request { request, .. } => Self::request_matches(request, query),
+            Item::Folder { name, children, .. } => {
+                name.to_lowercase().contains(query) || Self::folder_matches(children, query)
+            }
+        })
+    }
+
     fn render_collection(&self, collection: &Collection, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
         let theme = cx.theme();
         let root = collection.root.clone();
         let scratch = self.is_scratch(&root);
-        let collapsed = self.collapsed.contains(&root);
+        let query = self.search_query(cx);
+        // While filtering, everything holding a match is open: hunting through folders for
+        // the thing you just searched for defeats the search.
+        let collapsed = query.is_none() && self.collapsed.contains(&root);
+        if let Some(query) = &query
+            && !Self::folder_matches(&collection.items, query)
+            && !collection.file.name.to_lowercase().contains(query.as_str())
+        {
+            return;
+        }
         let weak = cx.entity().downgrade();
         let row_id = rows.len();
 
         rows.push(
             h_flex()
-                .id(("collection", row_id))
+                .id(sidebar_row_id("collection", &root))
+                .test_support()
                 .group("collection-row")
                 .px_1()
                 .py_1()
@@ -2344,6 +2460,13 @@ impl Workspace {
                         cx.notify();
                     }
                 }))
+                .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+                .on_drop(cx.listener({
+                    let root = root.clone();
+                    move |this, dragged: &DraggedRequest, window, cx| {
+                        this.drop_request(dragged.path.clone(), root.clone(), None, window, cx)
+                    }
+                }))
                 .context_menu({
                     let (weak, root) = (cx.entity().downgrade(), root.clone());
                     move |menu, _, _| collection_menu(menu, &weak, &root, scratch)
@@ -2366,18 +2489,25 @@ impl Workspace {
         );
         let selected = self.editor.read(cx).path().cloned();
         let indent = px(4. + depth as f32 * 14.);
+        let query = self.search_query(cx);
 
         for item in items {
-            let row_id = rows.len();
             match item {
                 Item::Folder { name, path, children } => {
-                    let collapsed = self.collapsed.contains(path);
+                    if let Some(query) = &query
+                        && !name.to_lowercase().contains(query.as_str())
+                        && !Self::folder_matches(children, query)
+                    {
+                        continue;
+                    }
+                    let collapsed = query.is_none() && self.collapsed.contains(path);
                     let path = path.clone();
                     let menu_path = path.clone();
                     let weak = cx.entity().downgrade();
                     rows.push(
                         h_flex()
-                            .id(("folder", row_id))
+                            .id(sidebar_row_id("folder", &path))
+                            .test_support()
                             .pl(indent)
                             .pr_1()
                             .py_1()
@@ -2403,6 +2533,13 @@ impl Workspace {
                                 }
                                 cx.notify();
                             }))
+                            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+                            .on_drop(cx.listener({
+                                let into = menu_path.clone();
+                                move |this, dragged: &DraggedRequest, window, cx| {
+                                    this.drop_request(dragged.path.clone(), into.clone(), None, window, cx)
+                                }
+                            }))
                             .context_menu(move |menu, _, _| folder_menu(menu, &weak, &menu_path))
                             .into_any_element(),
                     );
@@ -2411,6 +2548,11 @@ impl Workspace {
                     }
                 }
                 Item::Request { path, request } => {
+                    if let Some(query) = &query
+                        && !Self::request_matches(request, query)
+                    {
+                        continue;
+                    }
                     let is_selected = selected.as_ref() == Some(path);
                     let path = path.clone();
                     let menu_path = path.clone();
@@ -2418,7 +2560,8 @@ impl Workspace {
                     let weak = cx.entity().downgrade();
                     rows.push(
                         h_flex()
-                            .id(("request", row_id))
+                            .id(sidebar_row_id("request", &path))
+                            .test_support()
                             .pl(indent + px(18.))
                             .pr_1()
                             .py_1()
@@ -2443,6 +2586,23 @@ impl Workspace {
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.select_request(path.clone(), window, cx)),
                             )
+                            .on_drag(
+                                DraggedRequest {
+                                    path: menu_path.clone(),
+                                    label: request.name.clone().into(),
+                                },
+                                |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                            )
+                            .drag_over::<DraggedRequest>(|row, _, _, cx| row.bg(cx.theme().drop_target))
+                            .on_drop(cx.listener({
+                                let after = menu_path.clone();
+                                move |this, dragged: &DraggedRequest, window, cx| {
+                                    let Some(folder) = after.parent().map(Path::to_path_buf) else {
+                                        return;
+                                    };
+                                    this.drop_request(dragged.path.clone(), folder, Some(after.clone()), window, cx)
+                                }
+                            }))
                             .context_menu({
                                 let destinations = destinations.clone();
                                 move |menu, window, cx| {
@@ -2548,6 +2708,12 @@ impl Render for Workspace {
 }
 
 // MARK: Helpers
+
+/// A sidebar row's id: stable across reorders and filtering, unlike a row number, so GPUI
+/// keeps each row's state (and tests can name one).
+fn sidebar_row_id(kind: &str, path: &Path) -> ElementId {
+    ElementId::Name(SharedString::from(format!("{kind}:{}", path.display())))
+}
 
 fn menu_item(
     label: impl Into<SharedString>,
@@ -5346,5 +5512,90 @@ components:
             );
             assert_eq!(editor.read(cx).current_for_test(cx).body, saved.body);
         });
+    }
+
+    #[gpui_kit::test]
+    async fn the_sidebar_filters_and_requests_can_be_dragged(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let pets = storage::create_folder(&root, "Pets").unwrap();
+        let (get_json, echo) = (root.join("get-json.yaml"), root.join("echo-post.yaml"));
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let row = |kind: &str, path: &Path| format!("{kind}:{}", path.display());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.reload_collection(&root, window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, _| {
+            assert!(window.try_find(row("request", &get_json)).is_some());
+            assert!(window.try_find(row("request", &echo)).is_some());
+        })
+        .unwrap();
+
+        // Filtering hides what doesn't match, by name, method or URL.
+        let search = cx.update(|cx| workspace.read(cx).search.clone());
+        let filter = |cx: &mut TestAppContext, text: &str| {
+            cx.update_window(window, |_, window, cx| {
+                search.update(cx, |s, cx| s.set_value(text, window, cx));
+                window.render_frame(cx);
+            })
+            .unwrap();
+        };
+        filter(cx, "echo");
+        cx.update_window(window, |_, window, _| {
+            assert!(window.try_find(row("request", &echo)).is_some(), "the match stays");
+            assert!(window.try_find(row("request", &get_json)).is_none(), "the rest goes");
+            assert!(window.try_find(row("folder", &pets)).is_none(), "so do empty folders");
+        })
+        .unwrap();
+        filter(cx, "post any");
+        cx.update_window(window, |_, window, _| {
+            assert!(
+                window.try_find(row("request", &echo)).is_some(),
+                "every word counts, across the method and the URL"
+            );
+        })
+        .unwrap();
+        filter(cx, "");
+
+        // Dragging a request onto a folder moves it there.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to(row("request", &echo), row("folder", &pets), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let moved = pets.join("echo-post.yaml");
+        assert!(moved.exists() && !echo.exists(), "the file moved into the folder");
+
+        // Dragging onto a request puts it straight after that one.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to(row("request", &moved), row("request", &get_json), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let back = root.join("echo-post.yaml");
+        assert!(back.exists() && !moved.exists());
+        let order: Vec<String> = cx.update(|cx| {
+            workspace
+                .read(cx)
+                .collections
+                .iter()
+                .find(|c| c.root == root)
+                .unwrap()
+                .requests()
+                .into_iter()
+                .map(|entry| entry.request.name.clone())
+                .collect()
+        });
+        assert_eq!(
+            order.first().map(String::as_str),
+            Some("Get JSON"),
+            "and the order sticks: {order:?}"
+        );
+        assert_eq!(order.get(1).map(String::as_str), Some("Echo POST"), "{order:?}");
     }
 }
