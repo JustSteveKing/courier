@@ -23,20 +23,13 @@ gpui_kit::actions!(
         CloseTab,
         NextTab,
         PreviousTab,
-        PasteCurl
+        PasteCurl,
+        ShowShortcuts
     ]
 );
 
-pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("ctrl-shift-p", OpenCommandPalette, None),
-        KeyBinding::new("ctrl-n", NewScratchRequest, None),
-        KeyBinding::new("ctrl-w", CloseTab, None),
-        KeyBinding::new("ctrl-v", PasteCurl, Some("Workspace")),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-    ]);
-}
+/// Registers the actions; the keys themselves come from `crate::keymap`.
+pub fn init(_cx: &mut App) {}
 
 type Run = Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
 

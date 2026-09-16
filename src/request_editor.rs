@@ -49,15 +49,8 @@ const CONTEXT: &str = "RequestEditor";
 
 gpui_kit::actions!(request_editor, [SaveRequest, SendRequest]);
 
-pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("ctrl-s", SaveRequest, Some(CONTEXT)),
-        KeyBinding::new("ctrl-enter", SendRequest, Some(CONTEXT)),
-        // Text inputs bind their own "secondary enter"; this deeper binding wins inside the
-        // editor's fields, so Ctrl+Enter sends from any of them.
-        KeyBinding::new("secondary-enter", SendRequest, Some("RequestEditor > Input")),
-    ]);
-}
+/// Registers the actions; the keys themselves come from `crate::keymap`.
+pub fn init(_cx: &mut App) {}
 
 pub enum RequestEditorEvent {
     Saved(PathBuf),
@@ -753,6 +746,11 @@ impl RequestEditor {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn focus_for_test(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
     }
 
     #[cfg(test)]

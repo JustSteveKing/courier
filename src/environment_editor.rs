@@ -23,9 +23,8 @@ const CONTEXT: &str = "EnvironmentEditor";
 
 gpui_kit::actions!(environment_editor, [SaveEnvironment]);
 
-pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-s", SaveEnvironment, Some(CONTEXT))]);
-}
+/// Registers the actions; the keys themselves come from `crate::keymap`.
+pub fn init(_cx: &mut App) {}
 
 /// What is being edited: the collection's own defaults, or one environment file.
 #[derive(Clone, Debug, PartialEq)]

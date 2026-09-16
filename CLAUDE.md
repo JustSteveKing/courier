@@ -36,6 +36,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `dotenv.rs` in core: reading a project's `.env` files (listed in `Collection.env_files`, picked like an environment, watched for changes in `workspace::watch_env_files`)
 - `body_view.rs` in core: what a response body is (from Content-Type, then sniffing), XML pretty-printing and a small XPath; the editor picks its viewer from it
 - `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions, hover and validation from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)
+- `keymap.rs`: every shortcut in one table (action name, keys, context, description), overridden by `keymap.yaml` in the config dir; modules register actions in `init` but bind nothing, and `keymap::apply` runs after them (tests call it in `setup` too)
 - `import/` (`mod.rs`: shared `CollectionImport` + writers and format detection; curl, Postman, `openapi.rs`, `asyncapi.rs`, `har.rs`, `insomnia.rs`, `spec.rs` for `$ref`s and schema examples; `COURIER_IMPORT_FILES=… cargo test real_files -- --ignored --nocapture` tries real specs), `omarchy_theme.rs`, `i18n.rs`, `settings.rs`, `paths.rs`, `ui.rs`, `encoding.rs`
 
 ## Rules

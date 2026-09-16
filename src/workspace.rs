@@ -1099,6 +1099,96 @@ impl Workspace {
         });
     }
 
+    /// The shortcuts sheet: what every key does, as bound right now, and where to change it.
+    fn show_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shortcuts: Vec<(String, String)> = crate::keymap::effective(&self.paths)
+            .into_iter()
+            .filter(|(_, keys)| !keys.trim().is_empty())
+            .map(|(shortcut, keys)| (t!(shortcut.description).to_string(), keys))
+            .fold(Vec::new(), |mut rows: Vec<(String, String)>, (description, keys)| {
+                // The same action in two contexts is one line to a reader.
+                match rows.iter_mut().find(|(existing, _)| *existing == description) {
+                    Some((_, existing_keys)) if existing_keys != &keys => {
+                        existing_keys.push_str(&format!(" / {keys}"));
+                    }
+                    Some(_) => {}
+                    None => rows.push((description, keys)),
+                }
+                rows
+            });
+        let path = crate::keymap::file(&self.paths);
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let shortcuts = shortcuts.clone();
+            let path = path.clone();
+            let weak = weak.clone();
+            dialog
+                .title(t!("keys.title").to_string())
+                .w(px(520.))
+                .content(move |content, _, cx| {
+                    let theme = cx.theme().clone();
+                    let rows = shortcuts.iter().map(|(description, keys)| {
+                        h_flex()
+                            .justify_between()
+                            .gap_4()
+                            .py_1()
+                            .child(div().min_w_0().text_sm().child(description.clone()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded(theme.radius)
+                                    .bg(theme.accent)
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_xs()
+                                    .child(keys.clone()),
+                            )
+                    });
+                    let path = path.clone();
+                    let weak = weak.clone();
+                    content.child(
+                        v_flex()
+                            .id("shortcuts")
+                            .test_support()
+                            .max_h(px(420.))
+                            .overflow_y_scroll()
+                            .children(rows)
+                            .child(
+                                h_flex()
+                                    .pt_2()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(t!("keys.file_hint", path = path.display()).to_string()),
+                                    )
+                                    .child(
+                                        Button::new("edit-keymap")
+                                            .small()
+                                            .ghost()
+                                            .label(t!("keys.edit").to_string())
+                                            .on_click(move |_, window, cx| {
+                                                weak.update(cx, |this, cx| this.edit_keymap(window, cx)).ok();
+                                            }),
+                                    ),
+                            ),
+                    )
+                })
+        });
+    }
+
+    /// Opens keymap.yaml in whatever handles it, writing the commented example first.
+    fn edit_keymap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match crate::keymap::write_example(&self.paths) {
+            Ok(path) => cx.open_url(&format!("file://{}", path.display())),
+            Err(e) => notify_error(format!("{e:#}"), window, cx),
+        }
+    }
+
     // MARK: Git
 
     /// Asks git what changed in this collection, in the background. Git is a convenience
@@ -3138,6 +3228,7 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(|this, _: &palette::CloseTab, window, cx| this.close_tab(this.active, window, cx)))
             .on_action(cx.listener(|this, _: &palette::PasteCurl, window, cx| this.paste_curl(window, cx)))
+            .on_action(cx.listener(|this, _: &palette::ShowShortcuts, window, cx| this.show_shortcuts(window, cx)))
             .on_action(cx.listener(|this, _: &palette::NextTab, window, cx| this.step_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &palette::PreviousTab, window, cx| this.step_tab(-1, window, cx)))
             .size_full()
@@ -3619,6 +3710,8 @@ mod tests {
             crate::request_editor::init(cx);
             environment_editor::init(cx);
             palette::init(cx);
+            // The app binds keys after registering actions; tests press those keys too.
+            crate::keymap::apply(&paths, cx);
             cx.set_global(AppSettings::load(&paths));
         });
         paths
@@ -6872,5 +6965,78 @@ components:
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_rebound_key_takes_effect_and_the_sheet_lists_it(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::under(tmp.path());
+        // Rebind sending before the app binds anything.
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            crate::keymap::file(&paths),
+            "request_editor::SendRequest: alt-enter
+workspace::NewScratchRequest: \"\"\n",
+        )
+        .unwrap();
+
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let (port, received) = http_server("{\"ok\":true}");
+        let path = root.join("get-json.yaml");
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = format!("http://127.0.0.1:{port}/thing");
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            editor.update(cx, |editor, cx| editor.focus_for_test(window, cx));
+            window.press("alt-enter", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            received.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the rebound key sent the request"
+        );
+
+        // The sheet lists what is bound now, and leaves out what was unbound.
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| this.show_shortcuts(window, cx));
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("shortcuts").is_some(), "the sheet is on screen");
+        })
+        .unwrap();
+        let listed = cx.update(|_| {
+            crate::keymap::effective(&paths)
+                .into_iter()
+                .map(|(shortcut, keys)| (shortcut.action, keys))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            listed.contains(&("request_editor::SendRequest", "alt-enter".to_string())),
+            "{listed:?}"
+        );
+        assert!(
+            listed.contains(&("workspace::NewScratchRequest", String::new())),
+            "an unbound shortcut is left blank: {listed:?}"
+        );
     }
 }

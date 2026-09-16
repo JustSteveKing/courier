@@ -859,3 +859,68 @@ ws.branch:
   es: "en %{branch}"
   de: "auf %{branch}"
   fr: "sur %{branch}"
+keys.title:
+  en: Keyboard shortcuts
+  es: Atajos de teclado
+  de: Tastenkürzel
+  fr: Raccourcis clavier
+keys.edit:
+  en: Edit keymap.yaml
+  es: Editar keymap.yaml
+  de: keymap.yaml bearbeiten
+  fr: Modifier keymap.yaml
+keys.file_hint:
+  en: "Change any of them in %{path}"
+  es: "Cámbialos en %{path}"
+  de: "Ändere sie in %{path}"
+  fr: "Modifiez-les dans %{path}"
+keys.send:
+  en: Send the request
+  es: Enviar la solicitud
+  de: Anfrage senden
+  fr: Envoyer la requête
+keys.save:
+  en: Save the request
+  es: Guardar la solicitud
+  de: Anfrage speichern
+  fr: Enregistrer la requête
+keys.save_environment:
+  en: Save the environment
+  es: Guardar el entorno
+  de: Umgebung speichern
+  fr: Enregistrer l'environnement
+keys.palette:
+  en: Open the command palette
+  es: Abrir la paleta de comandos
+  de: Befehlspalette öffnen
+  fr: Ouvrir la palette de commandes
+keys.new_scratch:
+  en: New scratchpad request
+  es: Nueva solicitud en el borrador
+  de: Neue Anfrage im Notizblock
+  fr: Nouvelle requête dans le brouillon
+keys.close_tab:
+  en: Close the tab
+  es: Cerrar la pestaña
+  de: Tab schließen
+  fr: Fermer l'onglet
+keys.next_tab:
+  en: Next tab
+  es: Pestaña siguiente
+  de: Nächster Tab
+  fr: Onglet suivant
+keys.previous_tab:
+  en: Previous tab
+  es: Pestaña anterior
+  de: Vorheriger Tab
+  fr: Onglet précédent
+keys.paste_curl:
+  en: Paste a curl command as a request
+  es: Pegar un comando curl como solicitud
+  de: curl-Befehl als Anfrage einfügen
+  fr: Coller une commande curl comme requête
+keys.shortcuts:
+  en: Show keyboard shortcuts
+  es: Mostrar los atajos de teclado
+  de: Tastenkürzel anzeigen
+  fr: Afficher les raccourcis clavier

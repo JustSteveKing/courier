@@ -1,6 +1,7 @@
 mod auth_form;
 mod environment_editor;
 mod i18n;
+mod keymap;
 mod omarchy_theme;
 mod request_editor;
 mod runner_view;
@@ -59,6 +60,8 @@ fn main() {
             request_editor::init(cx);
             workspace::palette::init(cx);
             environment_editor::init(cx);
+            // Every action is registered by now, so the keymap can bind them.
+            keymap::apply(&paths, cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
