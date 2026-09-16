@@ -45,6 +45,12 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### JWT and AWS Signature v4
+
+**JWT** signs a token per request from your claims and a key: HS256/384/512 with a shared secret, RS256/384/512 or ES256 with a PEM private key. Claims and extra header fields are JSON and take `{{variables}}`, so `{"sub": "{{user_id}}"}` works, and the prefix (`Bearer` by default) is yours to change.
+
+**AWS Signature v4** signs for AWS and anything S3-compatible — MinIO, R2, B2. Give it an access key, secret key, region and service, plus a session token for temporary credentials. It signs the finished request, so the URL, query, headers and body are all covered.
+
 ### OAuth 2.0
 
 Pick **OAuth 2.0** on any auth row — collection, folder or request — choose a grant, and fill in the URLs, client ID and secret, scope and audience. **Get a token** fetches one now; **Forget token** throws it away.

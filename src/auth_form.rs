@@ -32,6 +32,8 @@ enum Kind {
     Bearer,
     ApiKey,
     OAuth2,
+    Jwt,
+    Aws,
 }
 
 pub struct AuthForm {
@@ -53,6 +55,16 @@ pub struct AuthForm {
     audience: Entity<InputState>,
     /// What the token store holds for these settings, for the status line.
     token_status: Option<String>,
+    jwt_algorithm: crate::jwt::Algorithm,
+    jwt_key: Entity<InputState>,
+    jwt_claims: Entity<InputState>,
+    jwt_header: Entity<InputState>,
+    jwt_prefix: Entity<InputState>,
+    aws_key_id: Entity<InputState>,
+    aws_secret: Entity<InputState>,
+    aws_session: Entity<InputState>,
+    aws_region: Entity<InputState>,
+    aws_service: Entity<InputState>,
     /// What `Inherit` resolves to, and where it comes from, for display.
     inherited: Option<(Auth, String)>,
 }
@@ -65,6 +77,8 @@ fn kind_label(kind: Kind) -> SharedString {
         Kind::Bearer => t!("auth.bearer"),
         Kind::ApiKey => t!("auth.api_key"),
         Kind::OAuth2 => t!("auth.oauth2"),
+        Kind::Jwt => t!("auth.jwt"),
+        Kind::Aws => t!("auth.aws"),
     }
     .to_string()
     .into()
@@ -87,6 +101,8 @@ fn kind_of(auth: &Auth) -> Kind {
         Auth::Bearer { .. } => Kind::Bearer,
         Auth::ApiKey { .. } => Kind::ApiKey,
         Auth::OAuth2 { .. } => Kind::OAuth2,
+        Auth::Jwt { .. } => Kind::Jwt,
+        Auth::AwsSigV4 { .. } => Kind::Aws,
     }
 }
 
@@ -100,6 +116,8 @@ impl AuthForm {
             Kind::Bearer,
             Kind::ApiKey,
             Kind::OAuth2,
+            Kind::Jwt,
+            Kind::Aws,
         ]
         .into_iter()
         .filter(|k| allow_inherit || *k != Kind::Inherit)
@@ -141,6 +159,16 @@ impl AuthForm {
             scope: input(&t!("auth.scope"), window, cx),
             audience: input(&t!("auth.audience"), window, cx),
             token_status: None,
+            jwt_algorithm: crate::jwt::Algorithm::default(),
+            jwt_key: input("{{jwt_key}}", window, cx),
+            jwt_claims: input(r#"{"sub": "{{user_id}}"}"#, window, cx),
+            jwt_header: input(r#"{"kid": "…"}"#, window, cx),
+            jwt_prefix: input("Bearer", window, cx),
+            aws_key_id: input("AKIA…", window, cx),
+            aws_secret: input("{{aws_secret_access_key}}", window, cx),
+            aws_session: input(&t!("auth.aws_session"), window, cx),
+            aws_region: input("eu-west-2", window, cx),
+            aws_service: input("s3", window, cx),
             inherited: None,
         }
     }
@@ -170,6 +198,20 @@ impl AuthForm {
                 value: text(&self.key_value),
                 in_query: self.key_in_query,
             },
+            Kind::Jwt => Auth::Jwt {
+                algorithm: self.jwt_algorithm,
+                key: text(&self.jwt_key),
+                claims: text(&self.jwt_claims),
+                header: text(&self.jwt_header),
+                prefix: text(&self.jwt_prefix),
+            },
+            Kind::Aws => Auth::AwsSigV4 {
+                access_key_id: text(&self.aws_key_id),
+                secret_access_key: text(&self.aws_secret),
+                session_token: text(&self.aws_session),
+                region: text(&self.aws_region),
+                service: text(&self.aws_service),
+            },
             Kind::OAuth2 => Auth::OAuth2 {
                 grant: self.grant,
                 token_url: text(&self.token_url),
@@ -198,8 +240,46 @@ impl AuthForm {
             Auth::Basic { username, password } => (username, password, &empty, &empty, &empty),
             Auth::Bearer { token } => (&empty, &empty, token, &empty, &empty),
             Auth::ApiKey { name, value, .. } => (&empty, &empty, &empty, name, value),
-            Auth::OAuth2 { .. } | Auth::Inherit | Auth::None => (&empty, &empty, &empty, &empty, &empty),
+            Auth::OAuth2 { .. } | Auth::Jwt { .. } | Auth::AwsSigV4 { .. } | Auth::Inherit | Auth::None => {
+                (&empty, &empty, &empty, &empty, &empty)
+            }
         };
+        if let Auth::Jwt {
+            algorithm,
+            key,
+            claims,
+            header,
+            prefix,
+        } = auth
+        {
+            self.jwt_algorithm = *algorithm;
+            for (input, text) in [
+                (&self.jwt_key, key),
+                (&self.jwt_claims, claims),
+                (&self.jwt_header, header),
+                (&self.jwt_prefix, prefix),
+            ] {
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+            }
+        }
+        if let Auth::AwsSigV4 {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            region,
+            service,
+        } = auth
+        {
+            for (input, text) in [
+                (&self.aws_key_id, access_key_id),
+                (&self.aws_secret, secret_access_key),
+                (&self.aws_session, session_token),
+                (&self.aws_region, region),
+                (&self.aws_service, service),
+            ] {
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+            }
+        }
         if let Auth::OAuth2 {
             grant,
             token_url,
@@ -369,6 +449,66 @@ impl Render for AuthForm {
                             .text_color(theme.muted_foreground)
                             .child(status)
                     })),
+            ),
+            Kind::Jwt => fields.child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .children(crate::jwt::Algorithm::ALL.iter().map(|algorithm| {
+                                let algorithm = *algorithm;
+                                Button::new(("jwt-algorithm", algorithm as usize))
+                                    .xsmall()
+                                    .label(algorithm.name())
+                                    .selected(self.jwt_algorithm == algorithm)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.jwt_algorithm = algorithm;
+                                        cx.emit(AuthFormEvent::Changed);
+                                        cx.notify();
+                                    }))
+                            }))
+                            .child(div().flex_1())
+                            .child(div().w_24().child(text_input(&self.jwt_prefix).small())),
+                    )
+                    .child(text_input(&self.jwt_key).small())
+                    .child(text_input(&self.jwt_claims).small())
+                    .child(text_input(&self.jwt_header).small())
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if self.jwt_algorithm.is_shared_secret() {
+                            t!("auth.jwt_secret_hint").to_string()
+                        } else {
+                            t!("auth.jwt_key_hint").to_string()
+                        },
+                    )),
+            ),
+            Kind::Aws => fields.child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().child(text_input(&self.aws_key_id).small()))
+                            .child(div().flex_1().child(text_input(&self.aws_secret).small())),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().w_32().child(text_input(&self.aws_region).small()))
+                            .child(div().w_24().child(text_input(&self.aws_service).small()))
+                            .child(div().flex_1().child(text_input(&self.aws_session).small())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(t!("auth.aws_hint").to_string()),
+                    ),
             ),
         };
         let literal = self.value(cx).literal_credential().is_some();

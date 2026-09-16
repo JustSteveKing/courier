@@ -6136,4 +6136,84 @@ components:
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("tok-1"), "no token in the YAML:\n{saved}");
     }
+
+    #[gpui_kit::test]
+    async fn jwt_and_aws_auth_sign_what_goes_out(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        let send_with = |cx: &mut TestAppContext, auth: crate::model::Auth, port: u16| {
+            let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+            request.url = format!("http://127.0.0.1:{port}/thing?b=2&a=1");
+            request.auth = auth;
+            storage::write_yaml(&path, &request).unwrap();
+            cx.update_window(window, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    this.reload_collection(&root, window, cx);
+                    this.select_request(path.clone(), window, cx);
+                });
+                window.render_frame(cx);
+                window.click("send", cx);
+            })
+            .unwrap();
+            for _ in 0..300 {
+                cx.run_until_parked();
+                if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        let (port, seen) = http_server("{\"ok\":true}");
+        send_with(
+            cx,
+            crate::model::Auth::Jwt {
+                algorithm: crate::jwt::Algorithm::HS256,
+                key: "secret".into(),
+                claims: r#"{"sub":"1234567890"}"#.into(),
+                header: String::new(),
+                prefix: "Bearer".into(),
+            },
+            port,
+        );
+        let (head, _) = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let token = concat!(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0.",
+            "Rq8IxqeX7eA6GgYxlcHdPFVRNFFZc5rEI3MQTZZbK3I"
+        );
+        assert!(
+            head.contains(&format!("Bearer {token}")),
+            "the signed token goes out whole:\n{head}"
+        );
+
+        let (port, seen) = http_server("{\"ok\":true}");
+        send_with(
+            cx,
+            crate::model::Auth::AwsSigV4 {
+                access_key_id: "AKIDEXAMPLE".into(),
+                secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+                session_token: String::new(),
+                region: "eu-west-2".into(),
+                service: "s3".into(),
+            },
+            port,
+        );
+        let (head, _) = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        let head = head.to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: aws4-hmac-sha256 credential=akidexample/"),
+            "{head}"
+        );
+        assert!(head.contains("/eu-west-2/s3/aws4_request"), "{head}");
+        assert!(head.contains("x-amz-date:"), "{head}");
+        assert!(
+            head.contains("x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+            "an empty body hashes to the known value:\n{head}"
+        );
+    }
 }

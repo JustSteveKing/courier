@@ -1555,7 +1555,11 @@ impl RequestEditor {
                 variables.extend(values);
                 sent = chained;
             }
-            let (request, missing) = Request::resolve_in(&file, &variables, &project)?;
+            crate::jwt::authorize(&mut file, &variables)?;
+            let signing = file.auth.clone();
+            let (mut request, missing) = Request::resolve_in(&file, &variables, &project)?;
+            // AWS signs the finished request, so it goes last.
+            crate::sigv4::apply(&signing, &mut request, &variables)?;
             let client = transport::client_for(&transport::ClientOptions::load(&settings)?, cookies.as_ref())?;
             Ok(Resolved {
                 request,

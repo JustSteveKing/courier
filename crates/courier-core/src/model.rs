@@ -97,6 +97,41 @@ pub enum Auth {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         audience: String,
     },
+    /// A JSON Web Token signed for each request from claims and a key.
+    Jwt {
+        #[serde(default)]
+        algorithm: crate::jwt::Algorithm,
+        /// The shared secret, or a PEM private key.
+        #[serde(default)]
+        key: String,
+        /// The claims as JSON, with `{{variables}}` allowed.
+        #[serde(default)]
+        claims: String,
+        /// Extra JWT header fields as JSON, for a `kid` and friends.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        header: String,
+        /// What goes before the token in the Authorization header.
+        #[serde(default = "bearer_prefix")]
+        prefix: String,
+    },
+    /// AWS Signature Version 4, for AWS and the S3-compatible services.
+    #[serde(rename = "aws_sigv4")]
+    AwsSigV4 {
+        #[serde(default)]
+        access_key_id: String,
+        #[serde(default)]
+        secret_access_key: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        session_token: String,
+        #[serde(default)]
+        region: String,
+        #[serde(default)]
+        service: String,
+    },
+}
+
+fn bearer_prefix() -> String {
+    "Bearer".into()
 }
 
 /// How an OAuth 2.0 token is obtained.
@@ -134,6 +169,8 @@ impl Auth {
             Self::Bearer { token } => token,
             Self::ApiKey { value, .. } => value,
             Self::OAuth2 { client_secret, .. } => client_secret,
+            Self::Jwt { key, .. } => key,
+            Self::AwsSigV4 { secret_access_key, .. } => secret_access_key,
             Self::Inherit | Self::None => return None,
         };
         (!value.trim().is_empty() && !value.contains("{{")).then_some(value.as_str())
@@ -146,6 +183,8 @@ impl Auth {
             Self::Bearer { token } => *token = text,
             Self::ApiKey { value, .. } => *value = text,
             Self::OAuth2 { client_secret, .. } => *client_secret = text,
+            Self::Jwt { key, .. } => *key = text,
+            Self::AwsSigV4 { secret_access_key, .. } => *secret_access_key = text,
             Self::Inherit | Self::None => {}
         }
     }
@@ -169,6 +208,8 @@ impl Auth {
             }
             Self::ApiKey { .. } => "api_key".into(),
             Self::OAuth2 { .. } => "client_secret".into(),
+            Self::Jwt { .. } => "jwt_key".into(),
+            Self::AwsSigV4 { .. } => "aws_secret_access_key".into(),
             _ => "token".into(),
         }
     }

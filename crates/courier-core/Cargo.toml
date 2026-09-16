@@ -26,7 +26,7 @@ rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
 # preserve_order keeps JSON keys in the order the API sent them, in bodies and
 # in JSONPath suggestions.
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_json_path = "0.7"
 serde_norway = "0.9.42"
@@ -36,9 +36,13 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "ma
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 uuid = { version = "1.26.1", features = ["v4"] }
+rsa = "0.9.10"
+hmac = "0.12"
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 
 [dev-dependencies]
 futures-lite = "2.6.1"
+rand = "0.8"
 rcgen = "0.14"
 rustls = "0.23"
 tempfile = "3.27.0"

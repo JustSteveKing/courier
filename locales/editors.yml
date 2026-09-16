@@ -1406,3 +1406,73 @@ auth.token_device_code:
   es: "Introduce el código %{code} en %{url}"
   de: "Gib den Code %{code} auf %{url} ein"
   fr: "Saisissez le code %{code} sur %{url}"
+jwt.bad_claims:
+  en: "The claims aren't valid JSON: %{error}"
+  es: "Las reclamaciones no son JSON válido: %{error}"
+  de: "Die Claims sind kein gültiges JSON: %{error}"
+  fr: "Les revendications ne sont pas du JSON valide : %{error}"
+jwt.claims_not_object:
+  en: The claims have to be a JSON object.
+  es: Las reclamaciones deben ser un objeto JSON.
+  de: Die Claims müssen ein JSON-Objekt sein.
+  fr: Les revendications doivent être un objet JSON.
+jwt.bad_header:
+  en: "The extra header fields aren't valid JSON: %{error}"
+  es: "Los campos extra de la cabecera no son JSON válido: %{error}"
+  de: "Die zusätzlichen Header-Felder sind kein gültiges JSON: %{error}"
+  fr: "Les champs d'en-tête supplémentaires ne sont pas du JSON valide : %{error}"
+jwt.header_not_object:
+  en: The extra header fields have to be a JSON object.
+  es: Los campos extra de la cabecera deben ser un objeto JSON.
+  de: Die zusätzlichen Header-Felder müssen ein JSON-Objekt sein.
+  fr: Les champs d'en-tête supplémentaires doivent être un objet JSON.
+jwt.no_key:
+  en: This JWT has no key to sign with.
+  es: Este JWT no tiene clave con la que firmar.
+  de: Diesem JWT fehlt der Schlüssel zum Signieren.
+  fr: Ce JWT n'a pas de clé pour signer.
+jwt.bad_key:
+  en: "That key couldn't be read: %{error}"
+  es: "No se pudo leer esa clave: %{error}"
+  de: "Dieser Schlüssel konnte nicht gelesen werden: %{error}"
+  fr: "Cette clé n'a pas pu être lue : %{error}"
+sigv4.no_credentials:
+  en: AWS signing needs an access key and a secret key.
+  es: La firma de AWS necesita una clave de acceso y una clave secreta.
+  de: Die AWS-Signatur braucht einen Access Key und einen Secret Key.
+  fr: La signature AWS a besoin d'une clé d'accès et d'une clé secrète.
+sigv4.bad_url:
+  en: "This request's URL can't be signed: %{error}"
+  es: "No se puede firmar la URL de esta solicitud: %{error}"
+  de: "Die URL dieser Anfrage kann nicht signiert werden: %{error}"
+  fr: "L'URL de cette requête ne peut pas être signée : %{error}"
+auth.jwt:
+  en: JWT
+  es: JWT
+  de: JWT
+  fr: JWT
+auth.aws:
+  en: AWS Signature v4
+  es: Firma AWS v4
+  de: AWS Signature v4
+  fr: Signature AWS v4
+auth.jwt_secret_hint:
+  en: "The key is the shared secret; the claims and header fields are JSON, and take {{variables}}."
+  es: "La clave es el secreto compartido; las reclamaciones y la cabecera son JSON y admiten {{variables}}."
+  de: "Der Schlüssel ist das gemeinsame Secret; Claims und Header-Felder sind JSON und erlauben {{variables}}."
+  fr: "La clé est le secret partagé ; les revendications et l'en-tête sont du JSON et acceptent {{variables}}."
+auth.jwt_key_hint:
+  en: "The key is a PEM private key; the claims and header fields are JSON, and take {{variables}}."
+  es: "La clave es una clave privada PEM; las reclamaciones y la cabecera son JSON y admiten {{variables}}."
+  de: "Der Schlüssel ist ein privater PEM-Schlüssel; Claims und Header-Felder sind JSON und erlauben {{variables}}."
+  fr: "La clé est une clé privée PEM ; les revendications et l'en-tête sont du JSON et acceptent {{variables}}."
+auth.aws_session:
+  en: Session token (optional)
+  es: Token de sesión (opcional)
+  de: Session-Token (optional)
+  fr: Jeton de session (facultatif)
+auth.aws_hint:
+  en: Region and service default to us-east-1 and s3. The signature covers the finished request, so it is added last.
+  es: La región y el servicio son us-east-1 y s3 por defecto. La firma cubre la solicitud final, así que se añade al final.
+  de: Region und Service sind standardmäßig us-east-1 und s3. Die Signatur deckt die fertige Anfrage ab und kommt daher zuletzt.
+  fr: La région et le service valent us-east-1 et s3 par défaut. La signature couvre la requête finale, elle est donc ajoutée en dernier.
