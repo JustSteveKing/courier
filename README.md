@@ -45,9 +45,13 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### OAuth 2.0
+
+Pick **OAuth 2.0** on any auth row — collection, folder or request — and fill in the token URL, client ID and secret, scope and audience. **Get a token** fetches one now; **Forget token** throws it away. Tokens are kept in the keyring, keyed by those settings, and refreshed automatically (using the refresh token when there is one) shortly before they expire, so a token survives a restart and never reaches a file. Client credentials works today; the browser sign-in grants are next.
+
 ### Where the time went
 
-Under each response is a bar breaking the time down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, with the address it actually reached. The **Timing** tab, beside Body and Headers, lays the same phases out as a waterfall with the total, the address, the body size, and whether the connection was opened or reused. `courier send` prints the breakdown on stderr.
+The **Timing** tab, beside Body and Headers, breaks each response down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, laid out as a waterfall with the total, the address it reached, the body size, and whether the connection was opened or reused. `courier send` prints the same breakdown on stderr.
 
 ### Reading responses
 

@@ -209,6 +209,25 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// One client for the whole app, so repeated requests to a host reuse its connections.
+/// Runs `work` on the HTTP runtime and waits for it, so callers outside tokio (the app's
+/// executors, a CLI thread) can await reqwest futures.
+pub async fn on_runtime<F, T>(work: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (send, receive) = async_channel::bounded(1);
+    runtime().spawn(async move {
+        let _ = send.send(work.await).await;
+    });
+    receive.recv().await.expect("the HTTP runtime dropped the work")
+}
+
+/// The shared client, for side requests like fetching an OAuth token.
+pub fn plain_client() -> &'static reqwest::Client {
+    client()
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {

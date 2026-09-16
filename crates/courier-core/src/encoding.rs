@@ -22,6 +22,20 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 
 /// Percent-encodes for form bodies and query strings, leaving `{{variable}}` placeholders intact
 /// so they still interpolate.
+/// Percent-encodes a value for an `application/x-www-form-urlencoded` body, with spaces as
+/// `+`. Unlike [`percent_encode`], nothing is left alone: these values are already resolved.
+pub fn form_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 pub fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;

@@ -23,6 +23,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `request_editor.rs`, `environment_editor.rs`, `runner_view.rs`: the main panes (`MainView` picks one)
 - Runs: `runner.rs` in core (shared with the CLI), `runner_view.rs` for the live results; the workspace builds the context in `run_setup`
 - `model.rs` (YAML types, no I/O), `storage.rs` (load/save collections), `project.rs` (`.courier/` discovery)
+- `oauth.rs` (OAuth 2.0 tokens: fetch, refresh, cache in the secret store keyed by a fingerprint of the settings; `authorize` swaps `Auth::OAuth2` for the header before a request resolves)
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
 - Request settings: `model::RequestSettings` (collection → folder `.folder.yaml` → request, merged by `overlay`, resolved with `resolve`), `transport::ClientOptions`/`client_for` (cached clients), `settings_form.rs` (dialog)
 - `chain.rs` (template functions: `response()`/`response_header()` chaining, `uuid()` etc.; evaluated in `resolve_in_background` before `Request::resolve`)

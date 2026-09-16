@@ -392,6 +392,8 @@ impl RequestEditor {
                     cx.emit(RequestEditorEvent::MoveAuthToSecret { path });
                 }
             }
+            AuthFormEvent::GetToken => this.get_oauth_token(cx),
+            AuthFormEvent::ForgetToken => this.forget_oauth_token(cx),
         })
         .detach();
         let params = cx.new(|cx| EditorState::new(window, cx).language("text"));
@@ -1524,11 +1526,14 @@ impl RequestEditor {
         // latest responses).
         let chaining = (!chain::calls_in(&file).is_empty()).then(|| self.chain_context(cx));
         let settings = self.effective_settings(&file, cx);
+        let collection_id = self.collection_id();
         let project = self.project_dir().to_path_buf();
         let cookies = self.cookies.as_ref().map(|jar| jar.store().clone());
         cx.background_executor().spawn(async move {
             if !secrets.is_empty() {
-                let store = store.ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
+                let store = store
+                    .as_ref()
+                    .ok_or_else(|| t!("secrets.store_unavailable").to_string())?;
                 let found = store
                     .get_all(&secrets)
                     .await
@@ -1536,6 +1541,14 @@ impl RequestEditor {
                 variables.extend(found);
             }
             let mut sent = chain::Sent::new();
+            crate::oauth::authorize(
+                &mut file,
+                &variables,
+                &collection_id,
+                store.as_ref(),
+                transport::plain_client(),
+            )
+            .await?;
             if let Some(mut context) = chaining {
                 context.variables = variables.clone();
                 let (values, chained) = chain::evaluate(&file, &context).await?;
@@ -1555,6 +1568,90 @@ impl RequestEditor {
         })
     }
 
+    /// The OAuth settings on the auth row, with variables filled in.
+    fn oauth_config(&self, cx: &App) -> Option<(crate::oauth::Config, String)> {
+        let auth = self.auth.read(cx).value(cx);
+        let config = crate::oauth::Config::resolve(&auth, &self.variables)?;
+        Some((config, self.collection_id()))
+    }
+
+    fn collection_id(&self) -> String {
+        self.state()
+            .and_then(|s| s.cache_key.as_ref())
+            .and_then(|key| key.collection_id.clone())
+            .unwrap_or_default()
+    }
+
+    /// Fetches a token now, so a sign-in doesn't have to wait for the first send.
+    fn get_oauth_token(&mut self, cx: &mut Context<Self>) {
+        let Some((config, collection_id)) = self.oauth_config(cx) else {
+            return;
+        };
+        let store = self.secret_store.clone();
+        let secrets = self.secrets.clone();
+        let mut variables = self.variables.clone();
+        self.auth.update(cx, |form, cx| {
+            form.set_token_status(Some(t!("auth.token_fetching").to_string()), cx)
+        });
+        cx.spawn(async move |this, cx| {
+            // Secret values may be part of the client secret, so resolve them first.
+            let mut config = config;
+            if !secrets.is_empty()
+                && let Some(store) = &store
+                && let Ok(found) = store.get_all(&secrets).await
+            {
+                variables.extend(found);
+                let auth = Auth::OAuth2 {
+                    grant: config.grant,
+                    token_url: config.token_url.clone(),
+                    auth_url: config.auth_url.clone(),
+                    client_id: config.client_id.clone(),
+                    client_secret: config.client_secret.clone(),
+                    scope: config.scope.clone(),
+                    audience: config.audience.clone(),
+                };
+                if let Some(resolved) = crate::oauth::Config::resolve(&auth, &variables) {
+                    config = resolved;
+                }
+            }
+            let result =
+                crate::oauth::access_token(&config, &collection_id, store.as_ref(), transport::plain_client()).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(tokens) => {
+                        let status = token_status(&tokens);
+                        this.auth.update(cx, |form, cx| form.set_token_status(Some(status), cx));
+                        cx.emit(RequestEditorEvent::Notice(t!("auth.token_ready").to_string()));
+                    }
+                    Err(message) => {
+                        this.auth
+                            .update(cx, |form, cx| form.set_token_status(Some(message.clone()), cx));
+                        cx.emit(RequestEditorEvent::Error(message));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn forget_oauth_token(&mut self, cx: &mut Context<Self>) {
+        let Some((config, collection_id)) = self.oauth_config(cx) else {
+            return;
+        };
+        let store = self.secret_store.clone();
+        self.auth.update(cx, |form, cx| form.set_token_status(None, cx));
+        cx.spawn(async move |this, cx| {
+            crate::oauth::forget(&config, &collection_id, store.as_ref()).await;
+            this.update(cx, |_, cx| {
+                cx.emit(RequestEditorEvent::Notice(t!("auth.token_forgotten").to_string()))
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.send_with(false, window, cx);
     }
@@ -1570,6 +1667,7 @@ impl RequestEditor {
                 .filter_map(|(path, state)| Some((path.clone(), state.response.clone()?)))
                 .collect(),
             cache: self.cache(cx).cloned(),
+            store: self.secret_store.clone(),
             collection_id: self
                 .state()
                 .and_then(|s| s.cache_key.as_ref())
@@ -2238,87 +2336,6 @@ impl RequestEditor {
             .into_any_element()
     }
 
-    /// A bar showing where a response's time went, with each phase in its own colour.
-    fn render_timing(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let theme = cx.theme();
-        let timing = self
-            .state()
-            .filter(|state| state.live.is_none())
-            .and_then(ResponseState::shown)?
-            .timing
-            .clone()?;
-        let total = timing.total_ms().max(1);
-        let phases: Vec<(String, u64, Hsla)> = [
-            (
-                t!("request.timing_dns").to_string(),
-                timing.dns_ms.unwrap_or_default(),
-                theme.info,
-            ),
-            (
-                t!("request.timing_connect").to_string(),
-                timing.connect_ms.unwrap_or_default(),
-                theme.warning,
-            ),
-            (
-                t!("request.timing_waiting").to_string(),
-                timing.waiting_ms(),
-                theme.primary,
-            ),
-            (
-                t!("request.timing_download").to_string(),
-                timing.download_ms,
-                theme.success,
-            ),
-        ]
-        .into_iter()
-        .filter(|(_, ms, _)| *ms > 0)
-        .collect();
-        Some(
-            h_flex()
-                .id("response-timing")
-                .test_support()
-                .gap_2()
-                .items_center()
-                .child(
-                    h_flex()
-                        .w(px(150.))
-                        .h(px(6.))
-                        .rounded_sm()
-                        .overflow_hidden()
-                        .bg(theme.muted)
-                        .children(
-                            phases
-                                .iter()
-                                .map(|(_, ms, color)| div().h_full().w(relative(*ms as f32 / total as f32)).bg(*color)),
-                        ),
-                )
-                .children(phases.iter().map(|(name, ms, color)| {
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(div().size(px(6.)).rounded_full().bg(*color))
-                        .child(format!("{name} {}", format_duration(*ms)))
-                }))
-                .when(timing.reused(), |row| {
-                    row.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(t!("request.timing_reused").to_string()),
-                    )
-                })
-                .children(timing.address.map(|address| {
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(t!("request.timing_address", address = address).to_string())
-                }))
-                .into_any_element(),
-        )
-    }
-
     fn render_status(&self, event_stream: bool, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let state = self.state();
@@ -2743,11 +2760,19 @@ impl Render for RequestEditor {
                                         ),
                                     ),
                             )
-                            .children(self.render_timing(cx))
                             .child(response_view),
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// "Token ready, expires in 59 min" for the auth row.
+fn token_status(tokens: &crate::oauth::Tokens) -> String {
+    match tokens.expires_in() {
+        Some(left) if left.as_secs() >= 60 => t!("auth.token_expires_in", minutes = left.as_secs() / 60).to_string(),
+        Some(_) => t!("auth.token_expiring").to_string(),
+        None => t!("auth.token_ready").to_string(),
     }
 }
 

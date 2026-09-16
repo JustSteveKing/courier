@@ -1241,3 +1241,108 @@ request.timing_hint:
   es: La conexión incluye el saludo TCP y, en HTTPS, también el saludo TLS.
   de: Die Verbindung umfasst den TCP-Handshake und bei HTTPS auch den TLS-Handshake.
   fr: La connexion couvre la poignée de main TCP et, en HTTPS, celle de TLS avec elle.
+oauth.no_token_url:
+  en: This OAuth setup has no token URL.
+  es: Esta configuración de OAuth no tiene URL de token.
+  de: Dieser OAuth-Einrichtung fehlt die Token-URL.
+  fr: Cette configuration OAuth n'a pas d'URL de token.
+oauth.no_client_id:
+  en: This OAuth setup has no client ID.
+  es: Esta configuración de OAuth no tiene ID de cliente.
+  de: Dieser OAuth-Einrichtung fehlt die Client-ID.
+  fr: Cette configuration OAuth n'a pas d'identifiant client.
+oauth.sign_in_needed:
+  en: No token yet. Choose Get a token to sign in.
+  es: Todavía no hay token. Elige Obtener un token para iniciar sesión.
+  de: Noch kein Token. Wähle Token holen, um dich anzumelden.
+  fr: Pas encore de token. Choisissez Obtenir un token pour vous connecter.
+oauth.request_failed:
+  en: "Could not reach the token endpoint: %{error}"
+  es: "No se pudo contactar con el endpoint de token: %{error}"
+  de: "Der Token-Endpunkt war nicht erreichbar: %{error}"
+  fr: "Impossible de joindre le point de terminaison de token : %{error}"
+oauth.bad_response:
+  en: "The token endpoint answered %{status} with something that isn't JSON: %{body}"
+  es: "El endpoint de token respondió %{status} con algo que no es JSON: %{body}"
+  de: "Der Token-Endpunkt antwortete mit %{status} und keinem JSON: %{body}"
+  fr: "Le point de terminaison de token a répondu %{status} avec autre chose que du JSON : %{body}"
+oauth.provider_error:
+  en: "The provider refused: %{error}"
+  es: "El proveedor lo rechazó: %{error}"
+  de: "Der Anbieter hat abgelehnt: %{error}"
+  fr: "Le fournisseur a refusé : %{error}"
+oauth.no_access_token:
+  en: The token endpoint answered without an access token.
+  es: El endpoint de token respondió sin token de acceso.
+  de: Der Token-Endpunkt antwortete ohne Access Token.
+  fr: Le point de terminaison de token a répondu sans token d'accès.
+auth.oauth2:
+  en: OAuth 2.0
+  es: OAuth 2.0
+  de: OAuth 2.0
+  fr: OAuth 2.0
+auth.grant_client_credentials:
+  en: Client credentials
+  es: Credenciales de cliente
+  de: Client Credentials
+  fr: Identifiants client
+auth.grant_authorization_code:
+  en: Authorization code
+  es: Código de autorización
+  de: Authorization Code
+  fr: Code d'autorisation
+auth.grant_device_code:
+  en: Device code
+  es: Código de dispositivo
+  de: Device Code
+  fr: Code d'appareil
+auth.client_id:
+  en: Client ID
+  es: ID de cliente
+  de: Client-ID
+  fr: Identifiant client
+auth.scope:
+  en: Scope
+  es: Ámbito
+  de: Scope
+  fr: Portée
+auth.audience:
+  en: Audience (optional)
+  es: Audiencia (opcional)
+  de: Audience (optional)
+  fr: Audience (facultatif)
+auth.get_token:
+  en: Get a token
+  es: Obtener un token
+  de: Token holen
+  fr: Obtenir un token
+auth.forget_token:
+  en: Forget token
+  es: Olvidar el token
+  de: Token vergessen
+  fr: Oublier le token
+auth.token_fetching:
+  en: Getting a token…
+  es: Obteniendo un token…
+  de: Token wird geholt…
+  fr: Obtention d'un token…
+auth.token_ready:
+  en: Token ready.
+  es: Token listo.
+  de: Token bereit.
+  fr: Token prêt.
+auth.token_expires_in:
+  en: "Token ready, expires in %{minutes} min."
+  es: "Token listo, caduca en %{minutes} min."
+  de: "Token bereit, läuft in %{minutes} Min ab."
+  fr: "Token prêt, expire dans %{minutes} min."
+auth.token_expiring:
+  en: Token ready, about to expire.
+  es: Token listo, a punto de caducar.
+  de: Token bereit, läuft gleich ab.
+  fr: Token prêt, sur le point d'expirer.
+auth.token_forgotten:
+  en: Token forgotten. The next send signs in again.
+  es: Token olvidado. El próximo envío volverá a iniciar sesión.
+  de: Token vergessen. Der nächste Versand meldet sich erneut an.
+  fr: Token oublié. Le prochain envoi se reconnectera.

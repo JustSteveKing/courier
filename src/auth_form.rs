@@ -9,13 +9,17 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_i18n::t;
 
-use crate::model::Auth;
+use crate::model::{Auth, OAuthGrant};
 use crate::ui::text_input;
 
 pub enum AuthFormEvent {
     Changed,
     /// The user asked to move the literal credential into a secret.
     MoveToSecret,
+    /// The user asked to fetch a fresh OAuth token.
+    GetToken,
+    /// The user asked to forget the OAuth token held for these settings.
+    ForgetToken,
 }
 
 impl EventEmitter<AuthFormEvent> for AuthForm {}
@@ -27,6 +31,7 @@ enum Kind {
     Basic,
     Bearer,
     ApiKey,
+    OAuth2,
 }
 
 pub struct AuthForm {
@@ -39,6 +44,15 @@ pub struct AuthForm {
     key_name: Entity<InputState>,
     key_value: Entity<InputState>,
     key_in_query: bool,
+    grant: OAuthGrant,
+    token_url: Entity<InputState>,
+    auth_url: Entity<InputState>,
+    client_id: Entity<InputState>,
+    client_secret: Entity<InputState>,
+    scope: Entity<InputState>,
+    audience: Entity<InputState>,
+    /// What the token store holds for these settings, for the status line.
+    token_status: Option<String>,
     /// What `Inherit` resolves to, and where it comes from, for display.
     inherited: Option<(Auth, String)>,
 }
@@ -50,9 +64,19 @@ fn kind_label(kind: Kind) -> SharedString {
         Kind::Basic => t!("auth.basic"),
         Kind::Bearer => t!("auth.bearer"),
         Kind::ApiKey => t!("auth.api_key"),
+        Kind::OAuth2 => t!("auth.oauth2"),
     }
     .to_string()
     .into()
+}
+
+fn grant_label(grant: OAuthGrant) -> String {
+    match grant {
+        OAuthGrant::ClientCredentials => t!("auth.grant_client_credentials"),
+        OAuthGrant::AuthorizationCode => t!("auth.grant_authorization_code"),
+        OAuthGrant::DeviceCode => t!("auth.grant_device_code"),
+    }
+    .to_string()
 }
 
 fn kind_of(auth: &Auth) -> Kind {
@@ -62,16 +86,24 @@ fn kind_of(auth: &Auth) -> Kind {
         Auth::Basic { .. } => Kind::Basic,
         Auth::Bearer { .. } => Kind::Bearer,
         Auth::ApiKey { .. } => Kind::ApiKey,
+        Auth::OAuth2 { .. } => Kind::OAuth2,
     }
 }
 
 impl AuthForm {
     /// `allow_inherit` is false for a collection, which has nothing to inherit from.
     pub fn new(allow_inherit: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let kinds: Vec<Kind> = [Kind::Inherit, Kind::None, Kind::Basic, Kind::Bearer, Kind::ApiKey]
-            .into_iter()
-            .filter(|k| allow_inherit || *k != Kind::Inherit)
-            .collect();
+        let kinds: Vec<Kind> = [
+            Kind::Inherit,
+            Kind::None,
+            Kind::Basic,
+            Kind::Bearer,
+            Kind::ApiKey,
+            Kind::OAuth2,
+        ]
+        .into_iter()
+        .filter(|k| allow_inherit || *k != Kind::Inherit)
+        .collect();
         let labels: Vec<SharedString> = kinds.iter().map(|k| kind_label(*k)).collect();
         let kind = cx.new(|cx| SelectState::new(SearchableVec::new(labels), Some(IndexPath::default()), window, cx));
         cx.subscribe(&kind, |_, _, _: &SelectEvent<SearchableVec<SharedString>>, cx| {
@@ -101,6 +133,14 @@ impl AuthForm {
             key_name: input("X-API-Key", window, cx),
             key_value: input("{{api_key}}", window, cx),
             key_in_query: false,
+            grant: OAuthGrant::default(),
+            token_url: input("https://id.example/oauth2/token", window, cx),
+            auth_url: input("https://id.example/oauth2/authorize", window, cx),
+            client_id: input(&t!("auth.client_id"), window, cx),
+            client_secret: input("{{client_secret}}", window, cx),
+            scope: input(&t!("auth.scope"), window, cx),
+            audience: input(&t!("auth.audience"), window, cx),
+            token_status: None,
             inherited: None,
         }
     }
@@ -130,6 +170,15 @@ impl AuthForm {
                 value: text(&self.key_value),
                 in_query: self.key_in_query,
             },
+            Kind::OAuth2 => Auth::OAuth2 {
+                grant: self.grant,
+                token_url: text(&self.token_url),
+                auth_url: text(&self.auth_url),
+                client_id: text(&self.client_id),
+                client_secret: text(&self.client_secret),
+                scope: text(&self.scope),
+                audience: text(&self.audience),
+            },
         }
     }
 
@@ -149,8 +198,30 @@ impl AuthForm {
             Auth::Basic { username, password } => (username, password, &empty, &empty, &empty),
             Auth::Bearer { token } => (&empty, &empty, token, &empty, &empty),
             Auth::ApiKey { name, value, .. } => (&empty, &empty, &empty, name, value),
-            Auth::Inherit | Auth::None => (&empty, &empty, &empty, &empty, &empty),
+            Auth::OAuth2 { .. } | Auth::Inherit | Auth::None => (&empty, &empty, &empty, &empty, &empty),
         };
+        if let Auth::OAuth2 {
+            grant,
+            token_url,
+            auth_url,
+            client_id,
+            client_secret,
+            scope,
+            audience,
+        } = auth
+        {
+            self.grant = *grant;
+            for (input, text) in [
+                (&self.token_url, token_url),
+                (&self.auth_url, auth_url),
+                (&self.client_id, client_id),
+                (&self.client_secret, client_secret),
+                (&self.scope, scope),
+                (&self.audience, audience),
+            ] {
+                input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+            }
+        }
         for (input, text) in [
             (&self.username, username),
             (&self.password, password),
@@ -170,6 +241,12 @@ impl AuthForm {
         auth.set_credential(text);
         self.set(&auth, window, cx);
         cx.emit(AuthFormEvent::Changed);
+    }
+
+    /// What the token store holds for these settings ("expires in 12 min", an error, …).
+    pub fn set_token_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
+        self.token_status = status;
+        cx.notify();
     }
 
     pub fn set_inherited(&mut self, inherited: Option<(Auth, String)>, cx: &mut Context<Self>) {
@@ -228,6 +305,71 @@ impl Render for AuthForm {
                                 })),
                         ),
                 ),
+            Kind::OAuth2 => fields.child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .children(OAuthGrant::ALL.iter().map(|grant| {
+                                let grant = *grant;
+                                Button::new(("auth-grant", grant as usize))
+                                    .xsmall()
+                                    .label(grant_label(grant))
+                                    .selected(self.grant == grant)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.grant = grant;
+                                        cx.emit(AuthFormEvent::Changed);
+                                        cx.notify();
+                                    }))
+                            }))
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("auth-get-token")
+                                    .xsmall()
+                                    .primary()
+                                    .label(t!("auth.get_token").to_string())
+                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AuthFormEvent::GetToken))),
+                            )
+                            .child(
+                                Button::new("auth-forget-token")
+                                    .xsmall()
+                                    .ghost()
+                                    .label(t!("auth.forget_token").to_string())
+                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AuthFormEvent::ForgetToken))),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().child(text_input(&self.token_url).small()))
+                            .when(self.grant != OAuthGrant::ClientCredentials, |row| {
+                                row.child(div().flex_1().child(text_input(&self.auth_url).small()))
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().child(text_input(&self.client_id).small()))
+                            .child(div().flex_1().child(text_input(&self.client_secret).small())),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().flex_1().child(text_input(&self.scope).small()))
+                            .child(div().flex_1().child(text_input(&self.audience).small())),
+                    )
+                    .children(self.token_status.clone().map(|status| {
+                        div()
+                            .id("oauth-token-status")
+                            .test_support()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(status)
+                    })),
+            ),
         };
         let literal = self.value(cx).literal_credential().is_some();
         v_flex()

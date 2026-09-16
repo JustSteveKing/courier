@@ -622,6 +622,7 @@ impl Workspace {
                 variables: layered.variables,
                 latest: Default::default(),
                 cache: self.editor().read(cx).shared_cache(cx),
+                store: self.secret_store.clone(),
                 collection_id,
                 default_timeout_secs: AppSettings::get(cx).request_timeout_secs,
                 cookies: cookies.as_ref().map(|jar| jar.store().clone()),
@@ -6065,10 +6066,13 @@ components:
             "the phases fit inside the first byte: {timing:?}"
         );
         assert!(!timing.reused(), "this one opened a connection");
-        // The bar is on screen with the response.
+        // The breakdown is in its own tab.
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("response-timing").is_some());
+            assert!(
+                window.try_find("timing-tab").is_none(),
+                "the breakdown stays in its tab, out of the way"
+            );
         })
         .unwrap();
 
@@ -6080,5 +6084,56 @@ components:
             assert!(window.try_find("timing-tab").is_some(), "the tab renders");
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn oauth_client_credentials_fetches_a_token_and_sends_it(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        let (token_port, _token_seen) =
+            http_server(r#"{"access_token":"tok-1","token_type":"bearer","expires_in":3600}"#);
+        let (api_port, api_seen) = http_server("{\"ok\":true}");
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        request.url = format!("http://127.0.0.1:{api_port}/private");
+        request.auth = crate::model::Auth::OAuth2 {
+            grant: crate::model::OAuthGrant::ClientCredentials,
+            token_url: format!("http://127.0.0.1:{token_port}/oauth/token"),
+            auth_url: String::new(),
+            client_id: "courier".into(),
+            client_secret: "s3cret".into(),
+            scope: "read".into(),
+            audience: String::new(),
+        };
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let (head, _) = api_seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            head.to_ascii_lowercase().contains("authorization: bearer tok-1"),
+            "the fetched token goes out with the request:\n{head}"
+        );
+        // The token is kept in the secret store, not in the request file.
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("tok-1"), "no token in the YAML:\n{saved}");
     }
 }

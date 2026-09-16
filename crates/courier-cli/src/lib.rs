@@ -279,6 +279,7 @@ async fn context(collection: &Collection, common: &Common) -> Result<Context> {
     let layered = secret_store::layer(&collection.file, environment.map(|env| (env.path.as_path(), &env.file)));
     let mut variables: Variables = layered.variables;
 
+    let mut opened_store = None;
     let mut from_keyring = layered.secrets.clone();
     for name in layered.secrets.keys() {
         if let Ok(value) = std::env::var(secret_env_name(name)) {
@@ -286,13 +287,22 @@ async fn context(collection: &Collection, common: &Common) -> Result<Context> {
             from_keyring.shift_remove(name);
         }
     }
-    if !from_keyring.is_empty() && !common.no_keyring {
+    if !common.no_keyring {
         match open_store().await {
-            Ok(store) => match store.get_all(&from_keyring).await {
-                Ok(found) => variables.extend(found),
-                Err(e) => eprintln!("courier: couldn't read secrets from the keyring: {e:#}"),
-            },
-            Err(e) => eprintln!("courier: no keyring available ({e:#}); set COURIER_SECRET_* instead"),
+            Ok(store) => {
+                if !from_keyring.is_empty() {
+                    match store.get_all(&from_keyring).await {
+                        Ok(found) => variables.extend(found),
+                        Err(e) => eprintln!("courier: couldn't read secrets from the keyring: {e:#}"),
+                    }
+                }
+                // OAuth tokens are cached here too, so a run doesn't sign in per request.
+                opened_store = Some(store);
+            }
+            Err(e) if !from_keyring.is_empty() => {
+                eprintln!("courier: no keyring available ({e:#}); set COURIER_SECRET_* instead")
+            }
+            Err(_) => {}
         }
     }
     for pair in &common.vars {
@@ -304,6 +314,7 @@ async fn context(collection: &Collection, common: &Common) -> Result<Context> {
 
     Ok(Context {
         root: collection.root.clone(),
+        store: opened_store,
         variables,
         latest: Default::default(),
         cache: None,

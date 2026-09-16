@@ -75,6 +75,45 @@ pub enum Auth {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         in_query: bool,
     },
+    /// OAuth 2.0. The token itself is never stored here: it lives in the secret store, keyed
+    /// by these settings (see `crate::oauth`).
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        #[serde(default)]
+        grant: OAuthGrant,
+        /// Where tokens come from.
+        #[serde(default)]
+        token_url: String,
+        /// Where the person signs in, for the grants that open a browser.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        auth_url: String,
+        #[serde(default)]
+        client_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        client_secret: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        scope: String,
+        /// Some providers (Auth0 among them) want the API named here.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        audience: String,
+    },
+}
+
+/// How an OAuth 2.0 token is obtained.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthGrant {
+    /// The client signs in as itself: no browser, good for machine-to-machine APIs.
+    #[default]
+    ClientCredentials,
+    /// The person signs in in a browser; the code comes back to a loopback port (with PKCE).
+    AuthorizationCode,
+    /// The person opens a URL and types a code, for devices without a browser.
+    DeviceCode,
+}
+
+impl OAuthGrant {
+    pub const ALL: [Self; 3] = [Self::ClientCredentials, Self::AuthorizationCode, Self::DeviceCode];
 }
 
 impl Auth {
@@ -94,6 +133,7 @@ impl Auth {
             Self::Basic { password, .. } => password,
             Self::Bearer { token } => token,
             Self::ApiKey { value, .. } => value,
+            Self::OAuth2 { client_secret, .. } => client_secret,
             Self::Inherit | Self::None => return None,
         };
         (!value.trim().is_empty() && !value.contains("{{")).then_some(value.as_str())
@@ -105,6 +145,7 @@ impl Auth {
             Self::Basic { password, .. } => *password = text,
             Self::Bearer { token } => *token = text,
             Self::ApiKey { value, .. } => *value = text,
+            Self::OAuth2 { client_secret, .. } => *client_secret = text,
             Self::Inherit | Self::None => {}
         }
     }
@@ -127,6 +168,7 @@ impl Auth {
                 slug.trim_matches('_').to_string()
             }
             Self::ApiKey { .. } => "api_key".into(),
+            Self::OAuth2 { .. } => "client_secret".into(),
             _ => "token".into(),
         }
     }

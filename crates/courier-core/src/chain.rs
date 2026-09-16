@@ -199,6 +199,18 @@ pub fn calls_in(file: &RequestFile) -> Vec<(String, Result<Call, String>)> {
         Auth::Basic { username, password } => texts.extend([username.as_str(), password.as_str()]),
         Auth::Bearer { token } => texts.push(token),
         Auth::ApiKey { name, value, .. } => texts.extend([name.as_str(), value.as_str()]),
+        Auth::OAuth2 {
+            token_url,
+            client_id,
+            client_secret,
+            scope,
+            ..
+        } => texts.extend([
+            token_url.as_str(),
+            client_id.as_str(),
+            client_secret.as_str(),
+            scope.as_str(),
+        ]),
         Auth::Inherit | Auth::None => {}
     }
     calls_in_texts(&texts)
@@ -213,6 +225,8 @@ pub struct Context {
     /// Latest responses held in memory, by request path.
     pub latest: HashMap<PathBuf, StoredResponse>,
     pub cache: Option<ResponseCache>,
+    /// Where OAuth tokens are kept, when there is a store.
+    pub store: Option<crate::secret_store::SecretStore>,
     pub collection_id: Option<String>,
     /// The app's default timeout, for requests whose settings don't set one.
     pub default_timeout_secs: u64,
@@ -354,6 +368,15 @@ async fn send(
     }
     let mut variables = context.variables.clone();
     variables.extend(Box::pin(evaluate_in(&file, context, visiting, sent)).await?);
+    let collection_id = context.collection_id.clone().unwrap_or_default();
+    crate::oauth::authorize(
+        &mut file,
+        &variables,
+        &collection_id,
+        context.store.as_ref(),
+        transport::plain_client(),
+    )
+    .await?;
     let (request, missing) = Request::resolve_in(&file, &variables, crate::project::project_dir(&context.root))?;
     if crate::model::is_websocket_url(&request.url) {
         return Err(format!(

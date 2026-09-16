@@ -359,6 +359,7 @@ mod tests {
         let requests = resolve_target(&collection, Some("Flow")).unwrap();
         assert_eq!(requests.len(), 4);
         let context = Context {
+            store: None,
             root: root.clone(),
             variables: Variables::new(),
             latest: Default::default(),
@@ -404,6 +405,7 @@ mod tests {
         let collection = storage::load_collection(&root).unwrap();
         let requests = resolve_target(&collection, None).unwrap();
         let context = Context {
+            store: None,
             root: root.clone(),
             variables: Variables::new(),
             latest: Default::default(),

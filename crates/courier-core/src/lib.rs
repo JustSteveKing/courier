@@ -13,6 +13,7 @@ pub mod graphql;
 pub mod http;
 pub mod import;
 pub mod model;
+pub mod oauth;
 pub mod paths;
 pub mod project;
 pub mod response_cache;
