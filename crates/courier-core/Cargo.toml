@@ -26,6 +26,7 @@ rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
 # preserve_order keeps JSON keys in the order the API sent them, in bodies and
 # in JSONPath suggestions.
+sha2 = "0.10"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 serde_json_path = "0.7"
 serde_norway = "0.9.42"

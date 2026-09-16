@@ -1582,7 +1582,8 @@ impl RequestEditor {
             .unwrap_or_default()
     }
 
-    /// Fetches a token now, so a sign-in doesn't have to wait for the first send.
+    /// Fetches a token now: the machine-to-machine grant straight away, the others by
+    /// sending you to your browser first.
     fn get_oauth_token(&mut self, cx: &mut Context<Self>) {
         let Some((config, collection_id)) = self.oauth_config(cx) else {
             return;
@@ -1593,8 +1594,42 @@ impl RequestEditor {
         self.auth.update(cx, |form, cx| {
             form.set_token_status(Some(t!("auth.token_fetching").to_string()), cx)
         });
+
+        // The flows report where to send the person while they're still running.
+        let (prompts, waiting) = async_channel::unbounded::<crate::oauth::Prompt>();
         cx.spawn(async move |this, cx| {
-            // Secret values may be part of the client secret, so resolve them first.
+            while let Ok(prompt) = waiting.recv().await {
+                if this
+                    .update(cx, |this, cx| match prompt {
+                        crate::oauth::Prompt::Browser(url) => {
+                            this.auth.update(cx, |form, cx| {
+                                form.set_token_status(Some(t!("auth.token_in_browser").to_string()), cx)
+                            });
+                            cx.open_url(&url);
+                        }
+                        crate::oauth::Prompt::Device {
+                            user_code,
+                            verification_url,
+                            complete_url,
+                        } => {
+                            let status =
+                                t!("auth.token_device_code", code = user_code, url = verification_url).to_string();
+                            this.auth
+                                .update(cx, |form, cx| form.set_token_status(Some(status.clone()), cx));
+                            cx.emit(RequestEditorEvent::Notice(status));
+                            cx.open_url(complete_url.as_deref().unwrap_or(&verification_url));
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            // Secret values may make up the client secret, so resolve them first.
             let mut config = config;
             if !secrets.is_empty()
                 && let Some(store) = &store
@@ -1614,8 +1649,30 @@ impl RequestEditor {
                     config = resolved;
                 }
             }
-            let result =
-                crate::oauth::access_token(&config, &collection_id, store.as_ref(), transport::plain_client()).await;
+            let show = move |prompt| {
+                let _ = prompts.send_blocking(prompt);
+            };
+            let result = match config.grant {
+                crate::model::OAuthGrant::ClientCredentials => {
+                    crate::oauth::access_token(&config, &collection_id, store.as_ref(), transport::plain_client()).await
+                }
+                crate::model::OAuthGrant::AuthorizationCode => {
+                    match crate::oauth::authorization_code(&config, show).await {
+                        Ok(tokens) => {
+                            crate::oauth::save(&tokens, &config, &config.secret(&collection_id), store.as_ref()).await;
+                            Ok(tokens)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                crate::model::OAuthGrant::DeviceCode => match crate::oauth::device_code(&config, show).await {
+                    Ok(tokens) => {
+                        crate::oauth::save(&tokens, &config, &config.secret(&collection_id), store.as_ref()).await;
+                        Ok(tokens)
+                    }
+                    Err(e) => Err(e),
+                },
+            };
             this.update(cx, |this, cx| {
                 match result {
                     Ok(tokens) => {

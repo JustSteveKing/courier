@@ -22,6 +22,14 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 
 /// Percent-encodes for form bodies and query strings, leaving `{{variable}}` placeholders intact
 /// so they still interpolate.
+/// base64url without padding, as OAuth's PKCE and JWTs use.
+pub fn base64_url_encode(bytes: &[u8]) -> String {
+    base64_encode(bytes)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
 /// Percent-encodes a value for an `application/x-www-form-urlencoded` body, with spaces as
 /// `+`. Unlike [`percent_encode`], nothing is left alone: these values are already resolved.
 pub fn form_encode(text: &str) -> String {

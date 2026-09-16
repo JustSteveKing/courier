@@ -47,7 +47,13 @@ Or use **Open project…** in the app.
 
 ### OAuth 2.0
 
-Pick **OAuth 2.0** on any auth row — collection, folder or request — and fill in the token URL, client ID and secret, scope and audience. **Get a token** fetches one now; **Forget token** throws it away. Tokens are kept in the keyring, keyed by those settings, and refreshed automatically (using the refresh token when there is one) shortly before they expire, so a token survives a restart and never reaches a file. Client credentials works today; the browser sign-in grants are next.
+Pick **OAuth 2.0** on any auth row — collection, folder or request — choose a grant, and fill in the URLs, client ID and secret, scope and audience. **Get a token** fetches one now; **Forget token** throws it away.
+
+- **Client credentials** signs in as the application, with no browser.
+- **Authorization code** opens your browser, uses PKCE, and catches the redirect on a loopback port — register `http://127.0.0.1` as a redirect URI with your provider; the port changes each time, which is what loopback redirects are for.
+- **Device code** shows a short code and opens the page to type it on, then waits. Put the device authorization URL in the second field.
+
+Tokens are kept in the keyring, keyed by a fingerprint of those settings, and refreshed shortly before they expire (spending the refresh token when there is one), so a token survives a restart and never reaches a file.
 
 ### Where the time went
 

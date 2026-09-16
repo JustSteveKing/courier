@@ -1346,3 +1346,63 @@ auth.token_forgotten:
   es: Token olvidado. El próximo envío volverá a iniciar sesión.
   de: Token vergessen. Der nächste Versand meldet sich erneut an.
   fr: Token oublié. Le prochain envoi se reconnectera.
+oauth.no_auth_url:
+  en: This OAuth setup has no authorization URL to send you to.
+  es: Esta configuración de OAuth no tiene URL de autorización a la que enviarte.
+  de: Dieser OAuth-Einrichtung fehlt die Autorisierungs-URL.
+  fr: Cette configuration OAuth n'a pas d'URL d'autorisation où vous envoyer.
+oauth.no_device_url:
+  en: Device code needs the device authorization URL in the second field.
+  es: El código de dispositivo necesita la URL de autorización de dispositivo en el segundo campo.
+  de: Der Device Code braucht die Device-Authorization-URL im zweiten Feld.
+  fr: Le code d'appareil a besoin de l'URL d'autorisation d'appareil dans le second champ.
+oauth.no_listener:
+  en: "Could not listen for the sign-in to come back: %{error}"
+  es: "No se pudo escuchar la vuelta del inicio de sesión: %{error}"
+  de: "Die Rückkehr der Anmeldung konnte nicht abgewartet werden: %{error}"
+  fr: "Impossible d'attendre le retour de la connexion : %{error}"
+oauth.no_redirect:
+  en: "The sign-in never came back: %{error}"
+  es: "El inicio de sesión nunca volvió: %{error}"
+  de: "Die Anmeldung kam nie zurück: %{error}"
+  fr: "La connexion n'est jamais revenue : %{error}"
+oauth.no_code:
+  en: The provider came back without an authorization code.
+  es: El proveedor volvió sin código de autorización.
+  de: Der Anbieter kam ohne Autorisierungscode zurück.
+  fr: Le fournisseur est revenu sans code d'autorisation.
+oauth.bad_state:
+  en: That sign-in didn't match the one that started here, so it was ignored.
+  es: Ese inicio de sesión no coincide con el que empezó aquí, así que se ignoró.
+  de: Diese Anmeldung passte nicht zu der hier gestarteten und wurde ignoriert.
+  fr: Cette connexion ne correspond pas à celle lancée ici, elle a été ignorée.
+oauth.sign_in_timeout:
+  en: The sign-in took too long and was given up on.
+  es: El inicio de sesión tardó demasiado y se abandonó.
+  de: Die Anmeldung dauerte zu lange und wurde abgebrochen.
+  fr: La connexion a pris trop de temps et a été abandonnée.
+oauth.sign_in_cancelled:
+  en: The sign-in was cancelled.
+  es: Se canceló el inicio de sesión.
+  de: Die Anmeldung wurde abgebrochen.
+  fr: La connexion a été annulée.
+oauth.no_device_code:
+  en: The provider answered without a device code.
+  es: El proveedor respondió sin código de dispositivo.
+  de: Der Anbieter antwortete ohne Device Code.
+  fr: Le fournisseur a répondu sans code d'appareil.
+oauth.browser_done:
+  en: Signed in. You can close this tab and go back to Courier.
+  es: Sesión iniciada. Puedes cerrar esta pestaña y volver a Courier.
+  de: Angemeldet. Du kannst diesen Tab schließen und zu Courier zurückkehren.
+  fr: Connexion réussie. Vous pouvez fermer cet onglet et revenir à Courier.
+auth.token_in_browser:
+  en: Waiting for the sign-in in your browser…
+  es: Esperando el inicio de sesión en tu navegador…
+  de: Warte auf die Anmeldung in deinem Browser…
+  fr: En attente de la connexion dans votre navigateur…
+auth.token_device_code:
+  en: "Enter the code %{code} at %{url}"
+  es: "Introduce el código %{code} en %{url}"
+  de: "Gib den Code %{code} auf %{url} ein"
+  fr: "Saisissez le code %{code} sur %{url}"

@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
+use crate::encoding::form_encode;
 use crate::model::{Auth, OAuthGrant, Variables, interpolate};
 use crate::secret_store::{SecretRef, SecretStore};
 
@@ -284,6 +285,268 @@ pub async fn fetch(config: &Config, client: &reqwest::Client, form: &[(&str, &st
     })
 }
 
+/// What a browser sign-in needs from whoever is driving it: somewhere to send the person.
+pub enum Prompt {
+    /// Open this URL, then wait for the redirect to come back.
+    Browser(String),
+    /// Show this code and URL; the person types the code there.
+    Device {
+        user_code: String,
+        verification_url: String,
+        /// The same page with the code filled in, when the provider offers one.
+        complete_url: Option<String>,
+    },
+}
+
+/// The authorization code grant with PKCE: opens a browser, catches the redirect on a
+/// loopback port, then swaps the code for tokens. `show` is called once with the URL.
+pub async fn authorization_code(config: &Config, show: impl FnOnce(Prompt)) -> Result<Tokens, String> {
+    config.check()?;
+    if config.auth_url.is_empty() {
+        return Err(t!("oauth.no_auth_url").to_string());
+    }
+    // Only loopback is allowed to be registered without a fixed port, so bind one now and
+    // tell the provider which it is.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| t!("oauth.no_listener", error = e.to_string()).to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| t!("oauth.no_listener", error = e.to_string()).to_string())?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let verifier = random_token();
+    let challenge = challenge_for(&verifier);
+    let state = random_token();
+
+    let separator = if config.auth_url.contains('?') { '&' } else { '?' };
+    let mut url = format!(
+        "{}{separator}response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+        config.auth_url,
+        form_encode(&config.client_id),
+        form_encode(&redirect_uri),
+        form_encode(&state),
+        form_encode(&challenge)
+    );
+    if !config.scope.is_empty() {
+        url.push_str(&format!("&scope={}", form_encode(&config.scope)));
+    }
+    if !config.audience.is_empty() {
+        url.push_str(&format!("&audience={}", form_encode(&config.audience)));
+    }
+    show(Prompt::Browser(url));
+
+    let code = wait_for_redirect(listener, state).await?;
+    fetch(
+        config,
+        crate::transport::plain_client(),
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("redirect_uri", &redirect_uri),
+            ("code_verifier", &verifier),
+        ],
+    )
+    .await
+}
+
+/// Waits for the provider to send the person back, on a thread so the socket's blocking
+/// accept doesn't hold up anything else. Times out rather than waiting forever.
+async fn wait_for_redirect(listener: std::net::TcpListener, state: String) -> Result<String, String> {
+    let (send, receive) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = send.send_blocking(read_redirect(listener, &state));
+    });
+    let waiting = async move {
+        receive
+            .recv()
+            .await
+            .unwrap_or_else(|_| Err(t!("oauth.sign_in_cancelled").to_string()))
+    };
+    crate::transport::on_runtime(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(300), waiting)
+            .await
+            .unwrap_or_else(|_| Err(t!("oauth.sign_in_timeout").to_string()))
+    })
+    .await
+}
+
+/// Reads the one request the browser makes to the loopback port and answers it with a page
+/// telling the person to go back to Courier.
+fn read_redirect(listener: std::net::TcpListener, state: &str) -> Result<String, String> {
+    use std::io::{BufRead as _, Write as _};
+    let (stream, _) = listener
+        .accept()
+        .map_err(|e| t!("oauth.no_redirect", error = e.to_string()).to_string())?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut request = String::new();
+    reader
+        .read_line(&mut request)
+        .map_err(|e| t!("oauth.no_redirect", error = e.to_string()).to_string())?;
+    let target = request.split_whitespace().nth(1).unwrap_or_default();
+    let query = target.split_once('?').map(|(_, query)| query).unwrap_or_default();
+    let mut code = None;
+    let mut returned_state = None;
+    let mut error = None;
+    for pair in query.split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = form_decode(value);
+        match name {
+            "code" => code = Some(value),
+            "state" => returned_state = Some(value),
+            "error_description" => error = Some(value),
+            "error" if error.is_none() => error = Some(value),
+            _ => {}
+        }
+    }
+    let outcome = match (code, error) {
+        (_, Some(error)) => Err(t!("oauth.provider_error", error = error).to_string()),
+        (None, None) => Err(t!("oauth.no_code").to_string()),
+        (Some(_), _) if returned_state.as_deref() != Some(state) => Err(t!("oauth.bad_state").to_string()),
+        (Some(code), None) => Ok(code),
+    };
+    let message = match &outcome {
+        Ok(_) => t!("oauth.browser_done").to_string(),
+        Err(error) => error.clone(),
+    };
+    let page = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Courier</title>\
+         <body style=\"font:16px system-ui;margin:4rem auto;max-width:28rem;text-align:center\">{message}</body>"
+    );
+    let _ = write!(
+        reader.get_mut(),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+        page.len()
+    );
+    outcome
+}
+
+#[derive(Deserialize)]
+struct DeviceResponse {
+    #[serde(default)]
+    device_code: String,
+    #[serde(default)]
+    user_code: String,
+    #[serde(default)]
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    #[serde(default)]
+    interval: Option<u64>,
+    #[serde(default)]
+    error_description: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// The device code grant: the person types a short code on another screen while this polls
+/// the token endpoint. `show` is called once with the code and where to type it.
+pub async fn device_code(config: &Config, show: impl FnOnce(Prompt)) -> Result<Tokens, String> {
+    config.check()?;
+    if config.auth_url.is_empty() {
+        return Err(t!("oauth.no_device_url").to_string());
+    }
+    let client = crate::transport::plain_client();
+    let mut fields = vec![("client_id", config.client_id.as_str())];
+    if !config.scope.is_empty() {
+        fields.push(("scope", config.scope.as_str()));
+    }
+    let body = form_body(&fields);
+    let request = client
+        .post(&config.auth_url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body);
+    let text = crate::transport::on_runtime(async move {
+        let response = request
+            .send()
+            .await
+            .map_err(|e| t!("oauth.request_failed", error = e.to_string()).to_string())?;
+        Ok::<_, String>(response.text().await.unwrap_or_default())
+    })
+    .await?;
+    let started: DeviceResponse = serde_json::from_str(&text).map_err(|_| {
+        let snippet: String = text.chars().take(200).collect();
+        t!("oauth.bad_response", status = 200, body = snippet).to_string()
+    })?;
+    if let Some(error) = started.error_description.or(started.error) {
+        return Err(t!("oauth.provider_error", error = error).to_string());
+    }
+    if started.device_code.is_empty() {
+        return Err(t!("oauth.no_device_code").to_string());
+    }
+    show(Prompt::Device {
+        user_code: started.user_code,
+        verification_url: started.verification_uri,
+        complete_url: started.verification_uri_complete,
+    });
+
+    // The provider says how often to ask; 5 seconds is the spec's default.
+    let interval = std::time::Duration::from_secs(started.interval.unwrap_or(5).clamp(1, 60));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        let attempt = fetch(
+            config,
+            client,
+            &[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", &started.device_code),
+            ],
+        )
+        .await;
+        match attempt {
+            Ok(tokens) => return Ok(tokens),
+            // "not yet" and "slow down" are the provider asking us to keep waiting.
+            Err(message) if message.contains("authorization_pending") || message.contains("slow_down") => {}
+            Err(message) => return Err(message),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(t!("oauth.sign_in_timeout").to_string());
+        }
+        crate::transport::on_runtime(async move { tokio::time::sleep(interval).await }).await;
+    }
+}
+
+fn form_body(fields: &[(&str, &str)]) -> String {
+    fields
+        .iter()
+        .map(|(name, value)| format!("{}={}", form_encode(name), form_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn form_decode(text: &str) -> String {
+    let bytes = text.replace('+', " ").into_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&String::from_utf8_lossy(&bytes[index + 1..index + 3]), 16)
+        {
+            out.push(byte);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A random, URL-safe string for PKCE verifiers and state.
+fn random_token() -> String {
+    let bytes: Vec<u8> = (0..2).flat_map(|_| uuid::Uuid::new_v4().into_bytes()).collect();
+    crate::encoding::base64_url_encode(&bytes)
+}
+
+/// The PKCE S256 challenge for a verifier.
+fn challenge_for(verifier: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    crate::encoding::base64_url_encode(&Sha256::digest(verifier.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +666,133 @@ mod tests {
         // Forgetting means the next send starts over.
         runtime.block_on(forget(&config, "c1", Some(&store)));
         assert!(runtime.block_on(store.get(&secret)).unwrap().is_none());
+    }
+
+    #[test]
+    fn signs_in_through_the_browser_with_pkce() {
+        let (url, seen) = token_server(vec![(
+            200,
+            r#"{"access_token":"from-code","token_type":"Bearer","expires_in":600,"refresh_token":"r9"}"#,
+        )]);
+        let mut config = config(url);
+        // A public client: no secret, so the client id goes in the body.
+        config.client_secret = String::new();
+        config.grant = OAuthGrant::AuthorizationCode;
+        config.auth_url = "https://id.example/authorize?prompt=consent".into();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Stand in for the browser: read the URL, then call back with the code.
+        let (sent_url, browser) = std::sync::mpsc::channel();
+        let tokens = runtime.block_on(async move {
+            let (browser_done, wait) = async_channel::bounded::<()>(1);
+            std::thread::spawn(move || {
+                let url: String = browser.recv().unwrap();
+                let query = url.split_once('?').unwrap().1;
+                let field = |name: &str| {
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                assert_eq!(field("response_type"), "code");
+                assert_eq!(field("code_challenge_method"), "S256");
+                assert!(!field("code_challenge").is_empty(), "PKCE challenge is sent");
+                assert!(field("redirect_uri").contains("127.0.0.1"), "loopback redirect");
+                let redirect = form_decode(&field("redirect_uri"));
+                let state = field("state");
+                // What the browser does after the person signs in.
+                let response = std::process::Command::new("curl")
+                    .args([
+                        "-s",
+                        "-o",
+                        "/dev/null",
+                        &format!("{redirect}?code=abc123&state={state}"),
+                    ])
+                    .status();
+                assert!(response.is_ok_and(|status| status.success()));
+                let _ = browser_done.send_blocking(());
+            });
+            let tokens = authorization_code(&config, |prompt| {
+                let Prompt::Browser(url) = prompt else {
+                    panic!("expected a browser prompt")
+                };
+                sent_url.send(url).unwrap();
+            })
+            .await;
+            let _ = wait.recv().await;
+            tokens
+        });
+
+        let tokens = tokens.unwrap();
+        assert_eq!(tokens.access_token, "from-code");
+        let posted = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(posted.contains("grant_type=authorization_code"), "{posted}");
+        assert!(posted.contains("code=abc123"), "{posted}");
+        assert!(
+            posted.contains("code_verifier="),
+            "the verifier proves it was us: {posted}"
+        );
+        assert!(
+            posted.contains("client_id=courier"),
+            "a public client identifies in the body"
+        );
+    }
+
+    #[test]
+    fn signs_in_with_a_device_code() {
+        // The same port answers the device request, then a "not yet", then the token.
+        let (url, seen) = token_server(vec![
+            (
+                200,
+                r#"{"device_code":"dev-1","user_code":"WDJB-MJHT","verification_uri":"https://id.example/device","verification_uri_complete":"https://id.example/device?code=WDJB-MJHT","interval":1}"#,
+            ),
+            (400, r#"{"error":"authorization_pending"}"#),
+            (
+                200,
+                r#"{"access_token":"from-device","token_type":"Bearer","expires_in":600}"#,
+            ),
+        ]);
+        let mut config = config(url.clone());
+        config.grant = OAuthGrant::DeviceCode;
+        config.auth_url = url;
+        config.client_secret = String::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let shown = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorded = shown.clone();
+        let tokens = runtime
+            .block_on(device_code(&config, move |prompt| {
+                *recorded.lock().unwrap() = Some(prompt);
+            }))
+            .unwrap();
+        assert_eq!(tokens.access_token, "from-device");
+        match shown.lock().unwrap().take() {
+            Some(Prompt::Device {
+                user_code,
+                verification_url,
+                complete_url,
+            }) => {
+                assert_eq!(user_code, "WDJB-MJHT");
+                assert_eq!(verification_url, "https://id.example/device");
+                assert!(complete_url.is_some(), "the shortcut URL is passed on");
+            }
+            other => panic!("expected a device prompt, got {}", other.is_some()),
+        }
+        let asked = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(asked.contains("client_id=courier"), "{asked}");
+        let polled = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(polled.contains("device_code=dev-1"), "{polled}");
+        assert!(
+            polled.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"),
+            "{polled}"
+        );
     }
 
     #[test]

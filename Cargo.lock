@@ -1563,6 +1563,7 @@ dependencies = [
  "serde_json",
  "serde_json_path",
  "serde_norway",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-rustls",
