@@ -1201,3 +1201,43 @@ request.timing_address:
   es: "→ %{address}"
   de: "→ %{address}"
   fr: "→ %{address}"
+request.timing_tab:
+  en: Timing
+  es: Tiempos
+  de: Zeiten
+  fr: Temps
+request.timing_tab_total:
+  en: "Timing %{total}"
+  es: "Tiempos %{total}"
+  de: "Zeiten %{total}"
+  fr: "Temps %{total}"
+request.timing_total:
+  en: Total
+  es: Total
+  de: Gesamt
+  fr: Total
+request.timing_address_label:
+  en: Address
+  es: Dirección
+  de: Adresse
+  fr: Adresse
+request.timing_size:
+  en: Body size
+  es: Tamaño del cuerpo
+  de: Body-Größe
+  fr: Taille du corps
+request.timing_connection:
+  en: Connection
+  es: Conexión
+  de: Verbindung
+  fr: Connexion
+request.timing_opened:
+  en: opened for this request
+  es: abierta para esta solicitud
+  de: für diese Anfrage geöffnet
+  fr: ouverte pour cette requête
+request.timing_hint:
+  en: Connect covers the TCP handshake and, over HTTPS, the TLS handshake with it.
+  es: La conexión incluye el saludo TCP y, en HTTPS, también el saludo TLS.
+  de: Die Verbindung umfasst den TCP-Handshake und bei HTTPS auch den TLS-Handshake.
+  fr: La connexion couvre la poignée de main TCP et, en HTTPS, celle de TLS avec elle.

@@ -47,7 +47,7 @@ Or use **Open project…** in the app.
 
 ### Where the time went
 
-Under each response is a bar breaking the time down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, with the address it actually reached. A request that reused a pooled connection says so instead of showing zeros. `courier send` prints the same breakdown on stderr.
+Under each response is a bar breaking the time down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, with the address it actually reached. The **Timing** tab, beside Body and Headers, lays the same phases out as a waterfall with the total, the address, the body size, and whether the connection was opened or reused. `courier send` prints the breakdown on stderr.
 
 ### Reading responses
 

@@ -6071,5 +6071,14 @@ components:
             assert!(window.try_find("response-timing").is_some());
         })
         .unwrap();
+
+        // And the Timing tab shows the breakdown in full.
+        let editor_entity = editor.clone();
+        cx.update_window(window, |_, window, cx| {
+            editor_entity.update(cx, |editor, cx| editor.show_timing_tab_for_test(cx));
+            window.render_frame(cx);
+            assert!(window.try_find("timing-tab").is_some(), "the tab renders");
+        })
+        .unwrap();
     }
 }

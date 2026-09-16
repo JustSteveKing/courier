@@ -156,6 +156,7 @@ enum ResponseTab {
     Body,
     Headers,
     Checks,
+    Timing,
     Schema,
 }
 
@@ -750,6 +751,12 @@ impl RequestEditor {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn show_timing_tab_for_test(&mut self, cx: &mut Context<Self>) {
+        self.response_tab = ResponseTab::Timing;
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -2106,6 +2113,131 @@ impl RequestEditor {
             .into_any_element()
     }
 
+    /// The timing tab: each phase as a row of the waterfall, then the connection's details.
+    fn render_timing_tab(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(response) = self
+            .state()
+            .filter(|state| state.live.is_none())
+            .and_then(ResponseState::shown)
+        else {
+            return div().into_any_element();
+        };
+        let Some(timing) = response.timing.clone() else {
+            return div().into_any_element();
+        };
+        let total = timing.total_ms().max(1);
+        // Each phase follows the one before it, so the bars step across like a waterfall.
+        let mut offset = 0u64;
+        let mut rows = Vec::new();
+        for (name, ms, color) in [
+            (
+                t!("request.timing_dns").to_string(),
+                timing.dns_ms.unwrap_or_default(),
+                theme.info,
+            ),
+            (
+                t!("request.timing_connect").to_string(),
+                timing.connect_ms.unwrap_or_default(),
+                theme.warning,
+            ),
+            (
+                t!("request.timing_waiting").to_string(),
+                timing.waiting_ms(),
+                theme.primary,
+            ),
+            (
+                t!("request.timing_download").to_string(),
+                timing.download_ms,
+                theme.success,
+            ),
+        ] {
+            let start = offset;
+            offset += ms;
+            if ms == 0 {
+                continue;
+            }
+            rows.push(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .text_sm()
+                    .child(div().w_24().flex_none().text_color(theme.muted_foreground).child(name))
+                    .child(
+                        div().flex_1().min_w_0().h(px(10.)).child(
+                            div()
+                                .h_full()
+                                .ml(relative(start as f32 / total as f32))
+                                .w(relative(ms as f32 / total as f32))
+                                .min_w(px(2.))
+                                .rounded_sm()
+                                .bg(color),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .w_20()
+                            .flex_none()
+                            .text_right()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_xs()
+                            .child(format_duration(ms)),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let detail = |name: String, value: String| {
+            h_flex()
+                .gap_3()
+                .text_sm()
+                .child(div().w_24().flex_none().text_color(theme.muted_foreground).child(name))
+                .child(div().min_w_0().truncate().child(value))
+        };
+        let size = match &response.outcome {
+            Outcome::Response { body_size, .. } => Some(format_size(*body_size)),
+            Outcome::Error { .. } => None,
+        };
+
+        v_flex()
+            .id("timing-tab")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_2()
+            .gap_2()
+            .children(rows)
+            .child(div().h(px(8.)))
+            .child(detail(
+                t!("request.timing_total").to_string(),
+                format_duration(timing.total_ms()),
+            ))
+            .children(
+                timing
+                    .address
+                    .clone()
+                    .map(|address| detail(t!("request.timing_address_label").to_string(), address)),
+            )
+            .children(size.map(|size| detail(t!("request.timing_size").to_string(), size)))
+            .child(detail(
+                t!("request.timing_connection").to_string(),
+                if timing.reused() {
+                    t!("request.timing_reused").to_string()
+                } else {
+                    t!("request.timing_opened").to_string()
+                },
+            ))
+            .child(
+                div()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(t!("request.timing_hint").to_string()),
+            )
+            .into_any_element()
+    }
+
     /// A bar showing where a response's time went, with each phase in its own colour.
     fn render_timing(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme();
@@ -2330,6 +2462,14 @@ impl Render for RequestEditor {
         if has_checks {
             tabs.push(ResponseTab::Checks);
         }
+        let timing = self
+            .state()
+            .filter(|state| state.live.is_none())
+            .and_then(ResponseState::shown)
+            .and_then(|response| response.timing.clone());
+        if timing.is_some() {
+            tabs.push(ResponseTab::Timing);
+        }
         if graphql {
             tabs.push(ResponseTab::Schema);
         }
@@ -2355,6 +2495,7 @@ impl Render for RequestEditor {
             (None, None) => t!("request.body").to_string(),
         };
         let response_view = match (ws_log, sse_log) {
+            _ if response_tab == ResponseTab::Timing => self.render_timing_tab(cx),
             _ if response_tab == ResponseTab::Schema => self.render_schema(cx),
             _ if response_tab == ResponseTab::Checks => self.render_checks(cx),
             (Some(log), _) if response_tab == ResponseTab::Body => self.render_ws(log, cx),
@@ -2579,6 +2720,16 @@ impl Render for RequestEditor {
                                                             total = results.len()
                                                         ),
                                                         None => t!("request.checks_tab"),
+                                                    };
+                                                    bar.child(Tab::new().label(label.to_string()))
+                                                })
+                                                .when(timing.is_some(), |bar| {
+                                                    let label = match &timing {
+                                                        Some(timing) => t!(
+                                                            "request.timing_tab_total",
+                                                            total = format_duration(timing.total_ms())
+                                                        ),
+                                                        None => t!("request.timing_tab"),
                                                     };
                                                     bar.child(Tab::new().label(label.to_string()))
                                                 })
