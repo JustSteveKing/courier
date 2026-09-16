@@ -24,6 +24,116 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use crate::http::{Request, Upload, UploadValue};
 use crate::model::{EffectiveSettings, ProxySetting, content_type_for};
 
+/// What the connection cost, filled in while a request is being sent. A request that
+/// reused a pooled connection leaves both times unset.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Phases {
+    pub dns: Option<Duration>,
+    pub connect: Option<Duration>,
+    /// The address actually connected to, for the timing panel.
+    pub address: Option<String>,
+}
+
+tokio::task_local! {
+    /// The send in flight on this task, so the resolver and connector can report to it.
+    static PHASES: Arc<Mutex<Phases>>;
+}
+
+fn record(write: impl FnOnce(&mut Phases)) {
+    let _ = PHASES.try_with(|phases| {
+        if let Ok(mut phases) = phases.lock() {
+            write(&mut phases);
+        }
+    });
+}
+
+/// Resolves names the way the standard library does, timing it and keeping the address.
+struct TimedDns;
+
+impl reqwest::dns::Resolve for TimedDns {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let started = Instant::now();
+            let host = name.as_str().to_string();
+            let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect();
+            let elapsed = started.elapsed();
+            let first = addresses.first().map(|address| address.ip().to_string());
+            record(|phases| {
+                phases.dns = Some(elapsed);
+                phases.address = first;
+            });
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Times opening a connection (TCP, and the TLS handshake for https).
+#[derive(Clone)]
+struct TimeConnect;
+
+impl<S> tower_layer::Layer<S> for TimeConnect {
+    type Service = TimedConnect<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        TimedConnect { inner }
+    }
+}
+
+#[derive(Clone)]
+struct TimedConnect<S> {
+    inner: S,
+}
+
+impl<S, Request> tower_service::Service<Request> for TimedConnect<S>
+where
+    S: tower_service::Service<Request>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = TimedConnecting<S::Future>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        TimedConnecting {
+            inner: self.inner.call(request),
+            started: Instant::now(),
+        }
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct TimedConnecting<F> {
+        #[pin]
+        inner: F,
+        started: Instant,
+    }
+}
+
+impl<F, T, E> std::future::Future for TimedConnecting<F>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    type Output = Result<T, E>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let this = self.project();
+        let started = *this.started;
+        let ready = this.inner.poll(cx);
+        if let std::task::Poll::Ready(Ok(_)) = &ready {
+            let elapsed = started.elapsed();
+            // Connecting includes resolving, which is timed separately.
+            record(|phases| phases.connect = Some(elapsed.saturating_sub(phases.dns.unwrap_or_default())));
+        }
+        ready
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// The status line and headers arrived.
@@ -34,6 +144,8 @@ pub enum Event {
         elapsed: Duration,
         /// The body is a Server-Sent Events stream; expect [`Event::Sse`] rather than chunks.
         event_stream: bool,
+        /// What the connection cost, when this request opened one.
+        phases: Phases,
     },
     /// Part of a plain response body.
     Chunk(Vec<u8>),
@@ -102,6 +214,8 @@ fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         let _runtime = runtime().enter();
         reqwest::Client::builder()
+            .dns_resolver(std::sync::Arc::new(TimedDns))
+            .connector_layer(TimeConnect)
             .build()
             .expect("could not create the HTTP client")
     })
@@ -269,6 +383,8 @@ pub fn client_for(options: &ClientOptions, cookies: Option<&Cookies>) -> Result<
         builder = builder.cookie_provider(cookies.clone());
     }
     let client = builder
+        .dns_resolver(std::sync::Arc::new(TimedDns))
+        .connector_layer(TimeConnect)
         .build()
         .map_err(|e| format!("could not set up the connection: {}", describe(&e)))?;
     clients.lock().unwrap().insert(key, client.clone());
@@ -335,10 +451,13 @@ pub fn start_http(
         }
 
         let started = Instant::now();
-        let response = tokio::time::timeout(head_timeout, builder.send())
+        let phases = Arc::new(Mutex::new(Phases::default()));
+        let response = PHASES
+            .scope(phases.clone(), tokio::time::timeout(head_timeout, builder.send()))
             .await
             .map_err(|_| format!("timed out after {}s waiting for a response", head_timeout.as_secs()))?
             .map_err(|e| describe(&e))?;
+        let phases = phases.lock().map(|phases| phases.clone()).unwrap_or_default();
 
         let status = response.status();
         let event_stream = response
@@ -352,6 +471,7 @@ pub fn start_http(
             headers: headers_of(response.headers()),
             elapsed: started.elapsed(),
             event_stream,
+            phases,
         };
         if events.send(head).await.is_err() {
             return Ok(());
@@ -423,6 +543,7 @@ pub fn start_websocket(request: Request, connect_timeout: Duration) -> (Handle, 
                 .collect(),
             elapsed: started.elapsed(),
             event_stream: false,
+            phases: Phases::default(),
         };
         if events.send(head).await.is_err() {
             return Ok(());
@@ -844,6 +965,45 @@ mod tests {
         assert!(
             matches!(&events[..], [Event::Failed(message)] if message.contains("missing.bin")),
             "{events:?}"
+        );
+    }
+
+    #[test]
+    fn reports_where_the_time_went() {
+        let port = serve_once(|mut stream, _| {
+            std::thread::sleep(Duration::from_millis(60));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+                .unwrap();
+        });
+        // "localhost" so the name is actually resolved, unlike a literal address.
+        let (_handle, events) = start_http(
+            get(&format!("http://localhost:{port}/")),
+            Duration::from_secs(5),
+            None,
+            None,
+        );
+        let events = collect(&events, Duration::from_secs(5));
+        let Some(Event::Head { elapsed, phases, .. }) = events.iter().find(|e| matches!(e, Event::Head { .. })) else {
+            panic!("no head: {events:?}");
+        };
+        assert!(phases.dns.is_some(), "the name was resolved: {phases:?}");
+        assert!(phases.connect.is_some(), "a connection was opened: {phases:?}");
+        assert!(
+            phases
+                .address
+                .as_deref()
+                .is_some_and(|a| a.contains("127.0.0.1") || a.contains("::1")),
+            "{phases:?}"
+        );
+        let connection = phases.dns.unwrap_or_default() + phases.connect.unwrap_or_default();
+        assert!(
+            connection <= *elapsed,
+            "connecting is part of the first byte: {connection:?} > {elapsed:?}"
+        );
+        assert!(
+            *elapsed >= Duration::from_millis(50),
+            "waiting for the slow server counts: {elapsed:?}"
         );
     }
 

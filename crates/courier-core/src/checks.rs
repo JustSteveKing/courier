@@ -392,6 +392,7 @@ mod tests {
 
     fn response(status: u16, body: &str) -> StoredResponse {
         StoredResponse {
+            timing: None,
             received_at: 0,
             elapsed_ms: 120,
             outcome: Outcome::Response {

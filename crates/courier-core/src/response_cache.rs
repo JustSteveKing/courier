@@ -44,6 +44,42 @@ pub struct StoredResponse {
     pub received_at: u64,
     pub elapsed_ms: u64,
     pub outcome: Outcome,
+    /// Where the time went, when it was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Timing>,
+}
+
+/// How long each part of an exchange took. A reused connection has no `dns` or `connect`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Timing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    /// From sending to the first byte of the response head.
+    pub ttfb_ms: u64,
+    /// From the head to the last byte of the body.
+    pub download_ms: u64,
+    /// The address the request went to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+impl Timing {
+    /// Waiting for the server: the part of the first byte that wasn't spent connecting.
+    pub fn waiting_ms(&self) -> u64 {
+        self.ttfb_ms
+            .saturating_sub(self.dns_ms.unwrap_or_default() + self.connect_ms.unwrap_or_default())
+    }
+
+    pub fn total_ms(&self) -> u64 {
+        self.ttfb_ms + self.download_ms
+    }
+
+    /// Whether the connection came from the pool rather than being opened.
+    pub fn reused(&self) -> bool {
+        self.dns_ms.is_none() && self.connect_ms.is_none()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -79,6 +115,7 @@ impl StoredResponse {
             outcome: Outcome::Error {
                 message: message.into(),
             },
+            timing: None,
         }
     }
 
@@ -341,6 +378,7 @@ mod tests {
 
     fn response(body: &str, received_at: u64) -> StoredResponse {
         StoredResponse {
+            timing: None,
             received_at,
             elapsed_ms: 42,
             outcome: Outcome::Response {

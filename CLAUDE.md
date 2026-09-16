@@ -26,7 +26,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 - `secret_store.rs` (keyring / encrypted-file fallback), `credentials.rs` (spotting and hoisting literal credentials)
 - Request settings: `model::RequestSettings` (collection → folder `.folder.yaml` → request, merged by `overlay`, resolved with `resolve`), `transport::ClientOptions`/`client_for` (cached clients), `settings_form.rs` (dialog)
 - `chain.rs` (template functions: `response()`/`response_header()` chaining, `uuid()` etc.; evaluated in `resolve_in_background` before `Request::resolve`)
-- `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL and upload bodies: `Request::resolve_in` takes the project dir, since upload paths are relative to it), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels)
+- `response_cache.rs` (last response per request + tidy), `http.rs` (resolving a request, incl. GraphQL and upload bodies: `Request::resolve_in` takes the project dir, since upload paths are relative to it), `transport.rs` (HTTP/SSE/WebSocket on a tokio runtime; dropping the `Handle` cancels; a timed DNS resolver and a connector layer report `Phases` through a task-local, which becomes `response_cache::Timing`)
 - `request_editor/sse.rs`, `request_editor/ws.rs`: live views for event streams and WebSockets
 - `body_view.rs` in core: what a response body is (from Content-Type, then sniffing), XML pretty-printing and a small XPath; the editor picks its viewer from it
 - `graphql.rs` (introspection → `Schema`, `SchemaCache`), `graphql/assist.rs` (completions, hover and validation from query text; pure, unit-tested), `request_editor/schema.rs` (fetch, Schema tab, editor providers)

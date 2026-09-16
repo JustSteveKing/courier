@@ -378,14 +378,26 @@ async fn send(
     let (_handle, events) = transport::start_http(request, timeout, None, Some(client));
     let (mut head, mut body) = ((0, String::new(), Vec::new()), Vec::new());
     let mut bytes = 0;
+    let mut timing = None;
     loop {
         match events.recv().await {
             Ok(transport::Event::Head {
                 status,
                 reason,
                 headers,
+                elapsed,
+                phases,
                 ..
-            }) => head = (status, reason, headers),
+            }) => {
+                head = (status, reason, headers);
+                timing = Some(response_cache::Timing {
+                    dns_ms: phases.dns.map(|d| d.as_millis() as u64),
+                    connect_ms: phases.connect.map(|d| d.as_millis() as u64),
+                    ttfb_ms: elapsed.as_millis() as u64,
+                    download_ms: 0,
+                    address: phases.address,
+                });
+            }
             Ok(transport::Event::Chunk(chunk)) => {
                 bytes += chunk.len();
                 if body.len() < response_cache::MAX_SAVED_BODY {
@@ -396,7 +408,12 @@ async fn send(
                 bytes += event.data.len();
                 body.extend_from_slice(event.data.as_bytes());
             }
-            Ok(transport::Event::Done { .. }) => break,
+            Ok(transport::Event::Done { elapsed, .. }) => {
+                if let Some(timing) = &mut timing {
+                    timing.download_ms = (elapsed.as_millis() as u64).saturating_sub(timing.ttfb_ms);
+                }
+                break;
+            }
             Ok(transport::Event::Failed(message)) => return Err(format!("sending \"{}\": {message}", file.name)),
             Ok(transport::Event::Ws(_)) => {}
             Err(_) => return Err(format!("sending \"{}\": the connection closed", file.name)),
@@ -405,6 +422,7 @@ async fn send(
     Ok(StoredResponse {
         received_at: response_cache::now(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        timing,
         outcome: Outcome::Response {
             status: head.0,
             reason: head.1,
@@ -575,6 +593,7 @@ mod tests {
     #[test]
     fn picks_json_values() {
         let response = StoredResponse {
+            timing: None,
             received_at: 0,
             elapsed_ms: 0,
             outcome: Outcome::Response {

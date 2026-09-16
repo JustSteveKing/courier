@@ -6018,4 +6018,58 @@ components:
         cx.run_until_parked();
         assert_eq!(cx.update(|cx| editor.read(cx).response_body_text(cx)), "2");
     }
+
+    #[gpui_kit::test]
+    async fn a_response_records_where_its_time_went(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = setup(cx, tmp.path());
+        let root = create_example_project(tmp.path()).unwrap();
+        let path = root.join("get-json.yaml");
+        let (port, _received) = http_server("{\"ok\":true}");
+        let mut request: RequestFile = storage::read_yaml(&path).unwrap();
+        // "localhost" rather than an address, so there is a name to resolve.
+        request.url = format!("http://localhost:{port}/thing");
+        storage::write_yaml(&path, &request).unwrap();
+
+        let (workspace, window) = open_workspace(cx, &paths, launch(&root));
+        let editor = cx.update(|cx| workspace.read(cx).editor());
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |this, cx| {
+                this.reload_collection(&root, window, cx);
+                this.select_request(path.clone(), window, cx);
+            });
+            window.render_frame(cx);
+            window.click("send", cx);
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if cx.update(|cx| !editor.read(cx).is_sending() && editor.read(cx).shown_response().is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let timing = cx.update(|cx| editor.read(cx).shown_response().and_then(|(r, _)| r.timing.clone()));
+        let timing = timing.expect("the response records its timing");
+        assert!(timing.dns_ms.is_some() && timing.connect_ms.is_some(), "{timing:?}");
+        assert!(
+            timing
+                .address
+                .as_deref()
+                .is_some_and(|a| a.contains("127.0.0.1") || a.contains("::1")),
+            "{timing:?}"
+        );
+        assert!(
+            timing.dns_ms.unwrap_or_default() + timing.connect_ms.unwrap_or_default() <= timing.ttfb_ms,
+            "the phases fit inside the first byte: {timing:?}"
+        );
+        assert!(!timing.reused(), "this one opened a connection");
+        // The bar is on screen with the response.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("response-timing").is_some());
+        })
+        .unwrap();
+    }
 }

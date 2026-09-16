@@ -178,6 +178,8 @@ struct Live {
     bytes: usize,
     truncated: bool,
     last_repaint: Instant,
+    /// What the connection cost, from the head event.
+    timing: Option<response_cache::Timing>,
     /// Reconnecting to an event stream: keep the existing log and send `Last-Event-ID`.
     resume: bool,
     websocket: bool,
@@ -194,6 +196,7 @@ impl Live {
             handle: None,
             started: now,
             head: None,
+            timing: None,
             body: Vec::new(),
             bytes: 0,
             truncated: false,
@@ -1733,7 +1736,8 @@ impl RequestEditor {
                 reason,
                 headers,
                 event_stream,
-                ..
+                elapsed,
+                phases,
             } => {
                 let status_line = format!("{status} {reason}");
                 let headers_text = headers
@@ -1755,6 +1759,13 @@ impl RequestEditor {
                     state.sse = None;
                 }
                 live.head = Some((status, reason, headers));
+                live.timing = Some(response_cache::Timing {
+                    dns_ms: phases.dns.map(|d| d.as_millis() as u64),
+                    connect_ms: phases.connect.map(|d| d.as_millis() as u64),
+                    ttfb_ms: elapsed.as_millis() as u64,
+                    download_ms: 0,
+                    address: phases.address,
+                });
                 if current {
                     self.response_headers
                         .update(cx, |s, cx| s.set_value(headers_text, window, cx));
@@ -1804,9 +1815,14 @@ impl RequestEditor {
                 let received = std::mem::take(&mut live.body);
                 let body = String::from_utf8_lossy(&received).into_owned();
                 received_bytes = Some(received);
+                let timing = live.timing.take().map(|mut timing| {
+                    timing.download_ms = (elapsed.as_millis() as u64).saturating_sub(timing.ttfb_ms);
+                    timing
+                });
                 Some(StoredResponse {
                     received_at: response_cache::now(),
                     elapsed_ms: elapsed.as_millis() as u64,
+                    timing,
                     outcome: Outcome::Response {
                         status,
                         reason,
@@ -2088,6 +2104,87 @@ impl RequestEditor {
             .p_2()
             .child(img(image).max_w_full())
             .into_any_element()
+    }
+
+    /// A bar showing where a response's time went, with each phase in its own colour.
+    fn render_timing(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let timing = self
+            .state()
+            .filter(|state| state.live.is_none())
+            .and_then(ResponseState::shown)?
+            .timing
+            .clone()?;
+        let total = timing.total_ms().max(1);
+        let phases: Vec<(String, u64, Hsla)> = [
+            (
+                t!("request.timing_dns").to_string(),
+                timing.dns_ms.unwrap_or_default(),
+                theme.info,
+            ),
+            (
+                t!("request.timing_connect").to_string(),
+                timing.connect_ms.unwrap_or_default(),
+                theme.warning,
+            ),
+            (
+                t!("request.timing_waiting").to_string(),
+                timing.waiting_ms(),
+                theme.primary,
+            ),
+            (
+                t!("request.timing_download").to_string(),
+                timing.download_ms,
+                theme.success,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, ms, _)| *ms > 0)
+        .collect();
+        Some(
+            h_flex()
+                .id("response-timing")
+                .test_support()
+                .gap_2()
+                .items_center()
+                .child(
+                    h_flex()
+                        .w(px(150.))
+                        .h(px(6.))
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .bg(theme.muted)
+                        .children(
+                            phases
+                                .iter()
+                                .map(|(_, ms, color)| div().h_full().w(relative(*ms as f32 / total as f32)).bg(*color)),
+                        ),
+                )
+                .children(phases.iter().map(|(name, ms, color)| {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(div().size(px(6.)).rounded_full().bg(*color))
+                        .child(format!("{name} {}", format_duration(*ms)))
+                }))
+                .when(timing.reused(), |row| {
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(t!("request.timing_reused").to_string()),
+                    )
+                })
+                .children(timing.address.map(|address| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(t!("request.timing_address", address = address).to_string())
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_status(&self, event_stream: bool, cx: &Context<Self>) -> impl IntoElement {
@@ -2495,6 +2592,7 @@ impl Render for RequestEditor {
                                         ),
                                     ),
                             )
+                            .children(self.render_timing(cx))
                             .child(response_view),
                     ),
             )

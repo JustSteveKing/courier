@@ -1171,3 +1171,33 @@ request.hex_truncated:
   es: "… se muestran los primeros 4 KB de %{size}."
   de: "… die ersten 4 KB von %{size} werden gezeigt."
   fr: "… premiers 4 Ko sur %{size} affichés."
+request.timing_dns:
+  en: DNS
+  es: DNS
+  de: DNS
+  fr: DNS
+request.timing_connect:
+  en: Connect
+  es: Conexión
+  de: Verbindung
+  fr: Connexion
+request.timing_waiting:
+  en: Waiting
+  es: Espera
+  de: Warten
+  fr: Attente
+request.timing_download:
+  en: Download
+  es: Descarga
+  de: Download
+  fr: Téléchargement
+request.timing_reused:
+  en: connection reused
+  es: conexión reutilizada
+  de: Verbindung wiederverwendet
+  fr: connexion réutilisée
+request.timing_address:
+  en: "→ %{address}"
+  es: "→ %{address}"
+  de: "→ %{address}"
+  fr: "→ %{address}"

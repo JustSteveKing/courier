@@ -456,6 +456,21 @@ fn print_send(result: &RunResult, include: bool) {
                         colors.paint(if *status < 400 { "32" } else { "31" }, &status_line)
                     );
                 }
+                if let Some(timing) = &response.timing {
+                    let mut parts = Vec::new();
+                    if let Some(ms) = timing.dns_ms {
+                        parts.push(format!("dns {ms} ms"));
+                    }
+                    if let Some(ms) = timing.connect_ms {
+                        parts.push(format!("connect {ms} ms"));
+                    }
+                    parts.push(format!("waiting {} ms", timing.waiting_ms()));
+                    parts.push(format!("download {} ms", timing.download_ms));
+                    if let Some(address) = &timing.address {
+                        parts.push(format!("-> {address}"));
+                    }
+                    eprintln!("{}", colors.paint("2", &parts.join("  ")));
+                }
                 println!("{}", courier_core::http::pretty_body(body));
             }
             for check in &result.checks {

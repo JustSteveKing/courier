@@ -45,6 +45,10 @@ Or use **Open project…** in the app.
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
 
+### Where the time went
+
+Under each response is a bar breaking the time down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, with the address it actually reached. A request that reused a pooled connection says so instead of showing zeros. `courier send` prints the same breakdown on stderr.
+
 ### Reading responses
 
 The response pane follows the content type. JSON is pretty-printed and filtered with JSONPath, as before. XML and SOAP arrive indented and filter with a small XPath — `//entry/title/text()`, `//entry[2]/@id`, `*` for any element, namespaces ignored. Images render inline. HTML shows its source with **Open in browser**. Anything else that isn't text shows as a hex dump. **Save body…** writes the bytes exactly as they arrived to a file you pick.
