@@ -3928,13 +3928,25 @@ mod tests {
     /// the contents aren't where a click would land, and on a slow machine that is most of
     /// the time — every dialog interaction in these tests goes through here.
     fn click_in_dialog(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
+        settle(cx, window);
         cx.update_window(window, |_, window, cx| {
+            // A click that lands nowhere is invisible otherwise: the test fails later, on
+            // whatever the dialog was supposed to do.
+            assert!(window.has_active_dialog(cx), "no dialog to click {id} in");
             window.render_frame(cx);
             window.click(id, cx);
         })
         .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Lets animations finish and pending work run. Dialogs slide in and out, and a click
+    /// during either lands where the button isn't.
+    fn settle(cx: &mut TestAppContext, window: AnyWindowHandle) {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .unwrap();
         cx.run_until_parked();
     }
 
@@ -4181,6 +4193,7 @@ mod tests {
             window.close_dialog(cx);
         })
         .unwrap();
+        settle(cx, window);
 
         // From an OpenAPI spec: the name comes from the spec, then Create writes the collection.
         let spec = r#"
