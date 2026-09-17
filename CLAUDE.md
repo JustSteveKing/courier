@@ -59,6 +59,7 @@ Two crates: **`crates/courier-core`** is the engine with no UI (model, storage, 
 ## Testing gotchas
 
 - UI tests use `#[gpui_kit::test]` with the shared `setup`/`open_workspace` helpers in `workspace.rs` tests.
+- **Never click a dialog directly**: use `confirm_dialog` / `click_in_dialog`, which wait for the opening animation. Clicking mid-slide lands where the button isn't, which passes locally and fails on a slower CI runner.
 - A module that `use gpui_kit::*` exports GPUI's `test` macro, which shadows `#[test]`; test modules there add `use core::prelude::v1::test;` or import gpui-kit names explicitly.
 - Events from `window.press`/`click` are delivered when the `update_window` closure ends; split steps that depend on them into separate `update_window` calls.
 - UI tests that talk to `transport` need `cx.executor().allow_parking()` (done in `setup`), since events arrive from the tokio thread.

@@ -3924,6 +3924,25 @@ mod tests {
         (workspace.unwrap(), handle.into())
     }
 
+    /// Clicks a button inside a dialog, once its opening animation has settled. Mid-slide
+    /// the contents aren't where a click would land, and on a slow machine that is most of
+    /// the time — every dialog interaction in these tests goes through here.
+    fn click_in_dialog(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// The usual case: confirming a dialog.
+    fn confirm_dialog(cx: &mut TestAppContext, window: AnyWindowHandle) {
+        click_in_dialog(cx, window, "dialog-ok");
+    }
+
     fn launch(root: &Path) -> Option<Launch> {
         Some(Launch {
             dir: project::project_dir(root).to_path_buf(),
@@ -4009,11 +4028,7 @@ mod tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("dialog-cancel", cx);
-        })
-        .unwrap();
+        click_in_dialog(cx, window, "dialog-cancel");
         cx.run_until_parked();
         assert!(new_env.exists(), "cancel keeps the environment");
         cx.update_window(window, |_, window, cx| {
@@ -4023,11 +4038,7 @@ mod tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
-        })
-        .unwrap();
+        confirm_dialog(cx, window);
         cx.run_until_parked();
         assert!(!new_env.exists(), "environment file should be deleted");
         cx.update(|cx| {
@@ -4115,13 +4126,13 @@ mod tests {
             }),
         );
         cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx), "offers to create .courier");
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
         })
         .unwrap();
-        cx.run_until_parked();
+        confirm_dialog(cx, window);
         let root = einvoicing.join(".courier");
         assert!(read(&root.join("collection.yaml")).contains("name: einvoicing"));
         cx.update(|cx| {
@@ -4196,11 +4207,7 @@ components:
             });
         })
         .unwrap();
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
-        })
-        .unwrap();
+        confirm_dialog(cx, window);
         cx.run_until_parked();
         let root = project.join(".courier");
         let collection = storage::load_collection(&root).unwrap();
@@ -4373,11 +4380,7 @@ components:
                 window.input(text, cx);
             })
             .unwrap();
-            cx.update_window(window, |_, window, cx| {
-                window.render_frame(cx);
-                window.click("dialog-ok", cx);
-            })
-            .unwrap();
+            confirm_dialog(cx, window);
             cx.run_until_parked();
         };
 
@@ -4453,11 +4456,9 @@ components:
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx), "asks first");
             assert!(animals.exists());
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
         })
         .unwrap();
-        cx.run_until_parked();
+        confirm_dialog(cx, window);
         assert!(!animals.exists());
         // Its tab goes with it, leaving the request that was open in the other tab.
         cx.update(|cx| {
@@ -4830,13 +4831,13 @@ components:
             workspace.update(cx, |this, cx| this.edit_auth(public.clone(), window, cx));
         })
         .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx));
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
         })
         .unwrap();
-        cx.run_until_parked();
+        confirm_dialog(cx, window);
         assert_eq!(storage::read_folder(&public).auth, Auth::None, "kept as it was");
     }
 
@@ -5286,11 +5287,9 @@ components:
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             assert!(window.has_active_dialog(cx));
-            window.render_frame(cx);
-            window.click("dialog-ok", cx);
         })
         .unwrap();
-        cx.run_until_parked();
+        confirm_dialog(cx, window);
         cx.update_window(window, |_, window, cx| assert!(!window.has_active_dialog(cx)))
             .unwrap();
         let saved: RequestFile = storage::read_yaml(&get_json).unwrap();
