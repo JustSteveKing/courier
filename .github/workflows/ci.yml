@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build is worth more than a fast one; keep the output readable.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Format, clippy and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # What GPUI needs to build on Linux: Wayland and X11 headers, the Vulkan loader,
+      # and fontconfig and FreeType for text.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-xkb-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libvulkan-dev libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      # The UI tests drive the real app headlessly, and the transport tests start their own
+      # local servers (HTTP, TLS, WebSocket, gRPC), so nothing external is needed.
+      - name: Tests
+        run: cargo test --workspace

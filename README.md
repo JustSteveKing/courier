@@ -285,6 +285,8 @@ make test       # the whole workspace
 make check      # fmt, clippy and tests, as CI would
 ```
 
+Every push runs formatting, clippy and the full suite in CI; tagging `v0.1.0` builds release tarballs and puts them on a GitHub release.
+
 See [AGENTS.md](AGENTS.md) for using Courier from scripts and coding agents, and [CLAUDE.md](CLAUDE.md) for how the code is laid out.
 
 Tests include headless UI tests that drive the real app — clicks, typing, dialogs — with no display, and real local servers for HTTP, TLS, WebSocket and gRPC. `COURIER_THEME_DIR=/usr/share/omarchy/themes/<name> make run` previews an Omarchy theme without changing your desktop.

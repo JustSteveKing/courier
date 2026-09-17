@@ -1,0 +1,104 @@
+name: Release
+
+# Tagging v0.1.0 builds the binaries and puts them on a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (an existing one, for a rebuild)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            # Arm runners aren't on every plan; a missing one shouldn't hold up the
+            # x86_64 release.
+            optional: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-xkb-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libvulkan-dev libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # What someone installing from a tarball needs: the binary, the launcher entry and
+      # icon, shell completions the binary generates itself, and the documentation.
+      - name: Package
+        id: package
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [ -n "${{ inputs.tag }}" ] && version=$(echo "${{ inputs.tag }}" | sed 's/^v//')
+          name=courier-$version-${{ matrix.target }}
+          mkdir -p "$name"/{completions,share}
+          cp target/release/courier "$name/"
+          cp README.md LICENSE install.sh "$name/"
+          cp -r assets "$name/share/"
+          for shell in bash zsh fish; do
+            ./target/release/courier completions $shell > "$name/completions/courier.$shell"
+          done
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: build
+    # Publish what did build, even if an optional target couldn't.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Courier $TAG" \
+            --generate-notes \
+            || gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
