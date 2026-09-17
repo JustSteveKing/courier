@@ -3924,26 +3924,43 @@ mod tests {
         (workspace.unwrap(), handle.into())
     }
 
-    /// Clicks a button inside a dialog, once its opening animation has settled. Mid-slide
-    /// the contents aren't where a click would land, and on a slow machine that is most of
-    /// the time — every dialog interaction in these tests goes through here.
+    /// Clicks a button inside a dialog and makes sure the click actually took.
+    ///
+    /// A dialog slides in, and a click during that lands where the button isn't. The
+    /// animation runs on real time, not the test clock, so this renders, clicks, and looks
+    /// at whether the dialog closed — trying again for up to a second if it didn't. Without
+    /// this, tests pass on a quick machine and fail on a slow one.
     fn click_in_dialog(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
-        settle(cx, window);
-        cx.update_window(window, |_, window, cx| {
-            // A click that lands nowhere is invisible otherwise: the test fails later, on
-            // whatever the dialog was supposed to do.
-            assert!(window.has_active_dialog(cx), "no dialog to click {id} in");
-            window.render_frame(cx);
-            window.click(id, cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
+        for attempt in 0..25 {
+            settle(cx, window);
+            let clicked = cx
+                .update_window(window, |_, window, cx| {
+                    if window.try_find(id).is_none() {
+                        return false;
+                    }
+                    window.click(id, cx);
+                    true
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let open = cx
+                .update_window(window, |_, window, cx| window.has_active_dialog(cx))
+                .unwrap();
+            if clicked && !open {
+                return;
+            }
+            assert!(
+                attempt < 24,
+                "clicking {id} never closed the dialog; it was {}",
+                if clicked { "clicked" } else { "not even on screen" }
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
-    /// Lets animations finish and pending work run. Dialogs slide in and out, and a click
-    /// during either lands where the button isn't.
+    /// Lets animations finish and pending work run.
     fn settle(cx: &mut TestAppContext, window: AnyWindowHandle) {
-        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.executor().advance_clock(Duration::from_millis(500));
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| window.render_frame(cx))
             .unwrap();
