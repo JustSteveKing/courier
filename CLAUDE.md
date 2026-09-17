@@ -1,16 +1,22 @@
 # Courier
 
-Native Linux API client (Postman/Yaak-style) in Rust on gpui-kit. See README.md for the product; this file is how to work on it.
+Native Linux API client (Postman/Yaak-style) in Rust on gpui-kit. README.md is the product;
+AGENTS.md is how scripts and agents drive it; this file is how to work on the code.
 
 ## Commands
 
+`make` lists everything. The ones that matter:
+
 ```sh
-cargo test --workspace      # all tests: the app (headless UI tests) and courier-core
-cargo clippy --workspace --all-targets  # must be clean
-cargo fmt --all             # rustfmt.toml: max_width 120
-cargo run -- <project-dir>
-COURIER_THEME_DIR=/usr/share/omarchy/themes/<name> cargo run   # preview a theme
+make check                  # fmt-check, clippy and the whole test suite, as CI would
+make test                   # cargo test --workspace (app UI tests + core + cli)
+make test-one T=name        # one test, with its output
+make run PROJECT=~/Work/my-api
+make restart                # rebuild and restart the running app
+make run THEME=tokyo-night  # preview an Omarchy theme
 ```
+
+Clippy must be clean; rustfmt.toml sets max_width 120.
 
 After moving the repo, `cargo clean -p courier` (tests locate files via `env!("CARGO_MANIFEST_DIR")`).
 

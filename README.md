@@ -2,144 +2,248 @@
 
 A fast, native API client for Linux, in the spirit of Postman and Yaak, without Electron or Tauri. Built with Rust and [GPUI](https://www.gpui.rs/) via [gpui-kit](https://github.com/longbridge/gpui-kit).
 
-- **A scratchpad for quick requests** (<kbd>Ctrl</kbd>+<kbd>N</kbd>), always in the sidebar without creating a project; move a request into a project when it earns a place.
-- **Requests live with your code.** A project's requests and environments are plain YAML in a `.courier/` folder inside the project, so they're reviewed and versioned in git like everything else.
-- **Secrets stay out of git.** Collections store secret *names*; values go in your desktop keyring (GNOME Keyring, KWallet, KeePassXC), or an encrypted file when there isn't one.
-- **Feels at home on Linux.** XDG directories, desktop portals for file pickers, and on [Omarchy](https://omarchy.org) it follows your theme and font live.
-- **Request settings:** redirects, timeouts, TLS verification, extra CA and client certificates (mTLS), proxy, and HTTP over Unix sockets (Docker, Podman, systemd), set on a collection, folder or request.
-- **Everyday tools:** query params beside the URL, auth (Basic, Bearer, API key) inherited from folders and collections, a cookie jar per collection, response history, JSONPath filtering and Copy as curl.
-- **Checks:** assertions per request (`status == 200`, `$.id exists`, `header Content-Type contains json`, `time < 500`) with a pass/fail tab, and **Add check** from the JSONPath filter.
-- **Request chaining:** use another request's response with `{{ response("Login", "$.token") }}` or `{{ response_header("Login", "Location") }}`; Courier sends it first when it has no response yet (add `"always"`, or a maximum age like `"5m"`, to control re-sending). Also `{{ uuid() }}`, `{{ timestamp() }}` and `{{ now() }}`. Right-click a request for **Copy response reference**.
-- **Beyond plain HTTP:** streamed responses with Cancel, Server-Sent Events as a live, filterable event list with reconnect, WebSockets with a message timeline and saved message templates, and GraphQL queries with variables, plus a browsable schema, autocomplete, hover docs and mistakes underlined as you type, from introspection.
-- **Start from what you have:** New project creates a blank collection or one from a Postman collection, an OpenAPI 3 / Swagger 2 spec (a request per operation with example bodies, an environment per server) or an AsyncAPI 2/3 spec (a WebSocket request per channel with message templates). You can also paste a curl command or import a Postman environment. Literal tokens are moved into secrets automatically.
-- **Command palette** (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) for requests, actions, environments and settings.
-- **Languages:** English, Español, Deutsch, Français.
+Your requests are plain YAML files inside the project they belong to, so they are reviewed and versioned like the rest of your code. Secrets never go near them. It starts in about 90 ms and idles around 100 MB.
+
+**Speaks** HTTP · Server-Sent Events · WebSocket · GraphQL · gRPC
+
+---
+
+## Contents
+
+- [Install](#install) · [First request](#first-request) · [Projects and the scratchpad](#projects-and-the-scratchpad)
+- [Writing requests](#writing-requests): [variables and environments](#variables-and-environments) · [secrets](#secrets) · [auth](#auth) · [bodies and uploads](#bodies-and-uploads) · [settings](#request-settings)
+- [Sending](#sending): [responses](#reading-responses) · [timing](#where-the-time-went) · [checks](#checks) · [chaining](#chaining-requests) · [runs](#running-a-folder-or-collection)
+- [Protocols](#protocols): [SSE](#server-sent-events) · [WebSocket](#websockets) · [GraphQL](#graphql) · [gRPC](#grpc)
+- [Moving around](#moving-around): [tabs](#tabs) · [search and drag](#finding-and-arranging-requests) · [keyboard](#keyboard) · [git](#git-awareness)
+- [From a terminal or CI](#from-a-terminal-or-ci) · [Import](#importing) · [Export](#exporting)
+- [Files on disk](#files-on-disk) · [Development](#development)
+
+---
 
 ## Install
 
-Requirements (Arch package names; other distros have equivalents):
+Requirements (Arch package names; other distributions have equivalents):
 
-- Build: `rustup` (stable Rust 1.88 or newer), `base-devel`
-- Run: `wayland`, `libxkbcommon`, `vulkan-icd-loader` plus a Vulkan driver (`vulkan-radeon`, `vulkan-intel` or `nvidia-utils`), `xdg-desktop-portal` with a backend (e.g. `xdg-desktop-portal-gtk`)
-- Optional: `gnome-keyring` or `kwallet` for secrets, `fontconfig` for the Omarchy font
+- **Build:** `rustup` (stable Rust 1.88 or newer), `base-devel`
+- **Run:** `wayland`, `libxkbcommon`, `vulkan-icd-loader` plus a Vulkan driver (`vulkan-radeon`, `vulkan-intel` or `nvidia-utils`), `xdg-desktop-portal` with a backend such as `xdg-desktop-portal-gtk`
+- **Optional:** `gnome-keyring`, `kwallet` or KeePassXC for secrets; `fontconfig` for the Omarchy font; `git` for the change marks; `protoc` is *not* needed for gRPC
 
 ```sh
-./install.sh            # builds a release binary, installs to ~/.local
+./install.sh              # builds a release binary and installs into ~/.local
 ./install.sh --uninstall
+PREFIX=/opt/courier ./install.sh
 ```
 
-This installs `~/.local/bin/courier`, a launcher entry and an icon, so Courier shows up in your app menu. Set `PREFIX` to install elsewhere.
+That installs `~/.local/bin/courier`, a launcher entry and an icon, so Courier appears in your app menu.
 
-## Usage
+## First request
 
 ```sh
-courier                 # opens the project containing the current directory, if any
-courier ~/Work/my-api   # opens that project (offers to create .courier/ if it has none)
+courier                   # opens the project containing the current directory, if any
+courier ~/Work/my-api     # opens that project, offering to create .courier/ if it has none
 ```
 
-Or use **Open project…** in the app.
+Press <kbd>Ctrl</kbd>+<kbd>N</kbd> for a scratchpad request, type a URL, press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>. Or paste a curl command straight into the URL bar — method, headers and body come with it.
 
-| Shortcut | Action |
+## Projects and the scratchpad
+
+A **project** is any folder with a `.courier/` directory in it. That directory holds the collection: one YAML file per request, folders as directories, environments in `environments/`. It belongs in git.
+
+The **scratchpad** is always in the sidebar, needs no project, and is where quick one-off requests live. Drag a request out of it into a project when it earns a place.
+
+---
+
+## Writing requests
+
+The URL bar takes `{{variables}}`, and query parameters are editable beside it — edit either and the other follows. Headers are one `Name: value` per line, with `#` to switch one off.
+
+### Variables and environments
+
+Variables come from three places, each overriding the one before:
+
+1. the collection's defaults, in `collection.yaml`
+2. the environment you pick (`environments/*.yaml`), or one of the project's own `.env` files
+3. `--var name=value` on the command line
+
+A project's `.env`, `.env.local`, `.env.staging` and so on appear in the environment picker after Courier's own environments. They are read, never written: Courier will not edit your `.env`, and editing it yourself updates the open request straight away. `.env.example` and friends are skipped.
+
+Template functions work anywhere a variable does: `{{ uuid() }}`, `{{ timestamp() }}`, `{{ now() }}`.
+
+### Secrets
+
+Collections store secret **names**; the values live in your desktop keyring (GNOME Keyring, KWallet, KeePassXC), or in an encrypted file when there is no keyring. A secret is referenced like any variable, `{{api_token}}`, and is only resolved when a request is actually sent.
+
+Paste a token into a header and Courier offers to move it into a secret for you. Imports do it automatically. There is a test in the suite whose whole job is to fail if a secret value ever reaches a file.
+
+### Auth
+
+Set auth on a **request**, a **folder** or the **collection**; anything below inherits it unless it says otherwise.
+
+| Kind | Notes |
 | --- | --- |
-| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Send the request |
-| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save the request or environment |
-| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
+| Basic, Bearer, API key | Header or query parameter |
+| **Digest** | The request goes out twice: once for the challenge, then signed. MD5 and SHA-256, with or without `qop` |
+| **OAuth 2.0** | Client credentials, authorization code with PKCE (opens your browser, catches the redirect on a loopback port), device code. Tokens are cached in the keyring and refreshed before they expire |
+| **JWT** | Signed per request from your claims: HS256/384/512 with a shared secret, RS256/384/512 or ES256 with a PEM private key. Claims take `{{variables}}` |
+| **AWS Signature v4** | AWS and the S3-compatible services (MinIO, R2, B2), including session tokens |
 
-### Digest
+### Bodies and uploads
 
-**Digest** takes a username and password like Basic, but the request goes out twice: once to collect the server's challenge, then signed with it. MD5 and SHA-256 are both handled, with or without `qop`, so old and new servers work.
-
-### JWT and AWS Signature v4
-
-**JWT** signs a token per request from your claims and a key: HS256/384/512 with a shared secret, RS256/384/512 or ES256 with a PEM private key. Claims and extra header fields are JSON and take `{{variables}}`, so `{"sub": "{{user_id}}"}` works, and the prefix (`Bearer` by default) is yours to change.
-
-**AWS Signature v4** signs for AWS and anything S3-compatible — MinIO, R2, B2. Give it an access key, secret key, region and service, plus a session token for temporary credentials. It signs the finished request, so the URL, query, headers and body are all covered.
-
-### OAuth 2.0
-
-Pick **OAuth 2.0** on any auth row — collection, folder or request — choose a grant, and fill in the URLs, client ID and secret, scope and audience. **Get a token** fetches one now; **Forget token** throws it away.
-
-- **Client credentials** signs in as the application, with no browser.
-- **Authorization code** opens your browser, uses PKCE, and catches the redirect on a loopback port — register `http://127.0.0.1` as a redirect URI with your provider; the port changes each time, which is what loopback redirects are for.
-- **Device code** shows a short code and opens the page to type it on, then waits. Put the device authorization URL in the second field.
-
-Tokens are kept in the keyring, keyed by a fingerprint of those settings, and refreshed shortly before they expire (spending the refresh token when there is one), so a token survives a restart and never reaches a file.
-
-### gRPC
-
-New request → **New gRPC call**. Point it at `grpc://host:port` (or `grpcs://` for TLS) and Courier reads what the server offers — through the server's own reflection service, or from `.proto` files you name, one per line, relative to the project. Pick a method, write the message as JSON, and send: unary calls answer once, streaming calls fill the message timeline as replies arrive, and the closing status and trailers appear at the end. Headers are sent as metadata. Nothing is generated ahead of time and `protoc` isn't needed.
-
-### Where the time went
-
-The **Timing** tab, beside Body and Headers, breaks each response down: DNS, connecting (TCP and the TLS handshake), waiting for the server, and downloading the body, laid out as a waterfall with the total, the address it reached, the body size, and whether the connection was opened or reused. `courier send` prints the same breakdown on stderr.
-
-### Reading responses
-
-The response pane follows the content type. JSON is pretty-printed and filtered with JSONPath, as before. XML and SOAP arrive indented and filter with a small XPath — `//entry/title/text()`, `//entry[2]/@id`, `*` for any element, namespaces ignored. Images render inline. HTML shows its source with **Open in browser**. Anything else that isn't text shows as a hex dump. **Save body…** writes the bytes exactly as they arrived to a file you pick.
-
-### Paste a curl command anywhere
-
-Paste one into the URL bar and it fills the open request — method, URL, headers and body — keeping its name. Paste it anywhere else in the window (`ctrl-v` outside a text field) and it becomes a new request next to the one you have open, with any credentials it carries hoisted into secrets. The import dialog is still in the collection menu for when you'd rather paste into a box.
-
-### Tabs
-
-Each request you open gets a tab; opening one that's already open moves to it. `ctrl-w` closes the current tab, `ctrl-tab` and `ctrl-shift-tab` move between them, and the strip only appears once a second request is open. Tabs come back where you left them after a restart, and a tab whose request is renamed or moved follows it.
-
-### Speed and size
-
-Measured on a release build (Arch Linux, Hyprland): **42 MB** binary, **~90 ms** from launching to a window on screen, **~100 MB** resident once idle. A collection of 2,000 requests draws its sidebar in about 18 ms a frame, because only the rows on screen are built.
-
-### Keyboard
-
-`ctrl-1` moves to the sidebar, where the arrow keys walk the tree — right opens a folder or steps into it, left closes it or steps out, Enter opens the request and hands the keyboard to the URL. `ctrl-2` and `ctrl-3` jump to the URL and the body, `ctrl-tab` moves between tabs. Press **F1** for the shortcuts sheet, which lists what is bound right now. Every shortcut can be changed in `keymap.yaml` in your config directory (`~/.config/courier/keymap.yaml`) — one line per action, `""` to unbind it — and **Edit keymap.yaml** in the sheet writes a commented starting point and opens it.
-
-### Git awareness
-
-When a project is in git, the sidebar marks what differs from the last commit — `+` new, `●` changed, `−` deleted — folders and collections carry a dot when something inside them changed, and the branch shows in the header. **Show changes** on a request opens its diff against HEAD. It's read-only: Courier runs `git` to look, and committing stays in your own tools.
-
-### Exporting
-
-Right-click a collection to export it as a **Postman collection** (v2.1, the format most tools read) or an **OpenAPI 3.1 skeleton** — paths, methods, path and query parameters, and the bodies you send as examples with a rough schema, ready to fill in. Right-click a request for **Export history as HAR**, which writes its saved responses with their timing breakdowns, so you can hand someone exactly what happened. Secret values never leave the keyring: exports carry the `{{names}}` and nothing else.
-
-### Importing from elsewhere
-
-New project (or **Import here** on a collection) takes a Postman collection, an OpenAPI or AsyncAPI document, an **Insomnia** export (v4 JSON or v5 YAML, with folders, environments and auth), or a **HAR** recording from your browser's dev tools. A HAR becomes one request per method and path — the same call recorded twenty times collapses into one — with the browser's own headers and cookies left out, the first host lifted into `base_url`, and recorded tokens moved into secrets rather than into the files. Anything that couldn't be carried across is reported.
-
-### .env files as environments
-
-A project's `.env`, `.env.local`, `.env.staging` and friends appear in the environment picker after the collection's own environments, and `{{API_URL}}` resolves from whichever you pick. They're read, never written: Courier doesn't edit them, and the environment manager stays on Courier's own files. Editing a `.env` in your editor updates Courier straight away, and `.env.example` and friends are left out, since they hold placeholders rather than values.
-
-### Finding and arranging requests
-
-The box at the top of the sidebar filters as you type, matching a request's name, method or URL — `post pets` and `/v2/` both work — and opens whatever holds a match. Drag a request onto a folder or collection to move it there, or onto another request to drop it straight after that one; the order is saved with the requests, so it survives a reload and a checkout.
-
-### File uploads
-
-Pick a body kind next to **Body**: JSON, XML, text, form, **multipart form** or **file**.
+Pick a body kind beside **Body**: JSON, XML, text, form, **multipart** or **file**.
 
 - Multipart takes one part per line — `name: value`, or `name: @photos/rex.png` for a file, `#` to leave one out. **Choose a file…** adds a line for you.
 - File sends that file's bytes as the whole body, with the content type guessed from its name.
-- Paths are relative to the project folder, so a collection still works on someone else's machine, and `{{variables}}` work in part values. Copy as curl gives you `-F` and `--data-binary` to match.
+- Paths are relative to the project, so a collection still works on someone else's machine.
 
-### Runs
+### Request settings
 
-Right-click a collection or a folder and choose **Run**. The requests go out in sidebar order, sharing responses so `{{ response() }}` chaining works, and each one's status, time and checks appear as it finishes. **Stop on failure** stops at the first failed check, **Stop** ends a run in progress, and clicking a result opens that request with the response the run got. WebSocket and event-stream requests are skipped.
+Per request, folder or collection: follow redirects and how many, timeout, TLS verification, an extra CA certificate, a client certificate for mTLS, proxy (or none), and **HTTP over a Unix socket** for Docker, Podman and systemd:
 
-### From a terminal or CI
+```
+unix:///run/docker.sock:/v1.45/containers/json
+```
 
-The same binary sends requests and runs checks without a window:
+---
+
+## Sending
+
+### Reading responses
+
+The response pane follows the content type.
+
+- **JSON** — pretty-printed, filtered with JSONPath (`$.items[0].id`), and **Add check** turns the filtered value into an assertion.
+- **XML** — indented, filtered with a small XPath: `//entry/title/text()`, `//entry[2]/@id`, `*` for any element. Namespace prefixes are ignored.
+- **Images** render inline; **HTML** shows its source with **Open in browser**; anything else binary shows as a hex dump.
+- **Save body…** writes the exact bytes to a file.
+
+Every request keeps a **history** of its recent responses, and the last one is restored when you reopen it.
+
+### Where the time went
+
+The **Timing** tab breaks a response down into DNS, connecting (TCP and the TLS handshake), waiting for the server and downloading, as a waterfall, with the address reached and the body size. A request that reused a pooled connection says so.
+
+### Checks
+
+Assertions live with the request, one per line, `#` to switch one off:
+
+```
+status == 200
+$.id exists
+$.items[0].name == Rex
+header Content-Type contains json
+time < 500
+```
+
+They run after every send, pass or fail in their own tab, and run identically in the CLI.
+
+### Chaining requests
+
+Use another request's response anywhere a variable goes:
+
+```
+{{ response("Login", "$.token") }}
+{{ response_header("Login", "Location") }}
+```
+
+Courier sends that request first if it has no response yet. Add `"always"` to send it every time, or a maximum age like `"5m"`. Right-click a request for **Copy response reference**.
+
+### Running a folder or collection
+
+Right-click a collection or folder → **Run**. Requests go out in sidebar order, sharing responses so chaining works, and each result appears as it finishes with its status, time and checks. **Stop on failure** bails at the first failure; clicking a result opens that request with the response the run got.
+
+---
+
+## Protocols
+
+### Server-Sent Events
+
+A request that asks for `text/event-stream` gets a live event list with filtering, the last event id, and reconnect.
+
+### WebSockets
+
+A `ws://` or `wss://` URL gets a message timeline with everything sent and received, plus saved message templates to send again.
+
+### GraphQL
+
+A query editor with variables and an operation name. Courier introspects the schema, then offers autocomplete, hover documentation, a browsable schema tab, and underlines fields the schema doesn't have.
+
+### gRPC
+
+New request → **New gRPC call**, then point it at `grpc://host:port` (`grpcs://` for TLS). Courier reads what the server offers through its **reflection** service, or from **`.proto` files** you name (one per line, relative to the project). `protoc` is not needed and nothing is generated ahead of time.
+
+Pick a method, write the message as JSON, send. Unary calls answer once; streaming calls — server, client or both ways — fill the message timeline as replies arrive, with the closing status and trailers at the end. Headers go out as metadata.
+
+---
+
+## Moving around
+
+### Tabs
+
+Each request you open gets a tab; opening one that's already open moves to it. Tabs come back after a restart and follow a request through a rename.
+
+### Finding and arranging requests
+
+The box above the sidebar filters as you type, matching a request's name, method or URL. Drag a request onto a folder or collection to move it, or onto another request to place it after that one — the order is saved with the requests, so it survives a checkout.
+
+### Keyboard
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Send |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save |
+| <kbd>Ctrl</kbd>+<kbd>N</kbd> | New scratchpad request |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> | Command palette |
+| <kbd>Ctrl</kbd>+<kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Sidebar · URL · body |
+| <kbd>Ctrl</kbd>+<kbd>Tab</kbd> · <kbd>Ctrl</kbd>+<kbd>W</kbd> | Next tab · close tab |
+| <kbd>F1</kbd> | Shortcuts sheet |
+
+In the sidebar the arrow keys walk the tree: right opens a folder or steps into it, left closes it or steps out, <kbd>Enter</kbd> opens a request. Every shortcut can be rebound in `~/.config/courier/keymap.yaml`.
+
+### Git awareness
+
+When the project is in git, the sidebar marks what differs from the last commit — `+` new, `●` changed, `−` deleted — folders carry a dot when something inside them changed, and the branch shows in the header. **Show changes** opens a request's diff against HEAD. Courier only reads; committing stays in your own tools.
+
+---
+
+## From a terminal or CI
+
+The same binary sends requests and runs checks without a window.
 
 ```sh
-courier list                                  # requests in the project here
-courier send auth/login -e staging            # body to stdout, status and checks to stderr
+courier list                                   # requests in the project here
+courier envs
+courier send auth/login -e staging             # body to stdout, status and checks to stderr
 courier run -e staging --var base_url=http://localhost:8080
 courier run smoke --bail --report junit -o report.xml
 courier completions fish > ~/.config/fish/completions/courier.fish
 ```
 
-`run` sends a folder (or the whole collection) in order, so `response()` chaining works, and exits 1 if any check fails or a request errors. Secrets come from the keyring; in CI set `COURIER_SECRET_<NAME>` (e.g. `COURIER_SECRET_API_TOKEN`) and pass `--no-keyring`. Cookies set during a run carry over to later requests but aren't saved. WebSocket and event-stream requests are skipped.
+`run` sends a folder, or the whole collection, in order, with chaining and checks. **Exit codes:** 0 when everything passed, 1 when a check failed or a request errored, 2 for setup mistakes such as an unknown environment.
 
-## What lives where
+Secrets come from the keyring. In CI, set `COURIER_SECRET_<NAME>` (for example `COURIER_SECRET_API_TOKEN`) and pass `--no-keyring`. Cookies set during a run carry over to later requests but aren't saved. WebSocket, SSE and gRPC requests are skipped by a run.
+
+## Importing
+
+**New project** (or **Import here** on an existing collection) starts from what you already have:
+
+| From | What comes across |
+| --- | --- |
+| **Postman** collection | Requests, folders, variables, auth, scripts reported as warnings |
+| **OpenAPI 3 / Swagger 2** | A request per operation with example bodies, an environment per server |
+| **AsyncAPI 2/3** | A WebSocket request per channel with message templates |
+| **Insomnia** v4 or v5 | Requests, folders, environments, parameters, auth |
+| **HAR** recording | One request per method and path, browser noise and cookies left out, first host lifted into `base_url` |
+| **curl** | Paste anywhere: into the URL bar it fills the open request, elsewhere it makes a new one |
+
+Literal tokens found on the way are moved into secrets. Anything that couldn't be carried across is reported rather than dropped silently.
+
+## Exporting
+
+Right-click a collection to export it as a **Postman collection (v2.1)** or an **OpenAPI 3.1 skeleton** — paths, parameters and your bodies as examples with a rough schema. Right-click a request for **Export history as HAR**, which includes the timing breakdowns. Secret values never leave the keyring: exports carry the `{{names}}`.
+
+---
+
+## Files on disk
 
 ```text
 my-api/.courier/                 committed with the project
@@ -148,9 +252,10 @@ my-api/.courier/                 committed with the project
   users/list-users.yaml          one file per request; folders are directories
 
 ~/.config/courier/settings.yaml  language, theme, response history (per machine)
-~/.local/state/courier/          open projects, active environments
-~/.cache/courier/responses/      last response per request (sensitive headers masked)
-~/.local/share/courier/          encrypted secrets fallback, only without a keyring
+~/.config/courier/keymap.yaml    your shortcut changes
+~/.local/state/courier/          open projects, open tabs, active environments
+~/.cache/courier/responses/      last responses per request (sensitive headers masked)
+~/.local/share/courier/          scratchpad, and the encrypted secrets fallback
 ```
 
 A request file:
@@ -166,20 +271,23 @@ body:
   type: json
   content: |-
     { "name": "Ada" }
+checks:
+- status == 201
+- $.id exists
 ```
-
-Variables use `{{name}}`. An environment overrides the collection defaults by name; secrets are resolved from the keyring only when a request is sent.
 
 ## Development
 
 ```sh
-cargo run -- ~/Work/my-api
-cargo test
-cargo clippy --all-targets
-cargo fmt
+make            # list every target
+make run        # cargo run
+make test       # the whole workspace
+make check      # fmt, clippy and tests, as CI would
 ```
 
-Tests include headless UI tests that drive the real app (clicks, typing, dialogs) without a display. `COURIER_THEME_DIR=/usr/share/omarchy/themes/<name>` previews an Omarchy theme without changing your desktop.
+See [AGENTS.md](AGENTS.md) for using Courier from scripts and coding agents, and [CLAUDE.md](CLAUDE.md) for how the code is laid out.
+
+Tests include headless UI tests that drive the real app — clicks, typing, dialogs — with no display, and real local servers for HTTP, TLS, WebSocket and gRPC. `COURIER_THEME_DIR=/usr/share/omarchy/themes/<name> make run` previews an Omarchy theme without changing your desktop.
 
 ## License
 
